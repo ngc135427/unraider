@@ -1,4 +1,4 @@
-package com.example.unraider
+package com.ngc.unraider
 
 import android.content.Context
 import android.content.ContentUris
