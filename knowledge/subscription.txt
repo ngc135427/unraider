@@ -1,0 +1,398 @@
+subscription Subscription($path: String!, $operationId: ID!) {
+  displaySubscription {
+    id
+    case {
+      id
+      url
+      icon
+      error
+      base64
+    }
+    theme
+    unit
+    scale
+    tabs
+    resize
+    wwn
+    total
+    usage
+    text
+    warning
+    critical
+    hot
+    max
+    locale
+  }
+  notificationAdded {
+    id
+    title
+    subject
+    description
+    importance
+    link
+    type
+    timestamp
+    formattedTimestamp
+  }
+  notificationsOverview {
+    unread {
+      info
+      warning
+      alert
+      total
+    }
+    archive {
+      info
+      warning
+      alert
+      total
+    }
+  }
+  notificationsWarningsAndAlerts {
+    id
+    title
+    subject
+    description
+    importance
+    link
+    type
+    timestamp
+    formattedTimestamp
+  }
+  ownerSubscription {
+    username
+    url
+    avatar
+  }
+  serversSubscription {
+    id
+    owner {
+      id
+      username
+      url
+      avatar
+    }
+    guid
+    apikey
+    name
+    comment
+    status
+    wanip
+    lanip
+    localurl
+    remoteurl
+  }
+  parityHistorySubscription {
+    date
+    duration
+    speed
+    status
+    errors
+    progress
+    correcting
+    paused
+    running
+  }
+  arraySubscription {
+    id
+    state
+    capacity {
+      kilobytes {
+        free
+        used
+        total
+      }
+      disks {
+        free
+        used
+        total
+      }
+    }
+    boot {
+      id
+      idx
+      name
+      device
+      size
+      status
+      rotational
+      temp
+      numReads
+      numWrites
+      numErrors
+      fsSize
+      fsFree
+      fsUsed
+      exportable
+      type
+      warning
+      critical
+      fsType
+      comment
+      format
+      transport
+      color
+      isSpinning
+    }
+    bootDevices {
+      id
+      idx
+      name
+      device
+      size
+      status
+      rotational
+      temp
+      numReads
+      numWrites
+      numErrors
+      fsSize
+      fsFree
+      fsUsed
+      exportable
+      type
+      warning
+      critical
+      fsType
+      comment
+      format
+      transport
+      color
+      isSpinning
+    }
+    parities {
+      id
+      idx
+      name
+      device
+      size
+      status
+      rotational
+      temp
+      numReads
+      numWrites
+      numErrors
+      fsSize
+      fsFree
+      fsUsed
+      exportable
+      type
+      warning
+      critical
+      fsType
+      comment
+      format
+      transport
+      color
+      isSpinning
+    }
+    parityCheckStatus {
+      date
+      duration
+      speed
+      status
+      errors
+      progress
+      correcting
+      paused
+      running
+    }
+    disks {
+      id
+      idx
+      name
+      device
+      size
+      status
+      rotational
+      temp
+      numReads
+      numWrites
+      numErrors
+      fsSize
+      fsFree
+      fsUsed
+      exportable
+      type
+      warning
+      critical
+      fsType
+      comment
+      format
+      transport
+      color
+      isSpinning
+    }
+    caches {
+      id
+      idx
+      name
+      device
+      size
+      status
+      rotational
+      temp
+      numReads
+      numWrites
+      numErrors
+      fsSize
+      fsFree
+      fsUsed
+      exportable
+      type
+      warning
+      critical
+      fsType
+      comment
+      format
+      transport
+      color
+      isSpinning
+    }
+  }
+  dockerContainerStats {
+    id
+    cpuPercent
+    memUsage
+    memPercent
+    netIO
+    blockIO
+  }
+  logFile(path: $path) {
+    path
+    content
+    totalLines
+    startLine
+  }
+  systemMetricsCpu {
+    id
+    percentTotal
+    cpus {
+      percentTotal
+      percentUser
+      percentSystem
+      percentNice
+      percentIdle
+      percentIrq
+      percentGuest
+      percentSteal
+    }
+  }
+  systemMetricsCpuTelemetry {
+    id
+    totalPower
+    power
+    temp
+  }
+  systemMetricsMemory {
+    id
+    total
+    used
+    free
+    available
+    active
+    buffcache
+    percentTotal
+    swapTotal
+    swapUsed
+    swapFree
+    percentSwapTotal
+  }
+  systemMetricsNetwork {
+    id
+    name
+    operstate
+    bytesReceived
+    bytesSent
+    packetsReceived
+    packetsSent
+    receiveErrors
+    transmitErrors
+    receiveDropped
+    transmitDropped
+    rxSec
+    txSec
+    utilizationPercent
+    lastUpdated
+  }
+  systemMetricsTemperature {
+    id
+    sensors {
+      id
+      name
+      type
+      location
+      current {
+        value
+        unit
+        timestamp
+        status
+      }
+      min {
+        value
+        unit
+        timestamp
+        status
+      }
+      max {
+        value
+        unit
+        timestamp
+        status
+      }
+      warning
+      critical
+      history {
+        value
+        unit
+        timestamp
+        status
+      }
+    }
+    summary {
+      average
+      hottest {
+        id
+        name
+        type
+        location
+        warning
+        critical
+      }
+      coolest {
+        id
+        name
+        type
+        location
+        warning
+        critical
+      }
+      warningCount
+      criticalCount
+    }
+  }
+  upsUpdates {
+    id
+    name
+    model
+    status
+    battery {
+      chargeLevel
+      estimatedRuntime
+      health
+    }
+    power {
+      inputVoltage
+      outputVoltage
+      loadPercentage
+      nominalPower
+      currentPower
+    }
+  }
+  pluginInstallUpdates(operationId: $operationId) {
+    operationId
+    status
+    output
+    timestamp
+  }
+}

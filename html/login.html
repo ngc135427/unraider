@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unraid API 登录页面设计</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+        }
+        
+        body {
+            display: flex;
+            background-color: #f5f7fa;
+            color: #333;
+            min-height: 100vh;
+        }
+        
+        .container {
+            display: flex;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .login-container {
+            width: 375px;
+            height: 667px;
+            background: linear-gradient(135deg, #6e8efb, #a777e3);
+            border-radius: 30px;
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            position: relative;
+            margin-right: 40px;
+            flex-shrink: 0;
+        }
+        
+        .login-header {
+            text-align: center;
+            padding: 50px 0 30px;
+        }
+        
+        .login-header h1 {
+            color: white;
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        
+        .login-header p {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 16px;
+        }
+        
+        .login-form {
+            background-color: white;
+            border-radius: 25px 25px 0 0;
+            padding: 40px 30px;
+            height: calc(100% - 180px);
+        }
+        
+        .form-group {
+            margin-bottom: 25px;
+            position: relative;
+        }
+        
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 15px;
+            border: 1px solid #e1e5eb;
+            border-radius: 12px;
+            font-size: 16px;
+            transition: all 0.3s;
+            background-color: #f9fafc;
+        }
+        
+        /* 协议和域名输入框样式 */
+        .protocol-domain-group {
+            display: flex;
+            margin-bottom: 25px;
+            position: relative;
+        }
+        
+        .protocol-selector {
+            width: 110px;
+            background-color: #f9fafc;
+            border: 1px solid #e1e5eb;
+            border-radius: 12px 0 0 12px;
+            padding: 15px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: #666;
+        }
+        
+        .protocol-selector:hover {
+            background-color: #f0f2f5;
+        }
+        
+        .protocol-selector.active {
+            border-color: #a777e3;
+            box-shadow: 0 0 0 3px rgba(167, 119, 227, 0.2);
+        }
+        
+        .domain-input {
+            flex: 1;
+            padding: 15px;
+            border: 1px solid #e1e5eb;
+            border-left: none;
+            border-radius: 0 12px 12px 0;
+            font-size: 16px;
+            transition: all 0.3s;
+            background-color: #f9fafc;
+        }
+        
+        .domain-input:focus {
+            outline: none;
+            border-color: #a777e3;
+            box-shadow: 0 0 0 3px rgba(167, 119, 227, 0.2);
+            background-color: white;
+        }
+        
+        .protocol-domain-group .error-message {
+            color: #ff4d4f;
+            font-size: 12px;
+            margin-top: 5px;
+            display: none;
+        }
+        
+        .protocol-domain-group.error .domain-input {
+            border-color: #ff4d4f;
+            background-color: #fff2f0;
+        }
+        
+        .protocol-domain-group.error .error-message {
+            display: block;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #a777e3;
+            box-shadow: 0 0 0 3px rgba(167, 119, 227, 0.2);
+            background-color: white;
+        }
+        
+        .form-group .icon {
+            position: absolute;
+            right: 15px;
+            top: 38px;
+            color: #a0a8b9;
+        }
+        
+        .remember-forgot {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .remember-me {
+            display: flex;
+            align-items: center;
+        }
+        
+        .remember-me input {
+            margin-right: 8px;
+            accent-color: #a777e3;
+        }
+        
+        .forgot-password {
+            color: #6e8efb;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .login-button {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #6e8efb, #a777e3);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 5px 15px rgba(110, 142, 251, 0.4);
+        }
+        
+        .login-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(110, 142, 251, 0.6);
+        }
+        
+        .login-button:active {
+            transform: translateY(0);
+        }
+        
+
+        
+        .design-notes {
+            flex: 1;
+            padding: 20px;
+            background-color: white;
+            border-radius: 20px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+        }
+        
+        .design-notes h2 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            color: #333;
+            border-bottom: 2px solid #f0f2f5;
+            padding-bottom: 10px;
+        }
+        
+        .design-section {
+            margin-bottom: 25px;
+        }
+        
+        .design-section h3 {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #6e8efb;
+        }
+        
+        .design-section p {
+            line-height: 1.6;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .design-section ul {
+            padding-left: 20px;
+            margin-bottom: 10px;
+        }
+        
+        .design-section li {
+            margin-bottom: 5px;
+            line-height: 1.5;
+        }
+        
+        .color-palette {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        .color-box {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            position: relative;
+        }
+        
+        .color-box::after {
+            content: attr(data-color);
+            position: absolute;
+            bottom: -20px;
+            left: 0;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        
+        .primary-gradient {
+            background: linear-gradient(135deg, #6e8efb, #a777e3);
+        }
+        
+        .white-color {
+            background-color: white;
+            border: 1px solid #e1e5eb;
+        }
+        
+        .light-bg {
+            background-color: #f9fafc;
+            border: 1px solid #e1e5eb;
+        }
+        
+        .text-dark {
+            background-color: #333;
+        }
+        
+        .text-medium {
+            background-color: #666;
+        }
+        
+        .text-light {
+            background-color: #8a94a6;
+        }
+        
+        /* 响应式设计 */
+        @media (max-width: 900px) {
+            .container {
+                flex-direction: column;
+                align-items: center;
+            }
+            
+            .login-container {
+                margin-right: 0;
+                margin-bottom: 30px;
+            }
+        }
+        
+        /* 添加图标字体 */
+        @font-face {
+            font-family: 'Material Icons';
+            font-style: normal;
+            font-weight: 400;
+            src: url(https://fonts.gstatic.com/s/materialicons/v139/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2) format('woff2');
+        }
+        
+        .material-icons {
+            font-family: 'Material Icons';
+            font-weight: normal;
+            font-style: normal;
+            font-size: 24px;
+            line-height: 1;
+            letter-spacing: normal;
+            text-transform: none;
+            display: inline-block;
+            white-space: nowrap;
+            word-wrap: normal;
+            direction: ltr;
+            -webkit-font-feature-settings: 'liga';
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        /* 添加动画效果 */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .login-form {
+            animation: fadeIn 0.6s ease-out;
+        }
+        
+        .form-group {
+            animation: fadeIn 0.6s ease-out;
+            animation-fill-mode: both;
+        }
+        
+        .form-group:nth-child(1) {
+            animation-delay: 0.1s;
+        }
+        
+        .form-group:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        
+        .remember-forgot {
+            animation: fadeIn 0.6s ease-out;
+            animation-delay: 0.3s;
+            animation-fill-mode: both;
+        }
+        
+        .login-button {
+            animation: fadeIn 0.6s ease-out;
+            animation-delay: 0.4s;
+            animation-fill-mode: both;
+        }
+        
+        /* 表单验证样式 */
+        .form-group .error-message {
+            color: #ff4d4f;
+            font-size: 12px;
+            margin-top: 5px;
+            display: none;
+        }
+        
+        .form-group.error input {
+            border-color: #ff4d4f;
+            background-color: #fff2f0;
+        }
+        
+        .form-group.error .error-message {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 登录页面原型 -->
+        <div class="login-container">
+            <div class="login-header">
+                <h1>连接 Unraid</h1>
+                <p>使用 Unraid WebGUI 账号登录</p>
+            </div>
+            <div class="login-form">
+                <div class="form-group">
+                    <label for="domain">服务器地址</label>
+                    <div class="protocol-domain-group">
+                        <div class="protocol-selector" id="protocolSelector">http://<span class="material-icons" style="font-size: 18px; margin-left: 5px;">arrow_drop_down</span></div>
+                        <input type="text" id="domain" class="domain-input" placeholder="请输入IP地址或域名">
+                    </div>
+                    <div class="error-message">请输入有效的IP地址或域名</div>
+                </div>
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" value="root" placeholder="root">
+                    <span class="material-icons icon">person</span>
+                    <div class="error-message">Unraid WebGUI 仅支持 root 用户登录</div>
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" placeholder="请输入 root 密码">
+                    <span class="material-icons icon">lock</span>
+                    <div class="error-message">请输入密码</div>
+                </div>
+                <div class="remember-forgot">
+                    <div class="remember-me">
+                        <input type="checkbox" id="remember">
+                        <label for="remember">记住我</label>
+                    </div>
+                    <a href="server_info.html" class="forgot-password">进入原型</a>
+                </div>
+                <button class="login-button" id="loginBtn">登录</button>
+            </div>
+        </div>
+        
+        <!-- 设计说明 -->
+        <div class="design-notes">
+            <h2>移动端登录页面设计说明</h2>
+            
+            <div class="design-section">
+                <h3>设计理念</h3>
+                <p>本设计采用现代简约风格，以渐变色为主视觉元素，创造出既美观又专业的登录体验。设计注重用户体验，确保交互流畅直观。</p>
+            </div>
+            
+            <div class="design-section">
+                <h3>色彩方案</h3>
+                <p>采用紫蓝渐变作为主色调，传达科技感与信任感，同时保持视觉吸引力：</p>
+                <div class="color-palette">
+                    <div class="color-box primary-gradient" data-color="渐变主色"></div>
+                    <div class="color-box white-color" data-color="白色"></div>
+                    <div class="color-box light-bg" data-color="浅灰背景"></div>
+                    <div class="color-box text-dark" data-color="深色文本"></div>
+                    <div class="color-box text-medium" data-color="中色文本"></div>
+                    <div class="color-box text-light" data-color="浅色文本"></div>
+                </div>
+            </div>
+            
+            <div class="design-section">
+                <h3>交互设计</h3>
+                <ul>
+                    <li><strong>表单验证</strong>：实时反馈输入错误，提高用户体验</li>
+                    <li><strong>按钮状态</strong>：悬停和点击效果增强交互感知</li>
+                    <li><strong>动画效果</strong>：表单元素顺序淡入，增加页面层次感</li>
+                    <li><strong>输入框焦点</strong>：聚焦时边框变色并添加阴影效果</li>
+                </ul>
+            </div>
+            
+            <div class="design-section">
+                <h3>UI元素设计</h3>
+                <ul>
+                    <li><strong>圆角设计</strong>：采用大圆角增强现代感和友好度</li>
+                    <li><strong>阴影效果</strong>：适当的阴影提供层次感和立体感</li>
+                    <li><strong>图标使用</strong>：Material Icons提供直观的视觉提示</li>
+                    <li><strong>间距控制</strong>：合理的间距确保视觉舒适度</li>
+                </ul>
+            </div>
+            
+            <div class="design-section">
+                <h3>响应式设计</h3>
+                <p>虽然主要针对移动端设计，但页面也兼容平板和桌面设备，在不同尺寸的屏幕上都能提供良好的用户体验。</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 表单验证交互
+        document.addEventListener('DOMContentLoaded', function() {
+            const protocolSelector = document.getElementById('protocolSelector');
+            const domainInput = document.getElementById('domain');
+            const usernameInput = document.getElementById('username');
+            const passwordInput = document.getElementById('password');
+            const loginBtn = document.getElementById('loginBtn');
+            
+            // 协议切换功能
+            let currentProtocol = 'http://';
+            protocolSelector.addEventListener('click', function() {
+                if (currentProtocol === 'http://') {
+                    currentProtocol = 'https://';
+                } else {
+                    currentProtocol = 'http://';
+                }
+                this.innerHTML = currentProtocol + '<span class="material-icons" style="font-size: 18px; margin-left: 5px;">arrow_drop_down</span>';
+                this.classList.add('active');
+                setTimeout(() => {
+                    this.classList.remove('active');
+                }, 300);
+            });
+            
+            // 域名验证
+            domainInput.addEventListener('blur', function() {
+                const parent = this.parentElement.parentElement;
+                if (this.value.trim() === '') {
+                    parent.classList.add('error');
+                } else {
+                    parent.classList.remove('error');
+                }
+            });
+            
+            // 用户名验证
+            usernameInput.addEventListener('blur', function() {
+                const parent = this.parentElement;
+                if (this.value.trim() !== 'root') {
+                    parent.classList.add('error');
+                } else {
+                    parent.classList.remove('error');
+                }
+            });
+            
+            // 密码验证
+            passwordInput.addEventListener('blur', function() {
+                const parent = this.parentElement;
+                if (this.value.trim() === '') {
+                    parent.classList.add('error');
+                } else {
+                    parent.classList.remove('error');
+                }
+            });
+            
+            // 输入框聚焦效果
+            const inputs = document.querySelectorAll('input');
+            inputs.forEach(input => {
+                input.addEventListener('focus', function() {
+                    if (this.classList.contains('domain-input')) {
+                        this.parentElement.parentElement.classList.remove('error');
+                    } else {
+                        this.parentElement.classList.remove('error');
+                    }
+                });
+            });
+            
+            // 登录按钮点击效果
+            loginBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                let isValid = true;
+                
+                // 验证域名
+                if (domainInput.value.trim() === '') {
+                    domainInput.parentElement.parentElement.classList.add('error');
+                    isValid = false;
+                }
+                
+                // 验证用户名
+                if (usernameInput.value.trim() !== 'root') {
+                    usernameInput.parentElement.classList.add('error');
+                    isValid = false;
+                }
+                
+                // 验证密码
+                if (passwordInput.value.trim() === '') {
+                    passwordInput.parentElement.classList.add('error');
+                    isValid = false;
+                }
+                
+                if (isValid) {
+                    // 模拟 WebGUI 连接成功
+                    this.innerHTML = '<span class="material-icons">check</span> 连接成功';
+                    this.style.backgroundColor = '#52c41a';
+                    
+                    // 进入完整管理台原型
+                    setTimeout(() => {
+                        window.location.href = 'server_info.html';
+                    }, 700);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

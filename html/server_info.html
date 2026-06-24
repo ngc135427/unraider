@@ -1,0 +1,1492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unraid 移动管理台原型</title>
+    <style>
+        :root {
+            --primary: #6e8efb;
+            --secondary: #a777e3;
+            --accent: #ff8a00;
+            --success: #2fbd72;
+            --danger: #e74c3c;
+            --warning: #f5a623;
+            --ink: #263244;
+            --text: #596579;
+            --muted: #8a94a6;
+            --line: #e5e9f2;
+            --soft-line: #eef1f7;
+            --surface: #ffffff;
+            --soft: #f7f9fc;
+            --shadow: 0 18px 40px rgba(37, 48, 68, 0.14);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+            letter-spacing: 0;
+        }
+
+        body {
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background:
+                radial-gradient(circle at 15% 10%, rgba(255, 138, 0, 0.10), transparent 26%),
+                linear-gradient(135deg, #eef3fb 0%, #f8fbff 48%, #f4f1fb 100%);
+            color: var(--ink);
+        }
+
+        button,
+        input {
+            font: inherit;
+        }
+
+        button {
+            border: none;
+            cursor: pointer;
+        }
+
+        .stage {
+            width: 100%;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 20px;
+        }
+
+        .phone {
+            width: 375px;
+            height: 667px;
+            position: relative;
+            overflow: hidden;
+            border-radius: 30px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            box-shadow: var(--shadow);
+        }
+
+        .phone::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background:
+                linear-gradient(160deg, rgba(255, 255, 255, 0.18), transparent 42%),
+                radial-gradient(circle at 85% 8%, rgba(255, 138, 0, 0.22), transparent 24%);
+            pointer-events: none;
+        }
+
+        .phone-header {
+            position: relative;
+            z-index: 2;
+            height: 104px;
+            padding: 24px 20px 14px;
+            display: grid;
+            grid-template-columns: 38px 1fr 38px;
+            align-items: start;
+            gap: 10px;
+            color: white;
+        }
+
+        .header-copy {
+            text-align: center;
+            min-width: 0;
+        }
+
+        .header-copy h1 {
+            font-size: 22px;
+            line-height: 1.2;
+            font-weight: 700;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .header-copy p {
+            margin-top: 6px;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.82);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .icon-button {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            color: white;
+            background: rgba(255, 255, 255, 0.16);
+            transition: transform 180ms ease, background 180ms ease;
+        }
+
+        .icon-button:hover {
+            transform: translateY(-1px);
+            background: rgba(255, 255, 255, 0.24);
+        }
+
+        .icon-button.is-hidden {
+            visibility: hidden;
+        }
+
+        .phone-content {
+            position: absolute;
+            z-index: 2;
+            top: 104px;
+            right: 0;
+            bottom: 58px;
+            left: 0;
+            overflow: hidden;
+            border-radius: 25px 25px 0 0;
+            background: var(--surface);
+        }
+
+        .scroll-view {
+            height: 100%;
+            overflow-y: auto;
+            padding: 22px 20px 28px;
+            scrollbar-width: thin;
+        }
+
+        .page {
+            display: none;
+        }
+
+        .page.active {
+            display: block;
+            animation: fadeIn 260ms ease-out both;
+        }
+
+        .nav-bar {
+            position: absolute;
+            z-index: 3;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            height: 58px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            border-top: 1px solid var(--soft-line);
+            background: rgba(255, 255, 255, 0.96);
+            backdrop-filter: blur(12px);
+        }
+
+        .nav-item {
+            display: grid;
+            place-items: center;
+            align-content: center;
+            gap: 2px;
+            color: var(--muted);
+            background: transparent;
+            font-size: 11px;
+            transition: color 180ms ease, background 180ms ease;
+        }
+
+        .nav-item .material-icons {
+            font-size: 21px;
+        }
+
+        .nav-item.active {
+            color: var(--primary);
+            background: linear-gradient(180deg, rgba(110, 142, 251, 0.08), transparent);
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .section-title h2 {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--ink);
+        }
+
+        .section-title span {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .hero-card,
+        .card,
+        .entity-card,
+        .stat-card,
+        .quick-card {
+            border: 1px solid var(--soft-line);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: 0 5px 14px rgba(73, 89, 122, 0.05);
+        }
+
+        .hero-card {
+            display: grid;
+            grid-template-columns: 1fr 98px;
+            gap: 14px;
+            padding: 15px;
+            margin-bottom: 18px;
+            background:
+                linear-gradient(145deg, rgba(110, 142, 251, 0.12), rgba(255, 255, 255, 0.92)),
+                var(--surface);
+        }
+
+        .eyebrow {
+            color: var(--primary);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .server-name {
+            margin-top: 4px;
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--ink);
+        }
+
+        .server-desc {
+            margin-top: 5px;
+            color: var(--text);
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+        }
+
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 24px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: var(--soft);
+            color: var(--text);
+            font-size: 11px;
+            font-weight: 600;
+            border: 1px solid var(--soft-line);
+            white-space: nowrap;
+        }
+
+        .chip.success {
+            color: #16884c;
+            background: #eaf8f0;
+            border-color: #ccefdc;
+        }
+
+        .chip.warning {
+            color: #9a6200;
+            background: #fff6e5;
+            border-color: #ffe0a8;
+        }
+
+        .chip.danger {
+            color: #b53124;
+            background: #fff0ee;
+            border-color: #ffd0ca;
+        }
+
+        .server-art {
+            width: 96px;
+            height: 108px;
+            border-radius: 14px;
+            display: grid;
+            place-items: center;
+            background: #161d2a;
+            position: relative;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+        }
+
+        .server-art[data-variant="silver"] {
+            background: linear-gradient(145deg, #566173, #222a36);
+        }
+
+        .server-art[data-variant="green"] {
+            background: linear-gradient(145deg, #16a085, #233d42);
+        }
+
+        .server-art svg {
+            width: 72px;
+            height: 82px;
+        }
+
+        .server-actions {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin-top: 2px;
+        }
+
+        .small-button,
+        .primary-button,
+        .ghost-button {
+            min-height: 36px;
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            white-space: nowrap;
+            transition: transform 180ms ease, box-shadow 180ms ease, border 180ms ease;
+        }
+
+        .small-button {
+            color: var(--primary);
+            background: white;
+            border: 1px solid var(--line);
+        }
+
+        .small-button.danger {
+            color: var(--danger);
+        }
+
+        .small-button:hover,
+        .primary-button:hover,
+        .ghost-button:hover {
+            transform: translateY(-1px);
+        }
+
+        .primary-button {
+            width: 100%;
+            min-height: 42px;
+            color: white;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            box-shadow: 0 8px 16px rgba(110, 142, 251, 0.24);
+        }
+
+        .ghost-button {
+            min-height: 34px;
+            padding: 0 10px;
+            color: var(--text);
+            background: var(--soft);
+            border: 1px solid var(--soft-line);
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .stat-card {
+            min-height: 88px;
+            padding: 12px;
+            display: grid;
+            align-content: space-between;
+            gap: 8px;
+        }
+
+        .stat-card .topline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .stat-card strong {
+            display: block;
+            color: var(--ink);
+            font-size: 20px;
+            line-height: 1.1;
+        }
+
+        .stat-card small {
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.35;
+        }
+
+        .progress {
+            width: 100%;
+            height: 7px;
+            overflow: hidden;
+            border-radius: 999px;
+            background: var(--soft-line);
+        }
+
+        .progress > span {
+            display: block;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+        }
+
+        .progress > span.warning {
+            background: linear-gradient(90deg, var(--accent), var(--warning));
+        }
+
+        .progress > span.success {
+            background: linear-gradient(90deg, #28b46e, #6bdc9d);
+        }
+
+        .metric-list,
+        .detail-list {
+            display: grid;
+            gap: 9px;
+        }
+
+        .metric-row,
+        .detail-row {
+            display: grid;
+            grid-template-columns: 28px 1fr auto;
+            align-items: center;
+            gap: 10px;
+            min-height: 42px;
+            color: var(--text);
+            font-size: 12px;
+        }
+
+        .metric-row .label,
+        .detail-row .label {
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .metric-row .value,
+        .detail-row .value {
+            color: var(--muted);
+            font-size: 11px;
+            text-align: right;
+            max-width: 108px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .mini-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            display: grid;
+            place-items: center;
+            color: var(--primary);
+            background: rgba(110, 142, 251, 0.12);
+        }
+
+        .mini-icon.green {
+            color: #188d50;
+            background: #eaf8f0;
+        }
+
+        .mini-icon.orange {
+            color: #9a6200;
+            background: #fff6e5;
+        }
+
+        .mini-icon.red {
+            color: var(--danger);
+            background: #fff0ee;
+        }
+
+        .card {
+            padding: 12px;
+        }
+
+        .card + .card,
+        .entity-card + .entity-card {
+            margin-top: 10px;
+        }
+
+        .split-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .split-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .split-row .label {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .split-row .value {
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: 700;
+            text-align: right;
+            min-width: 0;
+        }
+
+        .quick-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .quick-card {
+            min-height: 74px;
+            padding: 12px;
+            text-align: left;
+            background: var(--surface);
+            display: grid;
+            grid-template-columns: 30px 1fr;
+            gap: 9px;
+            align-items: center;
+        }
+
+        .quick-card strong {
+            display: block;
+            color: var(--ink);
+            font-size: 13px;
+            line-height: 1.2;
+        }
+
+        .quick-card span:not(.material-icons) {
+            display: block;
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.25;
+        }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .search-box {
+            flex: 1;
+            min-width: 0;
+            height: 38px;
+            padding: 0 12px;
+            border-radius: 8px;
+            border: 1px solid var(--line);
+            background: var(--soft);
+            color: var(--ink);
+            outline: none;
+        }
+
+        .search-box:focus {
+            border-color: var(--primary);
+            background: white;
+            box-shadow: 0 0 0 3px rgba(110, 142, 251, 0.14);
+        }
+
+        .entity-card {
+            padding: 13px;
+        }
+
+        .entity-head {
+            display: grid;
+            grid-template-columns: 36px 1fr auto;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .entity-head h3 {
+            color: var(--ink);
+            font-size: 15px;
+            font-weight: 800;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .entity-head p {
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.3;
+        }
+
+        .status-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: var(--muted);
+            box-shadow: 0 0 0 4px rgba(138, 148, 166, 0.13);
+        }
+
+        .status-dot.green {
+            background: var(--success);
+            box-shadow: 0 0 0 4px rgba(47, 189, 114, 0.14);
+        }
+
+        .status-dot.orange {
+            background: var(--warning);
+            box-shadow: 0 0 0 4px rgba(245, 166, 35, 0.16);
+        }
+
+        .action-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .mono {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        }
+
+        .data-table {
+            display: grid;
+            gap: 8px;
+        }
+
+        .table-row {
+            display: grid;
+            grid-template-columns: 1.2fr 0.9fr 0.8fr;
+            align-items: center;
+            gap: 8px;
+            min-height: 36px;
+            padding: 8px;
+            border-radius: 8px;
+            background: var(--soft);
+            color: var(--text);
+            font-size: 12px;
+        }
+
+        .table-row strong {
+            color: var(--ink);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .notice-list {
+            display: grid;
+            gap: 8px;
+        }
+
+        .notice {
+            display: grid;
+            grid-template-columns: 28px 1fr;
+            gap: 9px;
+            align-items: start;
+            padding: 10px;
+            border-radius: 8px;
+            background: var(--soft);
+            color: var(--text);
+            font-size: 12px;
+        }
+
+        .notice strong {
+            display: block;
+            color: var(--ink);
+            font-size: 13px;
+            line-height: 1.3;
+        }
+
+        .notice p {
+            margin-top: 3px;
+            line-height: 1.4;
+        }
+
+        .modal-layer {
+            position: absolute;
+            z-index: 20;
+            inset: 0;
+            display: none;
+            align-items: flex-end;
+            background: rgba(22, 29, 42, 0.34);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-layer.active {
+            display: flex;
+            animation: fadeIn 180ms ease-out both;
+        }
+
+        .modal-card {
+            width: 100%;
+            max-height: 82%;
+            overflow-y: auto;
+            border-radius: 18px 18px 0 0;
+            background: white;
+            padding: 16px;
+            box-shadow: 0 -18px 34px rgba(37, 48, 68, 0.18);
+        }
+
+        .modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .modal-head h3 {
+            font-size: 17px;
+            color: var(--ink);
+        }
+
+        .modal-panel {
+            display: none;
+        }
+
+        .modal-panel.active {
+            display: block;
+        }
+
+        .toast {
+            position: absolute;
+            z-index: 30;
+            left: 22px;
+            right: 22px;
+            bottom: 72px;
+            display: none;
+            min-height: 42px;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 14px;
+            border-radius: 8px;
+            color: white;
+            background: rgba(38, 50, 68, 0.94);
+            font-size: 13px;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .toast.active {
+            display: flex;
+            animation: slideUp 220ms ease-out both;
+        }
+
+        .icon-options {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .icon-option {
+            min-height: 74px;
+            border-radius: 8px;
+            border: 2px solid transparent;
+            background: var(--soft);
+            color: var(--text);
+            display: grid;
+            place-items: center;
+            gap: 4px;
+        }
+
+        .icon-option.active {
+            border-color: var(--primary);
+            background: rgba(110, 142, 251, 0.10);
+            color: var(--primary);
+        }
+
+        .material-icons {
+            font-family: "Material Icons";
+            font-weight: normal;
+            font-style: normal;
+            font-size: 22px;
+            line-height: 1;
+            display: inline-block;
+            white-space: nowrap;
+            direction: ltr;
+            -webkit-font-feature-settings: "liga";
+            -webkit-font-smoothing: antialiased;
+        }
+
+        @font-face {
+            font-family: "Material Icons";
+            font-style: normal;
+            font-weight: 400;
+            src: url(https://fonts.gstatic.com/s/materialicons/v139/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2) format("woff2");
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 760px) {
+            .stage {
+                padding: 0;
+            }
+
+            .phone {
+                width: 100vw;
+                height: 100vh;
+                border-radius: 0;
+            }
+
+            .phone-content {
+                border-radius: 24px 24px 0 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="stage">
+        <section class="phone" aria-label="Unraid 移动管理台原型">
+            <header class="phone-header">
+                <button class="icon-button is-hidden" id="backButton" aria-label="返回" data-back>
+                    <span class="material-icons">arrow_back</span>
+                </button>
+                <div class="header-copy">
+                    <h1 id="pageTitle">服务器主页</h1>
+                    <p id="pageSubtitle">SU · 在线 · Unraid OS Pro</p>
+                </div>
+                <button class="icon-button" aria-label="通知" data-dialog="dialog-notifications">
+                    <span class="material-icons">notifications</span>
+                </button>
+            </header>
+
+            <div class="phone-content">
+                <div class="scroll-view">
+                    <section class="page active" id="page-home">
+                        <div class="hero-card">
+                            <div>
+                                <div class="eyebrow">Unraid Server</div>
+                                <div class="server-name">SU</div>
+                                <p class="server-desc">Media server · 192.168.1.120 · 本地 WebGUI 可访问</p>
+                                <div class="chip-row">
+                                    <span class="chip success"><span class="status-dot green"></span>在线</span>
+                                    <span class="chip">6.12.11</span>
+                                    <span class="chip warning">2 条提醒</span>
+                                </div>
+                            </div>
+                            <div class="server-art" id="serverArt" data-variant="default" aria-label="服务器图标">
+                                <svg viewBox="0 0 72 82" role="img" aria-hidden="true">
+                                    <rect x="8" y="6" width="56" height="70" rx="8" fill="#ffffff" opacity="0.12"/>
+                                    <rect x="16" y="18" width="40" height="8" rx="3" fill="#ffffff"/>
+                                    <rect x="16" y="37" width="40" height="8" rx="3" fill="#ffffff"/>
+                                    <rect x="16" y="56" width="40" height="8" rx="3" fill="#ffffff"/>
+                                    <circle cx="12" cy="22" r="4" fill="#ff8a00"/>
+                                    <circle cx="12" cy="41" r="4" fill="#2fbd72"/>
+                                    <circle cx="12" cy="60" r="4" fill="#6e8efb"/>
+                                </svg>
+                            </div>
+                            <div class="server-actions">
+                                <button class="small-button" data-dialog="dialog-icons"><span class="material-icons">palette</span>编辑</button>
+                                <button class="small-button danger" data-dialog="dialog-shutdown"><span class="material-icons">power_settings_new</span>关机</button>
+                                <button class="small-button" data-dialog="dialog-restart"><span class="material-icons">refresh</span>重启</button>
+                            </div>
+                        </div>
+
+                        <div class="section">
+                            <div class="stat-grid">
+                                <article class="stat-card">
+                                    <div class="topline"><span>CPU</span><span class="material-icons">speed</span></div>
+                                    <strong>38%</strong>
+                                    <div class="progress"><span style="width:38%"></span></div>
+                                    <small>Intel Core i5 · 6 核 / 12 线程</small>
+                                </article>
+                                <article class="stat-card">
+                                    <div class="topline"><span>内存</span><span class="material-icons">memory</span></div>
+                                    <strong>20.4 GB</strong>
+                                    <div class="progress"><span style="width:64%" class="warning"></span></div>
+                                    <small>已用 20.4 GB / 32 GB</small>
+                                </article>
+                                <article class="stat-card">
+                                    <div class="topline"><span>阵列</span><span class="material-icons">dns</span></div>
+                                    <strong>16.8 TB</strong>
+                                    <div class="progress"><span style="width:71%" class="success"></span></div>
+                                    <small>已用 16.8 TB / 24 TB</small>
+                                </article>
+                                <article class="stat-card">
+                                    <div class="topline"><span>通知</span><span class="material-icons">campaign</span></div>
+                                    <strong>2</strong>
+                                    <div class="chip-row"><span class="chip warning">1 警告</span><span class="chip danger">1 严重</span></div>
+                                    <small>来自 notifications.overview</small>
+                                </article>
+                            </div>
+                        </div>
+
+                        <div class="section">
+                            <button class="primary-button" data-route="details">
+                                <span class="material-icons">info</span>查看完整信息
+                            </button>
+                        </div>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>实时指标</h2>
+                                <span>metrics</span>
+                            </div>
+                            <div class="card metric-list">
+                                <div class="metric-row">
+                                    <span class="mini-icon"><span class="material-icons">speed</span></span>
+                                    <div><div class="label">CPU 使用率</div><div class="progress"><span style="width:38%"></span></div></div>
+                                    <span class="value">38.0%</span>
+                                </div>
+                                <div class="metric-row">
+                                    <span class="mini-icon orange"><span class="material-icons">thermostat</span></span>
+                                    <div><div class="label">最热传感器</div><div class="progress"><span style="width:62%" class="warning"></span></div></div>
+                                    <span class="value">CPU 62°C</span>
+                                </div>
+                                <div class="metric-row">
+                                    <span class="mini-icon green"><span class="material-icons">lan</span></span>
+                                    <div><div class="label">网络吞吐</div><div class="progress"><span style="width:54%" class="success"></span></div></div>
+                                    <span class="value">82 MB/s</span>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>阵列与服务</h2>
+                                <span>array / services</span>
+                            </div>
+                            <div class="card">
+                                <div class="split-row"><span class="label">阵列状态</span><span class="value">Started · parity valid</span></div>
+                                <div class="split-row"><span class="label">校验进度</span><span class="value">Idle · 上次 19h 42m</span></div>
+                                <div class="split-row"><span class="label">服务在线</span><span class="value">nginx · docker · unraid-api</span></div>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>最近通知</h2>
+                                <button class="ghost-button" data-dialog="dialog-notifications">全部</button>
+                            </div>
+                            <div class="notice-list">
+                                <article class="notice">
+                                    <span class="mini-icon orange"><span class="material-icons">warning</span></span>
+                                    <div><strong>Disk 3 温度偏高</strong><p>当前 46°C，接近 warning 阈值 48°C。</p></div>
+                                </article>
+                                <article class="notice">
+                                    <span class="mini-icon red"><span class="material-icons">error</span></span>
+                                    <div><strong>UPS 运行时间过低</strong><p>预计剩余 11 分钟，请检查负载。</p></div>
+                                </article>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>扩展管理</h2>
+                                <span>接口模块</span>
+                            </div>
+                            <div class="quick-grid">
+                                <button class="quick-card" data-dialog="dialog-disks"><span class="mini-icon"><span class="material-icons">storage</span></span><span><strong>磁盘</strong><span>SMART / 分区 / 温度</span></span></button>
+                                <button class="quick-card" data-dialog="dialog-network"><span class="mini-icon green"><span class="material-icons">settings_ethernet</span></span><span><strong>网络</strong><span>接口 / 访问地址</span></span></button>
+                                <button class="quick-card" data-dialog="dialog-ups"><span class="mini-icon orange"><span class="material-icons">battery_charging_full</span></span><span><strong>UPS</strong><span>电量 / 负载 / 策略</span></span></button>
+                                <button class="quick-card" data-dialog="dialog-plugins"><span class="mini-icon"><span class="material-icons">extension</span></span><span><strong>插件</strong><span>安装任务 / 模块</span></span></button>
+                                <button class="quick-card" data-dialog="dialog-security"><span class="mini-icon red"><span class="material-icons">vpn_key</span></span><span><strong>权限</strong><span>API Key / OIDC</span></span></button>
+                                <button class="quick-card" data-dialog="dialog-cloud"><span class="mini-icon green"><span class="material-icons">cloud_done</span></span><span><strong>连接</strong><span>远程访问 / Cloud</span></span></button>
+                            </div>
+                        </section>
+                    </section>
+
+                    <section class="page" id="page-details">
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>服务器资料</h2>
+                                <span>server / registration</span>
+                            </div>
+                            <div class="card detail-list">
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">badge</span></span><span class="label">GUID</span><span class="value mono">a1b2-c3d4</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">verified_user</span></span><span class="label">授权</span><span class="value">Pro · 已注册</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">person</span></span><span class="label">Owner</span><span class="value">homeadmin</span></div>
+                                <div class="detail-row"><span class="mini-icon green"><span class="material-icons">language</span></span><span class="label">访问地址</span><span class="value">local / remote</span></div>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>硬件与系统</h2>
+                                <span>info</span>
+                            </div>
+                            <div class="card detail-list">
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">developer_board</span></span><span class="label">主板</span><span class="value">ASRock B660M</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">memory</span></span><span class="label">CPU</span><span class="value">Intel i5-12400</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">view_module</span></span><span class="label">内存</span><span class="value">2 x 16 GB DDR4</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">terminal</span></span><span class="label">系统</span><span class="value">Unraid 6.12.11</span></div>
+                                <div class="detail-row"><span class="mini-icon"><span class="material-icons">inventory_2</span></span><span class="label">包版本</span><span class="value">nginx / php / docker</span></div>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>磁盘阵列</h2>
+                                <span>array / disks</span>
+                            </div>
+                            <div class="data-table">
+                                <div class="table-row"><strong>Parity</strong><span>12 TB</span><span>正常</span></div>
+                                <div class="table-row"><strong>Disk 1</strong><span>8 TB</span><span>36°C</span></div>
+                                <div class="table-row"><strong>Disk 2</strong><span>8 TB</span><span>34°C</span></div>
+                                <div class="table-row"><strong>Cache Pool</strong><span>2 TB</span><span>NVMe</span></div>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title">
+                                <h2>设置概览</h2>
+                                <span>settings / vars</span>
+                            </div>
+                            <div class="two-col">
+                                <div class="card"><div class="split-row"><span class="label">时区</span><span class="value">Asia/Shanghai</span></div><div class="split-row"><span class="label">NTP</span><span class="value">启用</span></div></div>
+                                <div class="card"><div class="split-row"><span class="label">SMB</span><span class="value">启用</span></div><div class="split-row"><span class="label">SSH</span><span class="value">22</span></div></div>
+                                <div class="card"><div class="split-row"><span class="label">SSO</span><span class="value">启用</span></div><div class="split-row"><span class="label">OIDC</span><span class="value">2 个提供方</span></div></div>
+                                <div class="card"><div class="split-row"><span class="label">远程</span><span class="value">Cloud Relay</span></div><div class="split-row"><span class="label">API</span><span class="value">sandbox off</span></div></div>
+                            </div>
+                        </section>
+                    </section>
+
+                    <section class="page" id="page-docker">
+                        <div class="toolbar">
+                            <input class="search-box" id="dockerSearch" type="search" placeholder="搜索容器、镜像或端口">
+                            <button class="ghost-button" data-toast="检查更新任务已加入队列"><span class="material-icons">sync</span></button>
+                        </div>
+
+                        <section class="section">
+                            <div class="stat-grid">
+                                <article class="stat-card"><div class="topline"><span>容器</span><span class="material-icons">deployed_code</span></div><strong>12</strong><small>9 运行中 · 2 可更新</small></article>
+                                <article class="stat-card"><div class="topline"><span>网络</span><span class="material-icons">hub</span></div><strong>5</strong><small>bridge · host · custom</small></article>
+                            </div>
+                        </section>
+
+                        <section class="section" id="dockerList">
+                            <article class="entity-card" data-filter="plex linuxserver 32400 running">
+                                <div class="entity-head">
+                                    <span class="mini-icon"><span class="material-icons">layers</span></span>
+                                    <div><h3>Plex-Media-Server</h3><p>lscr.io/linuxserver/plex · 32400/tcp · auto start 1</p></div>
+                                    <span class="status-dot green"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip success">运行中</span><span class="chip warning">有更新</span><span class="chip">host</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-docker"><span class="material-icons">visibility</span>详情</button>
+                                    <button class="small-button" data-toast="Plex 已提交重启"><span class="material-icons">refresh</span>重启</button>
+                                    <button class="small-button danger" data-toast="Plex 已提交停止"><span class="material-icons">stop</span>停止</button>
+                                </div>
+                            </article>
+                            <article class="entity-card" data-filter="nextcloud mariadb 443 running">
+                                <div class="entity-head">
+                                    <span class="mini-icon green"><span class="material-icons">cloud</span></span>
+                                    <div><h3>Nextcloud</h3><p>nextcloud:latest · 443/tcp · br0 192.168.1.31</p></div>
+                                    <span class="status-dot green"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip success">运行中</span><span class="chip">br0</span><span class="chip">Tailscale 在线</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-docker"><span class="material-icons">visibility</span>详情</button>
+                                    <button class="small-button" data-toast="Nextcloud WebUI 已打开"><span class="material-icons">open_in_new</span>WebUI</button>
+                                    <button class="small-button danger" data-toast="Nextcloud 已提交停止"><span class="material-icons">stop</span>停止</button>
+                                </div>
+                            </article>
+                            <article class="entity-card" data-filter="filesync stopped">
+                                <div class="entity-head">
+                                    <span class="mini-icon orange"><span class="material-icons">sync_alt</span></span>
+                                    <div><h3>FileSync</h3><p>rsync/syncthing · 22000/tcp · cache preferred</p></div>
+                                    <span class="status-dot orange"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip warning">已停止</span><span class="chip">可重建</span><span class="chip">bridge</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-toast="FileSync 已提交启动"><span class="material-icons">play_arrow</span>启动</button>
+                                    <button class="small-button" data-dialog="dialog-docker"><span class="material-icons">receipt_long</span>日志</button>
+                                    <button class="small-button danger" data-toast="FileSync 已标记为孤儿检查"><span class="material-icons">delete</span>清理</button>
+                                </div>
+                            </article>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title"><h2>网络与冲突</h2><span>docker.networks</span></div>
+                            <div class="card">
+                                <div class="split-row"><span class="label">bridge</span><span class="value">8 containers</span></div>
+                                <div class="split-row"><span class="label">br0</span><span class="value">3 static IP</span></div>
+                                <div class="split-row"><span class="label">端口冲突</span><span class="value">8080/tcp · 2 个容器</span></div>
+                            </div>
+                        </section>
+                    </section>
+
+                    <section class="page" id="page-vm">
+                        <section class="section">
+                            <div class="stat-grid">
+                                <article class="stat-card"><div class="topline"><span>虚拟机</span><span class="material-icons">computer</span></div><strong>4</strong><small>2 运行中 · 1 暂停</small></article>
+                                <article class="stat-card"><div class="topline"><span>资源</span><span class="material-icons">memory</span></div><strong>18 GB</strong><small>已分配内存</small></article>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon"><span class="material-icons">desktop_windows</span></span>
+                                    <div><h3>Windows 11 Studio</h3><p>uuid 3f91...c02e · VNC 5901 · GPU passthrough</p></div>
+                                    <span class="status-dot green"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip success">运行中</span><span class="chip">8 vCPU</span><span class="chip">12 GB</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-vm"><span class="material-icons">visibility</span>详情</button>
+                                    <button class="small-button" data-toast="Windows 11 已提交重启"><span class="material-icons">refresh</span>重启</button>
+                                    <button class="small-button danger" data-toast="Windows 11 已提交关机"><span class="material-icons">stop</span>停止</button>
+                                </div>
+                            </article>
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon green"><span class="material-icons">terminal</span></span>
+                                    <div><h3>Ubuntu Server</h3><p>uuid a41b...8321 · virbr0 · cloud-init</p></div>
+                                    <span class="status-dot green"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip success">运行中</span><span class="chip">4 vCPU</span><span class="chip">4 GB</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-vm"><span class="material-icons">visibility</span>详情</button>
+                                    <button class="small-button" data-toast="Ubuntu Console 已打开"><span class="material-icons">terminal</span>Console</button>
+                                    <button class="small-button danger" data-toast="Ubuntu 已提交停止"><span class="material-icons">stop</span>停止</button>
+                                </div>
+                            </article>
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon orange"><span class="material-icons">laptop_mac</span></span>
+                                    <div><h3>macOS Build Agent</h3><p>uuid 9e0c...7f14 · template offline</p></div>
+                                    <span class="status-dot orange"></span>
+                                </div>
+                                <div class="chip-row"><span class="chip warning">已停止</span><span class="chip">6 vCPU</span><span class="chip">8 GB</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-toast="macOS Build Agent 已提交启动"><span class="material-icons">play_arrow</span>启动</button>
+                                    <button class="small-button" data-dialog="dialog-vm"><span class="material-icons">visibility</span>详情</button>
+                                    <button class="small-button danger" data-toast="macOS Build Agent 已进入维护确认"><span class="material-icons">build</span>维护</button>
+                                </div>
+                            </article>
+                        </section>
+                    </section>
+
+                    <section class="page" id="page-share">
+                        <section class="section">
+                            <div class="stat-grid">
+                                <article class="stat-card"><div class="topline"><span>共享</span><span class="material-icons">folder_shared</span></div><strong>18</strong><small>12 SMB · 4 NFS · 2 私有</small></article>
+                                <article class="stat-card"><div class="topline"><span>Mover</span><span class="material-icons">move_down</span></div><strong>02:00</strong><small>缓存池到阵列</small></article>
+                            </div>
+                        </section>
+
+                        <section class="section">
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon"><span class="material-icons">movie</span></span>
+                                    <div><h3>Movies</h3><p>/mnt/user/Movies · split level auto · high-water</p></div>
+                                    <span class="chip success">公开</span>
+                                </div>
+                                <div class="progress"><span style="width:76%"></span></div>
+                                <div class="chip-row"><span class="chip">18.2 TB / 24 TB</span><span class="chip">cache: yes</span><span class="chip">SMB</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-share"><span class="material-icons">folder_open</span>浏览</button>
+                                    <button class="small-button" data-toast="Movies 共享设置已打开"><span class="material-icons">tune</span>设置</button>
+                                    <button class="small-button" data-toast="Mover 已为 Movies 加入队列"><span class="material-icons">move_down</span>Mover</button>
+                                </div>
+                            </article>
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon green"><span class="material-icons">photo_library</span></span>
+                                    <div><h3>Photos</h3><p>/mnt/user/Photos · cow on · include disk1,disk2</p></div>
+                                    <span class="chip">安全</span>
+                                </div>
+                                <div class="progress"><span style="width:42%" class="success"></span></div>
+                                <div class="chip-row"><span class="chip">3.7 TB / 8 TB</span><span class="chip">cache: prefer</span><span class="chip">SMB/NFS</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-share"><span class="material-icons">folder_open</span>浏览</button>
+                                    <button class="small-button" data-toast="Photos 权限面板已打开"><span class="material-icons">lock</span>权限</button>
+                                    <button class="small-button" data-toast="Photos 备份任务已检查"><span class="material-icons">backup</span>备份</button>
+                                </div>
+                            </article>
+                            <article class="entity-card">
+                                <div class="entity-head">
+                                    <span class="mini-icon orange"><span class="material-icons">folder_lock</span></span>
+                                    <div><h3>Backup</h3><p>/mnt/user/Backup · private · LUKS keyfile</p></div>
+                                    <span class="chip warning">私有</span>
+                                </div>
+                                <div class="progress"><span style="width:58%" class="warning"></span></div>
+                                <div class="chip-row"><span class="chip">5.8 TB / 10 TB</span><span class="chip">exclude disk3</span><span class="chip">encrypted</span></div>
+                                <div class="action-row">
+                                    <button class="small-button" data-dialog="dialog-share"><span class="material-icons">folder_open</span>浏览</button>
+                                    <button class="small-button" data-toast="Backup 已打开审计日志"><span class="material-icons">history</span>审计</button>
+                                    <button class="small-button danger" data-toast="Backup 正在检查锁定状态"><span class="material-icons">lock</span>锁定</button>
+                                </div>
+                            </article>
+                        </section>
+
+                        <section class="section">
+                            <div class="section-title"><h2>远程挂载</h2><span>rclone</span></div>
+                            <div class="card">
+                                <div class="split-row"><span class="label">Drive: gdrive-media</span><span class="value">configured</span></div>
+                                <div class="split-row"><span class="label">Remote: s3-archive</span><span class="value">encrypted</span></div>
+                            </div>
+                        </section>
+                    </section>
+                </div>
+            </div>
+
+            <nav class="nav-bar" aria-label="主导航">
+                <button class="nav-item active" data-route="home"><span class="material-icons">home</span><span>主页</span></button>
+                <button class="nav-item" data-route="docker"><span class="material-icons">apps</span><span>Docker</span></button>
+                <button class="nav-item" data-route="vm"><span class="material-icons">computer</span><span>虚拟机</span></button>
+                <button class="nav-item" data-route="share"><span class="material-icons">folder_shared</span><span>共享</span></button>
+            </nav>
+
+            <div class="modal-layer" id="modalLayer" aria-hidden="true">
+                <div class="modal-card" role="dialog" aria-modal="true">
+                    <div class="modal-head">
+                        <h3 id="modalTitle">详情</h3>
+                        <button class="icon-button" style="background: var(--soft); color: var(--text);" data-close-dialog aria-label="关闭">
+                            <span class="material-icons">close</span>
+                        </button>
+                    </div>
+
+                    <section class="modal-panel" id="dialog-notifications" data-title="通知中心">
+                        <div class="notice-list">
+                            <article class="notice"><span class="mini-icon orange"><span class="material-icons">warning</span></span><div><strong>Disk 3 温度偏高</strong><p>importance: warning · formattedTimestamp: 今天 12:40</p></div></article>
+                            <article class="notice"><span class="mini-icon red"><span class="material-icons">error</span></span><div><strong>UPS 运行时间过低</strong><p>importance: alert · link: /Settings/UPSSettings</p></div></article>
+                            <article class="notice"><span class="mini-icon green"><span class="material-icons">check_circle</span></span><div><strong>Parity check 完成</strong><p>errors: 0 · duration: 19h 42m</p></div></article>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-icons" data-title="选择服务器图标">
+                        <div class="icon-options">
+                            <button class="icon-option active" data-icon-option="default"><span class="material-icons">dns</span><span>默认</span></button>
+                            <button class="icon-option" data-icon-option="silver"><span class="material-icons">developer_board</span><span>金属</span></button>
+                            <button class="icon-option" data-icon-option="green"><span class="material-icons">hub</span><span>网络</span></button>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-shutdown" data-title="确认关机">
+                        <div class="card">
+                            <p style="color: var(--text); font-size: 13px; line-height: 1.5;">将通过电源操作提交关机请求。当前 Docker 容器 9 个运行中，虚拟机 2 个运行中。</p>
+                            <div class="action-row"><button class="small-button" data-close-dialog>取消</button><button class="small-button danger" data-toast="服务器正在关机" data-close-dialog>确认关机</button><button class="small-button" data-dialog="dialog-notifications">查看告警</button></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-restart" data-title="确认重启">
+                        <div class="card">
+                            <p style="color: var(--text); font-size: 13px; line-height: 1.5;">重启前建议确认阵列没有 parity check 或 mover 任务。当前阵列状态 Started，mover 未运行。</p>
+                            <div class="action-row"><button class="small-button" data-close-dialog>取消</button><button class="small-button" data-toast="服务器正在重启" data-close-dialog>确认重启</button><button class="small-button" data-route="details" data-close-dialog>完整信息</button></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-disks" data-title="磁盘与 SMART">
+                        <div class="data-table">
+                            <div class="table-row"><strong>/dev/sdb</strong><span>WDC 12TB</span><span>SMART ok</span></div>
+                            <div class="table-row"><strong>/dev/sdc</strong><span>Seagate 8TB</span><span>46°C</span></div>
+                            <div class="table-row"><strong>/dev/nvme0n1</strong><span>Samsung 2TB</span><span>cache</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-network" data-title="网络接口">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon green"><span class="material-icons">lan</span></span><span class="label">eth0</span><span class="value">1 Gbps · 192.168.1.120</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">public</span></span><span class="label">br0</span><span class="value">Docker macvlan</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">link</span></span><span class="label">访问</span><span class="value">local / remote / ipv6</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-ups" data-title="UPS 状态">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon orange"><span class="material-icons">battery_5_bar</span></span><span class="label">电量</span><span class="value">72% · 11 分钟</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">bolt</span></span><span class="label">负载</span><span class="value">38% · 220W</span></div>
+                            <div class="detail-row"><span class="mini-icon red"><span class="material-icons">policy</span></span><span class="label">策略</span><span class="value">低于 20% 关机</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-plugins" data-title="插件与安装任务">
+                        <div class="notice-list">
+                            <article class="notice"><span class="mini-icon"><span class="material-icons">extension</span></span><div><strong>unraid-api</strong><p>hasApiModule: true · version 4.12.0</p></div></article>
+                            <article class="notice"><span class="mini-icon orange"><span class="material-icons">download</span></span><div><strong>Community Applications</strong><p>pluginInstallOperation: running · updatedAt 刚刚</p></div></article>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-security" data-title="权限与登录">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon red"><span class="material-icons">vpn_key</span></span><span class="label">API Keys</span><span class="value">3 active</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">admin_panel_settings</span></span><span class="label">Roles</span><span class="value">admin / connect / view</span></div>
+                            <div class="detail-row"><span class="mini-icon green"><span class="material-icons">login</span></span><span class="label">OIDC</span><span class="value">Google / Authentik</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-cloud" data-title="远程访问与 Cloud">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon green"><span class="material-icons">cloud_done</span></span><span class="label">Cloud</span><span class="value">online · 104.21.1.1</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">settings_remote</span></span><span class="label">Relay</span><span class="value">connected</span></div>
+                            <div class="detail-row"><span class="mini-icon orange"><span class="material-icons">router</span></span><span class="label">Dynamic</span><span class="value">port 443</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-docker" data-title="容器详情">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">image</span></span><span class="label">镜像</span><span class="value">linuxserver/plex</span></div>
+                            <div class="detail-row"><span class="mini-icon green"><span class="material-icons">settings_input_component</span></span><span class="label">端口</span><span class="value">32400/tcp</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">schedule</span></span><span class="label">日志</span><span class="value">12 lines · cursor 1892</span></div>
+                        </div>
+                        <div class="notice" style="margin-top:10px;"><span class="mini-icon"><span class="material-icons">receipt_long</span></span><div><strong>最新日志</strong><p class="mono">[12:42:18] Server ready · [12:43:02] Library scan completed</p></div></div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-vm" data-title="虚拟机详情">
+                        <div class="card detail-list">
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">tag</span></span><span class="label">UUID</span><span class="value mono">3f91...c02e</span></div>
+                            <div class="detail-row"><span class="mini-icon green"><span class="material-icons">play_circle</span></span><span class="label">状态</span><span class="value">RUNNING</span></div>
+                            <div class="detail-row"><span class="mini-icon"><span class="material-icons">memory</span></span><span class="label">资源</span><span class="value">8 vCPU · 12 GB</span></div>
+                        </div>
+                    </section>
+
+                    <section class="modal-panel" id="dialog-share" data-title="共享浏览">
+                        <div class="data-table">
+                            <div class="table-row"><strong>Movies/</strong><span>folder</span><span>今天</span></div>
+                            <div class="table-row"><strong>2026-Family.jpg</strong><span>18.4 MB</span><span>预览</span></div>
+                            <div class="table-row"><strong>Archive.zip</strong><span>2.1 GB</span><span>文件</span></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+
+            <div class="toast" id="toast" role="status" aria-live="polite"></div>
+        </section>
+    </main>
+
+    <script>
+        const routes = {
+            home: { title: "服务器主页", subtitle: "SU · 在线 · Unraid OS Pro", nav: "home" },
+            details: { title: "完整信息", subtitle: "server / info / settings / cloud", nav: "home" },
+            docker: { title: "Docker 管理", subtitle: "containers / networks / logs", nav: "docker" },
+            vm: { title: "虚拟机管理", subtitle: "domains / state / actions", nav: "vm" },
+            share: { title: "共享管理", subtitle: "shares / rclone / browser", nav: "share" }
+        };
+
+        const fileRoute = {
+            "docker.html": "docker",
+            "vm.html": "vm",
+            "share.html": "share",
+            "detail.html": "details"
+        };
+
+        const $ = (selector, root = document) => root.querySelector(selector);
+        const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+        const modalLayer = $("#modalLayer");
+        const modalTitle = $("#modalTitle");
+        const toast = $("#toast");
+        let toastTimer = null;
+
+        function routeFromLocation() {
+            const hashRoute = window.location.hash.replace("#", "");
+            if (routes[hashRoute]) {
+                return hashRoute;
+            }
+            const file = window.location.pathname.split("/").pop();
+            return fileRoute[file] || "home";
+        }
+
+        function setRoute(route, writeHash = true) {
+            const next = routes[route] ? route : "home";
+            $$(".page").forEach((page) => page.classList.remove("active"));
+            $(`#page-${next}`).classList.add("active");
+            $("#pageTitle").textContent = routes[next].title;
+            $("#pageSubtitle").textContent = routes[next].subtitle;
+            $("#backButton").classList.toggle("is-hidden", next === "home");
+            $$(".nav-item").forEach((item) => {
+                item.classList.toggle("active", item.dataset.route === routes[next].nav);
+            });
+            $(".scroll-view").scrollTo({ top: 0, behavior: "smooth" });
+            if (writeHash) {
+                history.replaceState(null, "", `#${next}`);
+            }
+        }
+
+        function openDialog(id) {
+            const panel = document.getElementById(id);
+            if (!panel) {
+                return;
+            }
+            $$(".modal-panel").forEach((item) => item.classList.remove("active"));
+            panel.classList.add("active");
+            modalTitle.textContent = panel.dataset.title || "详情";
+            modalLayer.classList.add("active");
+            modalLayer.setAttribute("aria-hidden", "false");
+        }
+
+        function closeDialog() {
+            modalLayer.classList.remove("active");
+            modalLayer.setAttribute("aria-hidden", "true");
+        }
+
+        function showToast(message) {
+            toast.textContent = message;
+            toast.classList.add("active");
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove("active"), 1800);
+        }
+
+        document.addEventListener("click", (event) => {
+            const routeButton = event.target.closest("[data-route]");
+            if (routeButton) {
+                setRoute(routeButton.dataset.route);
+                if (routeButton.hasAttribute("data-close-dialog")) {
+                    closeDialog();
+                }
+                return;
+            }
+
+            const backButton = event.target.closest("[data-back]");
+            if (backButton) {
+                setRoute("home");
+                return;
+            }
+
+            const dialogButton = event.target.closest("[data-dialog]");
+            if (dialogButton) {
+                openDialog(dialogButton.dataset.dialog);
+                return;
+            }
+
+            const closeButton = event.target.closest("[data-close-dialog]");
+            if (closeButton) {
+                closeDialog();
+            }
+
+            const toastButton = event.target.closest("[data-toast]");
+            if (toastButton) {
+                showToast(toastButton.dataset.toast);
+            }
+
+            const iconButton = event.target.closest("[data-icon-option]");
+            if (iconButton) {
+                $$(".icon-option").forEach((item) => item.classList.remove("active"));
+                iconButton.classList.add("active");
+                $("#serverArt").dataset.variant = iconButton.dataset.iconOption;
+                showToast("服务器图标已更新");
+            }
+        });
+
+        modalLayer.addEventListener("click", (event) => {
+            if (event.target === modalLayer) {
+                closeDialog();
+            }
+        });
+
+        $("#dockerSearch").addEventListener("input", (event) => {
+            const query = event.target.value.trim().toLowerCase();
+            $$("#dockerList .entity-card").forEach((card) => {
+                const text = card.dataset.filter || card.textContent.toLowerCase();
+                card.style.display = text.includes(query) ? "" : "none";
+            });
+        });
+
+        window.addEventListener("hashchange", () => setRoute(routeFromLocation(), false));
+        setRoute(routeFromLocation(), false);
+    </script>
+</body>
+</html>

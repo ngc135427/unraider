@@ -1,0 +1,1417 @@
+query ExampleQuery($apiKeyId: PrefixedID!, $roles: [Role!]!, $diskId: PrefixedID!, $path: String!, $oidcProviderId: PrefixedID!, $token: String!, $upsDeviceByIdId: String!, $operationId: ID!, $filter: NotificationFilter!, $logsId: PrefixedID!, $containerId: PrefixedID!) {
+apiKeys {
+id
+}
+apiKeyPossibleRoles
+apiKeyPossiblePermissions {
+resource
+}
+apiKey(id: $apiKeyId) {
+id
+key
+name
+description
+roles
+createdAt
+permissions {
+resource
+actions
+}
+}
+getPermissionsForRoles(roles: $roles) {
+resource
+actions
+}
+previewEffectivePermissions {
+resource
+actions
+}
+getAvailableAuthActions
+getApiKeyCreationFormSchema {
+id
+dataSchema
+uiSchema
+values
+}
+config {
+id
+valid
+error
+}
+display {
+id
+case {
+id
+url
+icon
+error
+base64
+}
+theme
+unit
+scale
+tabs
+resize
+wwn
+total
+usage
+text
+warning
+critical
+hot
+max
+locale
+}
+flash {
+id
+guid
+vendor
+product
+}
+me {
+id
+name
+description
+roles
+}
+notifications {
+id
+overview {
+unread {
+info
+warning
+alert
+total
+}
+archive {
+info
+warning
+alert
+total
+}
+}
+list(filter: $filter) {
+id
+title
+subject
+description
+importance
+link
+type
+timestamp
+formattedTimestamp
+}
+warningsAndAlerts {
+id
+title
+subject
+description
+importance
+link
+type
+timestamp
+formattedTimestamp
+}
+}
+online
+owner {
+username
+url
+avatar
+}
+internalBootContext {
+arrayStopped
+bootEligible
+bootedFromFlashWithInternalBootSetup
+enableBootTransfer
+reservedNames
+shareNames
+poolNames
+driveWarnings {
+diskId
+device
+warnings
+}
+}
+registration {
+id
+type
+keyFile {
+location
+contents
+}
+state
+expiration
+updateExpiration
+}
+server {
+id
+owner {
+id
+username
+url
+avatar
+}
+guid
+apikey
+name
+comment
+status
+wanip
+lanip
+localurl
+remoteurl
+}
+servers {
+id
+guid
+apikey
+name
+comment
+status
+wanip
+lanip
+localurl
+remoteurl
+}
+services {
+id
+name
+online
+uptime {
+timestamp
+}
+version
+}
+shares {
+id
+name
+free
+used
+size
+include
+exclude
+cache
+nameOrig
+comment
+allocator
+splitLevel
+floor
+cow
+color
+luksStatus
+}
+vars {
+id
+version
+maxArraysz
+maxCachesz
+name
+timeZone
+comment
+security
+workgroup
+domain
+domainShort
+hideDotFiles
+localMaster
+enableFruit
+useNtp
+ntpServer1
+ntpServer2
+ntpServer3
+ntpServer4
+domainLogin
+sysModel
+sysArraySlots
+sysCacheSlots
+sysFlashSlots
+useSsl
+port
+portssl
+localTld
+bindMgt
+useTelnet
+porttelnet
+useSsh
+portssh
+startPage
+startArray
+spindownDelay
+queueDepth
+spinupGroups
+defaultFormat
+defaultFsType
+shutdownTimeout
+luksKeyfile
+pollAttributes
+pollAttributesDefault
+pollAttributesStatus
+nrRequests
+nrRequestsDefault
+nrRequestsStatus
+mdNumStripes
+mdNumStripesDefault
+mdNumStripesStatus
+mdSyncWindow
+mdSyncWindowDefault
+mdSyncWindowStatus
+mdSyncThresh
+mdSyncThreshDefault
+mdSyncThreshStatus
+mdWriteMethod
+mdWriteMethodDefault
+mdWriteMethodStatus
+shareDisk
+shareUser
+shareUserInclude
+shareUserExclude
+shareSmbEnabled
+shareNfsEnabled
+shareAfpEnabled
+shareInitialOwner
+shareInitialGroup
+shareCacheEnabled
+shareCacheFloor
+shareMoverSchedule
+shareMoverLogging
+fuseRemember
+fuseRememberDefault
+fuseRememberStatus
+fuseDirectio
+fuseDirectioDefault
+fuseDirectioStatus
+shareAvahiEnabled
+shareAvahiSmbName
+shareAvahiSmbModel
+shareAvahiAfpName
+shareAvahiAfpModel
+safeMode
+startMode
+configValid
+configError
+joinStatus
+deviceCount
+flashGuid
+flashProduct
+flashVendor
+tpmGuid
+regCheck
+regFile
+regGuid
+regTy
+regState
+regTo
+regTm
+regTm2
+regGen
+sbName
+sbVersion
+sbUpdated
+sbEvents
+sbState
+sbClean
+sbSynced
+sbSyncErrs
+sbSynced2
+sbSyncExit
+sbNumDisks
+mdColor
+mdNumDisks
+mdNumDisabled
+mdNumInvalid
+mdNumMissing
+mdNumNew
+mdNumErased
+mdResync
+mdResyncCorr
+mdResyncPos
+mdResyncDb
+mdResyncDt
+mdResyncAction
+mdResyncSize
+mdState
+mdVersion
+cacheNumDevices
+cacheSbNumDisks
+fsState
+bootEligible
+enableBootTransfer
+bootedFromFlashWithInternalBootSetup
+reservedNames
+fsProgress
+fsCopyPrcnt
+fsNumMounted
+fsNumUnmountable
+fsUnmountableMask
+shareCount
+shareSmbCount
+shareNfsCount
+shareAfpCount
+shareMoverActive
+csrfToken
+}
+vms {
+id
+domains {
+id
+name
+state
+uuid
+}
+domain {
+id
+name
+state
+uuid
+}
+}
+parityHistory {
+date
+duration
+speed
+status
+errors
+progress
+correcting
+paused
+running
+}
+array {
+id
+state
+capacity {
+kilobytes {
+free
+used
+total
+}
+disks {
+free
+used
+total
+}
+}
+boot {
+id
+idx
+name
+device
+size
+status
+rotational
+temp
+numReads
+numWrites
+numErrors
+fsSize
+fsFree
+fsUsed
+exportable
+type
+warning
+critical
+fsType
+comment
+format
+transport
+color
+isSpinning
+}
+bootDevices {
+id
+idx
+name
+device
+size
+status
+rotational
+temp
+numReads
+numWrites
+numErrors
+fsSize
+fsFree
+fsUsed
+exportable
+type
+warning
+critical
+fsType
+comment
+format
+transport
+color
+isSpinning
+}
+parities {
+id
+idx
+name
+device
+size
+status
+rotational
+temp
+numReads
+numWrites
+numErrors
+fsSize
+fsFree
+fsUsed
+exportable
+type
+warning
+critical
+fsType
+comment
+format
+transport
+color
+isSpinning
+}
+parityCheckStatus {
+date
+duration
+speed
+status
+errors
+progress
+correcting
+paused
+running
+}
+disks {
+id
+idx
+name
+device
+size
+status
+rotational
+temp
+numReads
+numWrites
+numErrors
+fsSize
+fsFree
+fsUsed
+exportable
+type
+warning
+critical
+fsType
+comment
+format
+transport
+color
+isSpinning
+}
+caches {
+id
+idx
+name
+device
+size
+status
+rotational
+temp
+numReads
+numWrites
+numErrors
+fsSize
+fsFree
+fsUsed
+exportable
+type
+warning
+critical
+fsType
+comment
+format
+transport
+color
+isSpinning
+}
+}
+customization {
+activationCode {
+code
+partner {
+name
+url
+hardwareSpecsUrl
+manualUrl
+supportUrl
+extraLinks {
+title
+url
+}
+}
+branding {
+header
+headermetacolor
+background
+showBannerGradient
+theme
+bannerImage
+caseModel
+caseModelImage
+partnerLogoLightUrl
+partnerLogoDarkUrl
+hasPartnerLogo
+onboardingTitle
+onboardingSubtitle
+onboardingTitleFreshInstall
+onboardingSubtitleFreshInstall
+onboardingTitleUpgrade
+onboardingSubtitleUpgrade
+onboardingTitleDowngrade
+onboardingSubtitleDowngrade
+onboardingTitleIncomplete
+onboardingSubtitleIncomplete
+}
+system {
+serverName
+model
+comment
+}
+}
+onboarding {
+status
+isPartnerBuild
+completed
+completedAtVersion
+activationCode
+shouldOpen
+onboardingState {
+registrationState
+isRegistered
+isFreshInstall
+hasActivationCode
+activationRequired
+}
+}
+availableLanguages {
+code
+name
+url
+}
+}
+isFreshInstall
+publicTheme {
+name
+showBannerImage
+showBannerGradient
+showHeaderDescription
+headerBackgroundColor
+headerPrimaryTextColor
+headerSecondaryTextColor
+}
+info {
+id
+time
+baseboard {
+id
+manufacturer
+model
+version
+serial
+assetTag
+memMax
+memSlots
+}
+cpu {
+id
+manufacturer
+brand
+vendor
+family
+model
+stepping
+revision
+voltage
+speed
+speedmin
+speedmax
+threads
+cores
+processors
+socket
+cache
+flags
+topology
+packages {
+id
+totalPower
+power
+temp
+}
+}
+devices {
+id
+gpu {
+id
+type
+typeid
+blacklisted
+class
+productid
+vendorname
+}
+network {
+id
+iface
+model
+vendor
+mac
+virtual
+speed
+dhcp
+}
+pci {
+id
+type
+typeid
+vendorname
+vendorid
+productname
+productid
+blacklisted
+class
+}
+usb {
+id
+name
+bus
+device
+}
+}
+machineId
+memory {
+id
+layout {
+id
+size
+bank
+type
+clockSpeed
+partNum
+serialNum
+manufacturer
+formFactor
+voltageConfigured
+voltageMin
+voltageMax
+}
+}
+os {
+id
+platform
+distro
+release
+codename
+kernel
+arch
+hostname
+fqdn
+build
+servicepack
+uptime
+logofile
+serial
+uefi
+}
+system {
+id
+manufacturer
+model
+version
+serial
+uuid
+sku
+virtual
+}
+versions {
+id
+core {
+unraid
+api
+kernel
+}
+packages {
+openssl
+node
+npm
+pm2
+git
+nginx
+php
+docker
+}
+}
+primaryNetwork {
+id
+name
+description
+macAddress
+mtu
+speed
+duplex
+internal
+virtual
+operstate
+type
+vlanId
+status
+protocol
+ipAddress
+netmask
+gateway
+useDhcp
+ipv6Address
+ipv6Netmask
+ipv6Gateway
+useDhcp6
+}
+}
+docker {
+id
+containers {
+id
+names
+image
+imageId
+command
+created
+ports {
+ip
+privatePort
+publicPort
+type
+}
+labels
+state
+status
+hostConfig {
+networkMode
+}
+networkSettings
+mounts
+autoStart
+autoStartOrder
+autoStartWait
+templatePath
+projectUrl
+registryUrl
+supportUrl
+iconUrl
+webUiUrl
+shell
+templatePorts {
+ip
+privatePort
+publicPort
+type
+}
+isOrphaned
+isUpdateAvailable
+isRebuildReady
+tailscaleEnabled
+tailscaleStatus {
+online
+version
+latestVersion
+updateAvailable
+hostname
+dnsName
+relay
+relayName
+tailscaleIps
+primaryRoutes
+isExitNode
+exitNodeStatus {
+online
+tailscaleIps
+}
+webUiUrl
+keyExpiry
+keyExpiryDays
+keyExpired
+backendState
+authUrl
+}
+}
+networks {
+id
+name
+created
+scope
+driver
+enableIPv6
+ipam
+internal
+attachable
+ingress
+configFrom
+configOnly
+containers
+options
+labels
+}
+portConflicts {
+containerPorts {
+privatePort
+type
+containers {
+id
+name
+}
+}
+lanPorts {
+lanIpPort
+publicPort
+type
+}
+}
+logs(id: $logsId) {
+containerId
+lines {
+timestamp
+message
+}
+cursor
+}
+container(id: $containerId) {
+id
+names
+image
+imageId
+command
+created
+labels
+state
+status
+networkSettings
+mounts
+autoStart
+autoStartOrder
+autoStartWait
+templatePath
+projectUrl
+registryUrl
+supportUrl
+iconUrl
+webUiUrl
+shell
+isOrphaned
+isUpdateAvailable
+isRebuildReady
+tailscaleEnabled
+}
+organizer {
+version
+views {
+id
+name
+rootId
+flatEntries {
+id
+type
+name
+parentId
+depth
+position
+path
+hasChildren
+childrenIds
+meta {
+id
+names
+image
+imageId
+command
+created
+labels
+state
+status
+networkSettings
+mounts
+autoStart
+autoStartOrder
+autoStartWait
+templatePath
+projectUrl
+registryUrl
+supportUrl
+iconUrl
+webUiUrl
+shell
+isOrphaned
+isUpdateAvailable
+isRebuildReady
+tailscaleEnabled
+}
+}
+prefs
+}
+}
+containerUpdateStatuses {
+name
+updateStatus
+}
+}
+disks {
+id
+device
+type
+name
+vendor
+size
+bytesPerSector
+totalCylinders
+totalHeads
+totalSectors
+totalTracks
+tracksPerCylinder
+sectorsPerTrack
+firmwareRevision
+serialNum
+interfaceType
+smartStatus
+temperature
+partitions {
+name
+fsType
+size
+}
+isSpinning
+}
+assignableDisks {
+id
+device
+type
+name
+vendor
+size
+bytesPerSector
+totalCylinders
+totalHeads
+totalSectors
+totalTracks
+tracksPerCylinder
+sectorsPerTrack
+firmwareRevision
+serialNum
+interfaceType
+smartStatus
+temperature
+isSpinning
+}
+disk(id: $diskId) {
+id
+device
+type
+name
+vendor
+size
+bytesPerSector
+totalCylinders
+totalHeads
+totalSectors
+totalTracks
+tracksPerCylinder
+sectorsPerTrack
+firmwareRevision
+serialNum
+interfaceType
+smartStatus
+temperature
+isSpinning
+}
+rclone {
+configForm {
+id
+dataSchema
+uiSchema
+}
+drives {
+name
+options
+}
+remotes {
+name
+type
+parameters
+config
+}
+}
+logFiles {
+name
+path
+size
+modifiedAt
+}
+logFile(path: $path) {
+path
+content
+totalLines
+startLine
+}
+settings {
+id
+unified {
+id
+dataSchema
+uiSchema
+values
+}
+sso {
+id
+}
+api {
+version
+extraOrigins
+sandbox
+ssoSubIds
+plugins
+}
+}
+isSSOEnabled
+publicOidcProviders {
+id
+name
+buttonText
+buttonIcon
+buttonVariant
+buttonStyle
+}
+oidcProviders {
+id
+name
+clientId
+clientSecret
+issuer
+authorizationEndpoint
+tokenEndpoint
+jwksUri
+scopes
+authorizationRules {
+claim
+operator
+value
+}
+authorizationRuleMode
+buttonText
+buttonIcon
+buttonVariant
+buttonStyle
+}
+oidcProvider(id: $oidcProviderId) {
+id
+name
+clientId
+clientSecret
+issuer
+authorizationEndpoint
+tokenEndpoint
+jwksUri
+scopes
+authorizationRuleMode
+buttonText
+buttonIcon
+buttonVariant
+buttonStyle
+}
+oidcConfiguration {
+providers {
+id
+name
+clientId
+clientSecret
+issuer
+authorizationEndpoint
+tokenEndpoint
+jwksUri
+scopes
+authorizationRuleMode
+buttonText
+buttonIcon
+buttonVariant
+buttonStyle
+}
+defaultAllowedOrigins
+}
+validateOidcSession(token: $token) {
+valid
+username
+}
+networkInterfaces {
+id
+name
+description
+macAddress
+mtu
+speed
+duplex
+internal
+virtual
+operstate
+type
+vlanId
+ipv4Addresses {
+address
+netmask
+}
+ipv6Addresses {
+address
+prefixLength
+}
+status
+protocol
+ipAddress
+netmask
+gateway
+useDhcp
+ipv6Address
+ipv6Netmask
+ipv6Gateway
+useDhcp6
+}
+metrics {
+id
+cpu {
+id
+percentTotal
+cpus {
+percentTotal
+percentUser
+percentSystem
+percentNice
+percentIdle
+percentIrq
+percentGuest
+percentSteal
+}
+}
+memory {
+id
+total
+used
+free
+available
+active
+buffcache
+percentTotal
+swapTotal
+swapUsed
+swapFree
+percentSwapTotal
+}
+temperature {
+id
+sensors {
+id
+name
+type
+location
+current {
+value
+unit
+timestamp
+status
+}
+min {
+value
+unit
+timestamp
+status
+}
+max {
+value
+unit
+timestamp
+status
+}
+warning
+critical
+history {
+value
+unit
+timestamp
+status
+}
+}
+summary {
+average
+hottest {
+id
+name
+type
+location
+warning
+critical
+}
+coolest {
+id
+name
+type
+location
+warning
+critical
+}
+warningCount
+criticalCount
+}
+}
+network {
+id
+name
+operstate
+bytesReceived
+bytesSent
+packetsReceived
+packetsSent
+receiveErrors
+transmitErrors
+receiveDropped
+transmitDropped
+rxSec
+txSec
+utilizationPercent
+lastUpdated
+}
+}
+systemTime {
+currentTime
+timeZone
+useNtp
+ntpServers
+}
+timeZoneOptions {
+value
+label
+}
+upsDevices {
+id
+name
+model
+status
+battery {
+chargeLevel
+estimatedRuntime
+health
+}
+power {
+inputVoltage
+outputVoltage
+loadPercentage
+nominalPower
+currentPower
+}
+}
+upsDeviceById(id: $upsDeviceByIdId) {
+id
+name
+model
+status
+}
+upsConfiguration {
+service
+upsCable
+customUpsCable
+upsType
+device
+overrideUpsCapacity
+batteryLevel
+minutes
+timeout
+killUps
+nisIp
+netServer
+upsName
+modelName
+}
+pluginInstallOperation(operationId: $operationId) {
+id
+url
+name
+status
+createdAt
+updatedAt
+finishedAt
+output
+}
+pluginInstallOperations {
+id
+url
+name
+status
+createdAt
+updatedAt
+finishedAt
+output
+}
+installedUnraidPlugins
+plugins {
+name
+version
+hasApiModule
+hasCliModule
+}
+remoteAccess {
+accessType
+forwardType
+port
+}
+connect {
+id
+dynamicRemoteAccess {
+enabledType
+runningType
+error
+}
+settings {
+id
+dataSchema
+uiSchema
+values {
+accessType
+forwardType
+port
+}
+}
+}
+network {
+id
+accessUrls {
+type
+name
+ipv4
+ipv6
+}
+}
+cloud {
+error
+apiKey {
+valid
+error
+}
+relay {
+status
+timeout
+error
+}
+minigraphql {
+status
+timeout
+error
+}
+cloud {
+status
+ip
+error
+}
+allowedOrigins
+}
+}
