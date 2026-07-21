@@ -7,6 +7,7 @@
 .pub-cache/
 .pub/
 build/
+dist/
 ios/Flutter/Flutter.framework
 ios/Flutter/Flutter.podspec
 android/.gradle/

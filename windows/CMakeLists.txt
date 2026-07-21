@@ -6,6 +6,27 @@ project(unraider LANGUAGES CXX)
 # the on-disk name of your application.
 set(BINARY_NAME "unraider")
 
+set(UNRAIDER_VERSION "1.0.0" CACHE STRING "Release package version.")
+set(UNRAIDER_WINDOWS_ARCHITECTURES
+  windows-x64
+  windows-arm64)
+set(UNRAIDER_LINUX_ARCHITECTURES
+  linux-x64
+  linux-arm64
+  linux-riscv64)
+set(UNRAIDER_MACOS_ARCHITECTURES
+  macos-x64
+  macos-arm64
+  macos-universal)
+set(UNRAIDER_DESKTOP_ARCHITECTURES
+  ${UNRAIDER_WINDOWS_ARCHITECTURES}
+  ${UNRAIDER_LINUX_ARCHITECTURES}
+  ${UNRAIDER_MACOS_ARCHITECTURES})
+set(UNRAIDER_PACKAGE_ARCH "" CACHE STRING
+  "Desktop package architecture. Use one of UNRAIDER_DESKTOP_ARCHITECTURES.")
+set_property(CACHE UNRAIDER_PACKAGE_ARCH PROPERTY STRINGS
+  "" ${UNRAIDER_DESKTOP_ARCHITECTURES})
+
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
 cmake_policy(VERSION 3.14...3.25)
@@ -28,6 +49,29 @@ set(CMAKE_EXE_LINKER_FLAGS_PROFILE "${CMAKE_EXE_LINKER_FLAGS_RELEASE}")
 set(CMAKE_SHARED_LINKER_FLAGS_PROFILE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE}")
 set(CMAKE_C_FLAGS_PROFILE "${CMAKE_C_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
+
+if(NOT UNRAIDER_PACKAGE_ARCH)
+  set(UNRAIDER_PACKAGE_ARCH "windows-x64")
+endif()
+
+if(NOT UNRAIDER_PACKAGE_ARCH IN_LIST
+    UNRAIDER_DESKTOP_ARCHITECTURES)
+  message(FATAL_ERROR
+    "Unsupported UNRAIDER_PACKAGE_ARCH: ${UNRAIDER_PACKAGE_ARCH}")
+endif()
+
+if(NOT UNRAIDER_PACKAGE_ARCH IN_LIST
+    UNRAIDER_WINDOWS_ARCHITECTURES)
+  message(FATAL_ERROR
+    "windows/CMakeLists.txt can only build Windows desktop packages. "
+    "Requested ${UNRAIDER_PACKAGE_ARCH}; use the platform host command "
+    "from README.md for Linux or macOS.")
+endif()
+
+set(UNRAIDER_DESKTOP_PACKAGE_NAME
+  "${BINARY_NAME}-${UNRAIDER_PACKAGE_ARCH}-v${UNRAIDER_VERSION}")
+message(STATUS "Desktop release matrix: ${UNRAIDER_DESKTOP_ARCHITECTURES}")
+message(STATUS "Windows release package: ${UNRAIDER_DESKTOP_PACKAGE_NAME}.zip")
 
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
@@ -106,3 +150,16 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+set(UNRAIDER_DIST_DIR "${CMAKE_SOURCE_DIR}/../dist")
+set(UNRAIDER_PACKAGE_PATH
+  "${UNRAIDER_DIST_DIR}/${UNRAIDER_DESKTOP_PACKAGE_NAME}.zip")
+
+add_custom_target(package_release
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${UNRAIDER_DIST_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E tar "cf" "${UNRAIDER_PACKAGE_PATH}"
+    --format=zip -- "."
+  WORKING_DIRECTORY "$<TARGET_FILE_DIR:${BINARY_NAME}>"
+  DEPENDS ${BINARY_NAME}
+  COMMENT "Packaging ${UNRAIDER_DESKTOP_PACKAGE_NAME}.zip"
+  VERBATIM)

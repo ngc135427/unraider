@@ -1,9 +1,10 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // The Flutter Gradle Plugin must be applied after the Android Gradle plugin.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+val androidReleaseAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 
 android {
     namespace = "com.ngc.unraider"
@@ -24,10 +25,29 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        ndk {
+            abiFilters += androidReleaseAbis
+        }
     }
 
     lint {
         checkReleaseBuilds = false
+    }
+
+    packaging {
+        resources {
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*androidReleaseAbis.toTypedArray())
+            isUniversalApk = true
+        }
     }
 
     buildTypes {
@@ -47,4 +67,8 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation("com.hierynomus:smbj:0.14.0")
 }

@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import 'pages/album_page.dart';
@@ -6,10 +9,47 @@ import 'pages/login_page.dart';
 import 'pages/main_shell_page.dart';
 import 'pages/music_page.dart';
 import 'pages/register_page.dart';
+import 'services/app_logger.dart';
 import 'theme/app_theme.dart';
 
-void main() {
-  runApp(const UnraiderApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AppLogger.initialize();
+
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    unawaited(
+      AppLogger.log(
+        'flutter_error',
+        error: details.exception,
+        stackTrace: details.stack,
+      ),
+    );
+  };
+
+  PlatformDispatcher.instance.onError = (error, stackTrace) {
+    unawaited(
+      AppLogger.log(
+        'platform_error',
+        error: error,
+        stackTrace: stackTrace,
+      ),
+    );
+    return true;
+  };
+
+  runZonedGuarded(
+    () => runApp(const UnraiderApp()),
+    (error, stackTrace) {
+      unawaited(
+        AppLogger.log(
+          'zone_error',
+          error: error,
+          stackTrace: stackTrace,
+        ),
+      );
+    },
+  );
 }
 
 class UnraiderApp extends StatelessWidget {

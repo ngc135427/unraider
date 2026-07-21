@@ -132,6 +132,7 @@ class _LoginPageState extends State<LoginPage> {
       if (rememberedLogin.rememberMe) {
         _domainController.text = rememberedLogin.domain;
         _usernameController.text = rememberedLogin.username;
+        _passwordController.text = rememberedLogin.password;
         _useHttps = rememberedLogin.useHttps;
       }
     });
@@ -144,6 +145,7 @@ class _LoginPageState extends State<LoginPage> {
       username: _usernameController.text.trim().isEmpty
           ? 'root'
           : _usernameController.text.trim(),
+      password: _passwordController.text,
       useHttps: _useHttps,
     );
   }
@@ -172,122 +174,125 @@ class _LoginPageState extends State<LoginPage> {
                 borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
               ),
               child: FadeSlide(
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        '服务器地址',
-                        style: TextStyle(
-                          color: AppTheme.textMedium,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
+                child: SingleChildScrollView(
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '服务器地址',
+                          style: TextStyle(
+                            color: AppTheme.textMedium,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      _ProtocolDomainField(
-                        useHttps: _useHttps,
-                        controller: _domainController,
-                        focusNode: _domainFocusNode,
-                        onToggle: () => setState(() => _useHttps = !_useHttps),
-                      ),
-                      const SizedBox(height: 21),
-                      AppTextField(
-                        label: '用户名',
-                        controller: _usernameController,
-                        focusNode: _usernameFocusNode,
-                        hint: 'root',
-                        suffixIcon: const Icon(
-                          Icons.person_outline,
-                          color: Color(0xFFA0A8B9),
+                        const SizedBox(height: 8),
+                        _ProtocolDomainField(
+                          useHttps: _useHttps,
+                          controller: _domainController,
+                          focusNode: _domainFocusNode,
+                          onToggle: () =>
+                              setState(() => _useHttps = !_useHttps),
                         ),
-                        validator: (value) {
-                          final text = (value ?? '').trim();
-                          if (text.isEmpty) {
-                            return '请输入用户名';
-                          }
-                          if (text != 'root') {
-                            return 'Unraid WebGUI 仅支持 root 用户登录';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 21),
-                      AppTextField(
-                        label: '密码',
-                        controller: _passwordController,
-                        focusNode: _passwordFocusNode,
-                        hint: '请输入 root 密码',
-                        obscureText: !_showPassword,
-                        suffixIcon: IconButton(
-                          tooltip: _showPassword ? '隐藏密码' : '显示密码',
-                          onPressed: () {
-                            setState(() => _showPassword = !_showPassword);
+                        const SizedBox(height: 21),
+                        AppTextField(
+                          label: '用户名',
+                          controller: _usernameController,
+                          focusNode: _usernameFocusNode,
+                          hint: 'root',
+                          suffixIcon: const Icon(
+                            Icons.person_outline,
+                            color: Color(0xFFA0A8B9),
+                          ),
+                          validator: (value) {
+                            final text = (value ?? '').trim();
+                            if (text.isEmpty) {
+                              return '请输入用户名';
+                            }
+                            if (text != 'root') {
+                              return 'Unraid WebGUI 仅支持 root 用户登录';
+                            }
+                            return null;
                           },
-                          icon: Icon(
-                            _showPassword
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                            color: const Color(0xFFA0A8B9),
-                          ),
                         ),
-                        validator: (value) {
-                          if ((value ?? '').trim().isEmpty) {
-                            return '请输入密码';
-                          }
-                          return null;
-                        },
-                      ),
-                      const SizedBox(height: 18),
-                      Row(
-                        children: [
-                          Checkbox(
-                            value: _rememberMe,
-                            activeColor: AppTheme.secondary,
-                            visualDensity: VisualDensity.compact,
-                            onChanged: (value) {
-                              setState(() => _rememberMe = value ?? false);
+                        const SizedBox(height: 21),
+                        AppTextField(
+                          label: '密码',
+                          controller: _passwordController,
+                          focusNode: _passwordFocusNode,
+                          hint: '请输入 root 密码',
+                          obscureText: !_showPassword,
+                          suffixIcon: IconButton(
+                            tooltip: _showPassword ? '隐藏密码' : '显示密码',
+                            onPressed: () {
+                              setState(() => _showPassword = !_showPassword);
                             },
-                          ),
-                          const Text(
-                            '记住我',
-                            style: TextStyle(
-                              color: AppTheme.textMedium,
-                              fontSize: 14,
+                            icon: Icon(
+                              _showPassword
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                              color: const Color(0xFFA0A8B9),
                             ),
                           ),
-                          const Spacer(),
-                          const Icon(
-                            Icons.lock_outline,
-                            color: AppTheme.textLight,
-                            size: 18,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      if (_errorMessage != null) ...[
-                        Text(
-                          _errorMessage!,
-                          style: const TextStyle(
-                            color: AppTheme.danger,
-                            fontSize: 13,
-                          ),
+                          validator: (value) {
+                            if ((value ?? '').trim().isEmpty) {
+                              return '请输入密码';
+                            }
+                            return null;
+                          },
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            Checkbox(
+                              value: _rememberMe,
+                              activeColor: AppTheme.secondary,
+                              visualDensity: VisualDensity.compact,
+                              onChanged: (value) {
+                                setState(() => _rememberMe = value ?? false);
+                              },
+                            ),
+                            const Text(
+                              '记住我',
+                              style: TextStyle(
+                                color: AppTheme.textMedium,
+                                fontSize: 14,
+                              ),
+                            ),
+                            const Spacer(),
+                            const Icon(
+                              Icons.lock_outline,
+                              color: AppTheme.textLight,
+                              size: 18,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        if (_errorMessage != null) ...[
+                          Text(
+                            _errorMessage!,
+                            style: const TextStyle(
+                              color: AppTheme.danger,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        GradientButton(
+                          label: _loginSucceeded
+                              ? '登录成功'
+                              : _isSubmitting
+                                  ? '正在连接'
+                                  : '登录',
+                          icon: _loginSucceeded ? Icons.check : null,
+                          isSuccess: _loginSucceeded,
+                          onPressed:
+                              _loginSucceeded || _isSubmitting ? null : _submit,
+                        ),
                       ],
-                      GradientButton(
-                        label: _loginSucceeded
-                            ? '登录成功'
-                            : _isSubmitting
-                                ? '正在连接'
-                                : '登录',
-                        icon: _loginSucceeded ? Icons.check : null,
-                        isSuccess: _loginSucceeded,
-                        onPressed:
-                            _loginSucceeded || _isSubmitting ? null : _submit,
-                      ),
-                    ],
+                    ),
                   ),
                 ),
               ),

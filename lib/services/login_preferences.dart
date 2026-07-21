@@ -5,12 +5,14 @@ class RememberedLogin {
     this.rememberMe = false,
     this.domain = '',
     this.username = 'root',
+    this.password = '',
     this.useHttps = false,
   });
 
   final bool rememberMe;
   final String domain;
   final String username;
+  final String password;
   final bool useHttps;
 }
 
@@ -31,6 +33,7 @@ class LoginPreferences {
         username: _asString(result['username']).isEmpty
             ? 'root'
             : _asString(result['username']),
+        password: _asString(result['password']),
         useHttps: result['useHttps'] == true,
       );
     } on MissingPluginException {
@@ -42,6 +45,7 @@ class LoginPreferences {
     required bool rememberMe,
     required String domain,
     required String username,
+    required String password,
     required bool useHttps,
   }) async {
     try {
@@ -49,6 +53,7 @@ class LoginPreferences {
         'rememberMe': rememberMe,
         'domain': domain,
         'username': username,
+        'password': password,
         'useHttps': useHttps,
       });
     } on MissingPluginException {

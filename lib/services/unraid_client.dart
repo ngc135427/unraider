@@ -1,7 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
+
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+
+import 'app_logger.dart';
 
 class UnraidClientException implements Exception {
   const UnraidClientException(this.message);
@@ -13,6 +19,8 @@ class UnraidClientException implements Exception {
 }
 
 typedef UnraidClient = UnraidWebGuiClient;
+
+const _remoteFileChannel = MethodChannel('unraider/remote_file');
 
 class UnraidWebGuiClient {
   UnraidWebGuiClient({
@@ -31,6 +39,10 @@ class UnraidWebGuiClient {
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
   String? _csrfToken;
+  SSHClient? _sshClient;
+  SftpClient? _sftpClient;
+  Future<int>? _sshPortFuture;
+  Future<void> _sftpTransferQueue = Future<void>.value();
 
   Future<void> checkConnection() async {
     await _login();
@@ -127,30 +139,21 @@ class UnraidWebGuiClient {
       throw const UnraidClientException('Web 端暂不支持浏览 Unraid 文件系统');
     }
 
-    await _ensureCsrfToken();
-    final uri = _uri('/webGui/include/Browse.php').replace(
-      queryParameters: <String, String>{
-        'dir': path,
-        'path': 'Browse',
-      },
-    );
-
-    http.Response response;
+    final normalized = _normalizeUnraidPath(path);
     try {
-      response =
-          await _sendUri('GET', uri).timeout(const Duration(seconds: 20));
+      final output = await _runSshCommand(
+        '读取目录',
+        _buildSshDirectoryListCommand(normalized),
+        timeout: const Duration(seconds: 20),
+      );
+      return parseSshDirectoryListing(output, normalized);
     } on TimeoutException {
       throw const UnraidClientException('读取目录超时');
+    } on UnraidClientException {
+      rethrow;
     } on Object catch (error) {
       throw UnraidClientException('无法读取目录：$error');
     }
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw UnraidClientException('目录接口返回 HTTP ${response.statusCode}');
-    }
-
-    final html = utf8.decode(response.bodyBytes, allowMalformed: true);
-    return _parseBrowseHtml(html, path);
   }
 
   Future<void> ensureDirectory(String path) async {
@@ -163,7 +166,7 @@ class UnraidWebGuiClient {
       throw const UnraidClientException('目录必须位于 /mnt 或 /boot 下');
     }
 
-    if (await _directoryExists(normalized)) {
+    if (await _sshDirectoryExists(normalized)) {
       return;
     }
 
@@ -176,28 +179,23 @@ class UnraidWebGuiClient {
     }
 
     late String current;
-    late int nextIndex;
     if (parts.first == 'boot') {
       current = '/boot';
-      nextIndex = 1;
     } else if (parts.first == 'mnt' && parts.length >= 3) {
       current = '/mnt/${parts[1]}/${parts[2]}';
-      nextIndex = 3;
     } else {
       throw const UnraidClientException('目标目录必须是 /mnt/<类型>/<共享> 或 /boot 下的路径');
     }
 
-    if (!await _directoryExists(current)) {
+    if (!await _sshDirectoryExists(current)) {
       throw UnraidClientException('基础目录不存在：$current');
     }
 
-    for (final segment in parts.skip(nextIndex)) {
-      final next = _joinPath(current, segment);
-      if (!await _directoryExists(next)) {
-        await _createDirectory(current, segment);
-      }
-      current = next;
-    }
+    await _runSshCommand(
+      '创建目录',
+      'mkdir -p -- ${shellQuote(normalized)}',
+      timeout: const Duration(seconds: 30),
+    );
   }
 
   Future<Uint8List> fetchFileBytes(String path) async {
@@ -205,28 +203,134 @@ class UnraidWebGuiClient {
       throw const UnraidClientException('Web 端暂不支持直接读取 Unraid 文件');
     }
 
-    final uri = _fileUri(path);
-    http.Response response;
+    final normalized = _normalizeUnraidPath(path);
+    final stopwatch = Stopwatch()..start();
+    final smbPath = smbSharePathFromUnraidPath(normalized);
+    if (defaultTargetPlatform == TargetPlatform.android && smbPath != null) {
+      return _fetchFileBytesViaAndroidSmb(
+        normalizedPath: normalized,
+        smbPath: smbPath,
+        stopwatch: stopwatch,
+      );
+    }
+
     try {
-      response =
-          await _sendUri('GET', uri).timeout(const Duration(seconds: 30));
-    } on TimeoutException {
+      final host = Uri.parse(baseUrl).host;
+      final port = await _resolveSshPort();
+      final sshUsername = username;
+      final sshPassword = _password;
+      await AppLogger.log('fetch_file_bytes_isolate_start path=$normalized');
+      final bytes = await Isolate.run(
+        () => _readRemoteFileViaSsh(
+          host: host,
+          port: port,
+          username: sshUsername,
+          password: sshPassword,
+          path: normalized,
+        ),
+      ).timeout(const Duration(seconds: 45));
+      await AppLogger.log(
+        'fetch_file_bytes_isolate_success path=$normalized bytes=${bytes.length} '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      return bytes;
+    } on TimeoutException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_timeout path=$normalized '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw const UnraidClientException('加载文件超时');
-    } on Object catch (error) {
+    } on UnraidClientException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_client_error path=$normalized '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_error path=$normalized '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw UnraidClientException('无法加载文件：$error');
     }
+  }
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw UnraidClientException('文件接口返回 HTTP ${response.statusCode}');
+  Future<Uint8List> _fetchFileBytesViaAndroidSmb({
+    required String normalizedPath,
+    required SmbSharePath smbPath,
+    required Stopwatch stopwatch,
+  }) async {
+    try {
+      await AppLogger.log(
+        'fetch_file_bytes_smb_start path=$normalizedPath '
+        'share=${smbPath.share}',
+      );
+      final bytes = await _remoteFileChannel.invokeMethod<Uint8List>(
+        'readSmbFile',
+        <String, Object?>{
+          'host': Uri.parse(baseUrl).host,
+          'username': username,
+          'password': _password,
+          'share': smbPath.share,
+          'relativePath': smbPath.relativePath,
+        },
+      ).timeout(const Duration(seconds: 45));
+      if (bytes == null) {
+        throw const UnraidClientException('SMB 没有返回文件内容');
+      }
+      await AppLogger.log(
+        'fetch_file_bytes_smb_success path=$normalizedPath '
+        'bytes=${bytes.length} elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      return bytes;
+    } on TimeoutException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_smb_timeout path=$normalizedPath '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw const UnraidClientException('SMB 加载文件超时');
+    } on PlatformException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_smb_error path=$normalizedPath '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UnraidClientException(
+        'SMB 读取失败：${error.message ?? error.code}',
+      );
+    } on UnraidClientException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_smb_client_error path=$normalizedPath '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_bytes_smb_error path=$normalizedPath '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UnraidClientException('SMB 读取失败：$error');
     }
-
-    return response.bodyBytes;
   }
 
   Future<void> uploadFile({
     required String targetPath,
     required int sizeBytes,
     required Future<Uint8List> Function(int offset, int length) readChunk,
+    DateTime? modifiedDate,
     int chunkSize = 4 * 1024 * 1024,
   }) async {
     if (kIsWeb) {
@@ -235,37 +339,153 @@ class UnraidWebGuiClient {
     if (!_isWritableFilePath(targetPath)) {
       throw const UnraidClientException('目标路径必须位于 /mnt 或 /boot 下');
     }
-    await _ensureCsrfToken();
 
-    var offset = 0;
+    final normalized = _normalizeUnraidPath(targetPath);
+    await ensureDirectory(_parentPath(normalized));
     try {
-      while (offset < sizeBytes || (sizeBytes == 0 && offset == 0)) {
-        final remaining = sizeBytes - offset;
-        final length = sizeBytes == 0
-            ? 0
-            : remaining < chunkSize
-                ? remaining
-                : chunkSize;
-        final chunk =
-            sizeBytes == 0 ? Uint8List(0) : await readChunk(offset, length);
-        if (chunk.length < length) {
-          throw const UnraidClientException('读取本机媒体文件失败');
+      await _runSftpTransfer(() async {
+        SftpFile? file;
+        var offset = 0;
+        try {
+          final sftp = await _ensureSftpClient();
+          file = await sftp.open(
+            normalized,
+            mode: SftpFileOpenMode.create |
+                SftpFileOpenMode.truncate |
+                SftpFileOpenMode.write,
+          );
+          while (offset < sizeBytes || (sizeBytes == 0 && offset == 0)) {
+            final remaining = sizeBytes - offset;
+            final length = sizeBytes == 0
+                ? 0
+                : remaining < chunkSize
+                    ? remaining
+                    : chunkSize;
+            final chunk =
+                sizeBytes == 0 ? Uint8List(0) : await readChunk(offset, length);
+            if (chunk.length < length) {
+              throw const UnraidClientException('读取本机媒体文件失败');
+            }
+            if (chunk.isNotEmpty) {
+              await file.writeBytes(chunk, offset: offset);
+            }
+            offset += chunk.length;
+            if (sizeBytes == 0) {
+              break;
+            }
+          }
+        } finally {
+          await file?.close();
         }
-        await _postUploadChunk(
-          targetPath: targetPath,
-          offset: offset,
-          bytes: chunk,
+      });
+      if (modifiedDate != null && modifiedDate.millisecondsSinceEpoch > 0) {
+        await _runSshCommand(
+          '保留文件时间',
+          buildSetModifiedTimeCommand(normalized, modifiedDate),
+          timeout: const Duration(seconds: 20),
         );
-        offset += chunk.length;
-        if (sizeBytes == 0) {
-          break;
-        }
       }
-      await _postUploadStop(targetPath);
-    } on Object {
-      await _postUploadCancel(targetPath);
+    } on TimeoutException {
+      throw const UnraidClientException('上传文件超时');
+    } on UnraidClientException {
       rethrow;
+    } on Object catch (error) {
+      throw UnraidClientException('无法上传文件：$error');
     }
+  }
+
+  Future<void> uploadLocalMediaFile({
+    required String targetPath,
+    required String sourceUri,
+    required int sizeBytes,
+    DateTime? modifiedDate,
+    int chunkSize = 4 * 1024 * 1024,
+  }) async {
+    if (kIsWeb) {
+      throw const UnraidClientException('Web 端暂不支持上传文件到 Unraid');
+    }
+    if (!_isWritableFilePath(targetPath)) {
+      throw const UnraidClientException('目标路径必须位于 /mnt 或 /boot 下');
+    }
+    final rootToken = RootIsolateToken.instance;
+    if (rootToken == null) {
+      throw const UnraidClientException('后台上传初始化失败');
+    }
+
+    final normalized = _normalizeUnraidPath(targetPath);
+    await ensureDirectory(_parentPath(normalized));
+    final port = await _resolveSshPort();
+    try {
+      await Isolate.run(
+        () => _uploadLocalMediaFileInBackground(
+          _LocalMediaUploadRequest(
+            rootToken: rootToken,
+            host: Uri.parse(baseUrl).host,
+            port: port,
+            username: username,
+            password: _password,
+            targetPath: normalized,
+            sourceUri: sourceUri,
+            sizeBytes: sizeBytes,
+            modifiedMs: modifiedDate?.millisecondsSinceEpoch,
+            chunkSize: chunkSize,
+          ),
+        ),
+      );
+    } on TimeoutException {
+      throw const UnraidClientException('上传文件超时');
+    } on UnraidClientException {
+      rethrow;
+    } on Object catch (error) {
+      throw UnraidClientException('无法上传文件：$error');
+    }
+  }
+
+  Future<void> movePath({
+    required String sourcePath,
+    required String targetPath,
+  }) async {
+    final source = _normalizeUnraidPath(sourcePath);
+    final target = _normalizeUnraidPath(targetPath);
+    if (!_isWritableDirectoryPath(source) || !_isWritableFilePath(target)) {
+      throw const UnraidClientException('移动路径必须位于 /mnt 或 /boot 下');
+    }
+    _throwIfUnsafeDestructivePath(source, '源路径');
+    await _runSshCommand(
+      '移动文件',
+      'mv -- ${shellQuote(source)} ${shellQuote(target)}',
+      timeout: const Duration(minutes: 2),
+    );
+  }
+
+  Future<void> renamePath({
+    required String path,
+    required String newName,
+  }) async {
+    final trimmedName = newName.trim();
+    if (!_isValidRemoteName(trimmedName)) {
+      throw const UnraidClientException('新名称无效');
+    }
+    final normalized = _normalizeUnraidPath(path);
+    await movePath(
+      sourcePath: normalized,
+      targetPath: _joinPath(_parentPath(normalized), trimmedName),
+    );
+  }
+
+  Future<void> deletePath(String path) async {
+    final normalized = _normalizeUnraidPath(path);
+    if (!_isWritableDirectoryPath(normalized)) {
+      throw const UnraidClientException('删除路径必须位于 /mnt 或 /boot 下');
+    }
+    _throwIfUnsafeDestructivePath(normalized, '删除路径');
+    await _runSshCommand(
+      '删除文件',
+      'if [ -d ${shellQuote(normalized)} ]; then '
+          'rm -rf -- ${shellQuote(normalized)}; else '
+          'rm -f -- ${shellQuote(normalized)}; fi',
+      timeout: const Duration(minutes: 2),
+    );
   }
 
   Future<List<UnraidFileEntry>> fetchMediaFiles(
@@ -299,60 +519,218 @@ class UnraidWebGuiClient {
   }
 
   void close() {
+    _sftpClient?.close();
+    _sshClient?.close();
     _httpClient.close();
   }
 
-  Future<bool> _directoryExists(String path) async {
+  Future<SSHClient> _ensureSshClient() async {
+    final existing = _sshClient;
+    if (existing != null && !existing.isClosed) {
+      return existing;
+    }
+
+    final host = Uri.parse(baseUrl).host;
+    final port = await _resolveSshPort();
     try {
-      await fetchDirectory(path);
-      return true;
-    } on Object {
-      return false;
+      final socket = await SSHSocket.connect(
+        host,
+        port,
+        timeout: const Duration(seconds: 10),
+      );
+      final client = SSHClient(
+        socket,
+        username: username,
+        onPasswordRequest: () => _password,
+        ident: 'unraider',
+      );
+      await client.authenticated.timeout(const Duration(seconds: 15));
+      _sshClient = client;
+      _sftpClient = null;
+      return client;
+    } on TimeoutException {
+      throw UnraidClientException('SSH 连接超时：$host:$port');
+    } on UnraidClientException {
+      rethrow;
+    } on Object catch (error) {
+      throw UnraidClientException('无法连接 SSH：$error');
     }
   }
 
-  Future<void> _createDirectory(String parentPath, String name) async {
-    final folderName = name.trim();
-    if (folderName.isEmpty ||
-        folderName.contains('/') ||
-        folderName.contains(r'\')) {
-      throw const UnraidClientException('目录名称无效');
+  Future<SftpClient> _ensureSftpClient() async {
+    final ssh = await _ensureSshClient();
+    final existing = _sftpClient;
+    if (existing != null && !ssh.isClosed) {
+      return existing;
     }
 
-    await _ensureCsrfToken();
-    await _send(
-      'POST',
-      '/webGui/include/Control.php',
-      fields: <String, String>{
-        'mode': 'file',
-        'action': '0',
-        'title': Uri.encodeComponent('Create folder'),
-        'source': Uri.encodeComponent(parentPath),
-        'target': Uri.encodeComponent(folderName),
-        'hdlink': '',
-        'sparse': '',
-        'exist': '',
-        'zfs': '',
-      },
-    );
+    try {
+      final sftp = await ssh.sftp().timeout(const Duration(seconds: 15));
+      await sftp.handshake.timeout(const Duration(seconds: 15));
+      _sftpClient = sftp;
+      return sftp;
+    } on TimeoutException {
+      throw const UnraidClientException('SFTP 连接超时');
+    } on Object catch (error) {
+      throw UnraidClientException('无法连接 SFTP：$error');
+    }
+  }
 
-    for (var i = 0; i < 20; i += 1) {
-      await Future<void>.delayed(const Duration(milliseconds: 500));
-      try {
-        final entries = await fetchDirectory(parentPath);
-        final found = entries.any(
-          (entry) => entry.isDirectory && entry.name == folderName,
-        );
-        if (found) {
-          return;
-        }
-      } on Object {
-        // Keep polling: Control.php starts the WebGUI file manager
-        // asynchronously, so the folder may not be visible immediately.
+  Future<T> _runSftpTransfer<T>(Future<T> Function() action) async {
+    final previous = _sftpTransferQueue;
+    final done = Completer<void>();
+    _sftpTransferQueue = done.future;
+    try {
+      await previous.catchError((Object _) {});
+      return await action();
+    } finally {
+      if (!done.isCompleted) {
+        done.complete();
       }
     }
+  }
 
-    throw UnraidClientException('创建目录失败：${_joinPath(parentPath, folderName)}');
+  Future<int> _resolveSshPort() {
+    return _sshPortFuture ??= _loadSshPort();
+  }
+
+  Future<int> _loadSshPort() async {
+    final config = await _fetchSshConfig();
+    if (config != null) {
+      if (config.useSsh == false) {
+        throw const UnraidClientException('Unraid SSH 服务未启用');
+      }
+      final port = config.port;
+      if (port != null && port > 0 && port <= 65535) {
+        return port;
+      }
+    }
+    return 22;
+  }
+
+  Future<_SshServiceConfig?> _fetchSshConfig() async {
+    try {
+      return await _fetchSshConfigFromGraphql() ??
+          await _fetchSshConfigFromSettingsPage();
+    } on UnraidClientException {
+      rethrow;
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<_SshServiceConfig?> _fetchSshConfigFromGraphql() async {
+    await _ensureCsrfToken();
+    const query = '''
+query UnraiderSshConfig {
+  config {
+    vars {
+      useSsh
+      portssh
+    }
+  }
+}
+''';
+    for (final path in const <String>['/graphql', '/api/graphql']) {
+      try {
+        final response = await _sendJsonPost(
+          _uri(path),
+          <String, Object?>{'query': query},
+          timeout: const Duration(seconds: 10),
+        );
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          continue;
+        }
+        final payload = jsonDecode(
+          utf8.decode(response.bodyBytes, allowMalformed: true),
+        );
+        final vars = _findNestedMap(payload, const <String>[
+          'data',
+          'config',
+          'vars',
+        ]);
+        if (vars == null) {
+          continue;
+        }
+        return _SshServiceConfig(
+          useSsh: _parseBoolish(vars['useSsh']),
+          port: _parsePort(vars['portssh']),
+        );
+      } on Object {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  Future<_SshServiceConfig?> _fetchSshConfigFromSettingsPage() async {
+    for (final path in const <String>[
+      '/Settings/ManagementAccess',
+      '/Settings/ManagementAccess.php',
+      '/Settings',
+    ]) {
+      try {
+        final response =
+            await _send('GET', path).timeout(const Duration(seconds: 10));
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          continue;
+        }
+        final html = utf8.decode(response.bodyBytes, allowMalformed: true);
+        final port = _parsePort(_htmlInputValue(html, 'portssh'));
+        final useSsh = _parseSettingsBool(html, 'useSsh');
+        if (port != null || useSsh != null) {
+          return _SshServiceConfig(useSsh: useSsh, port: port);
+        }
+      } on Object {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  Future<String> _runSshCommand(
+    String action,
+    String command, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final client = await _ensureSshClient();
+    try {
+      final result = await client
+          .runWithResult(command, stdout: true, stderr: true)
+          .timeout(timeout);
+      if (result.exitCode != 0) {
+        final error = utf8
+            .decode(
+              result.stderr.isNotEmpty ? result.stderr : result.stdout,
+              allowMalformed: true,
+            )
+            .trim();
+        throw UnraidClientException(
+          error.isEmpty
+              ? '$action失败：退出码 ${result.exitCode}'
+              : '$action失败：$error',
+        );
+      }
+      return utf8.decode(result.stdout, allowMalformed: true);
+    } on TimeoutException {
+      throw UnraidClientException('$action超时');
+    } on UnraidClientException {
+      rethrow;
+    } on Object catch (error) {
+      throw UnraidClientException('$action失败：$error');
+    }
+  }
+
+  Future<bool> _sshDirectoryExists(String path) async {
+    try {
+      final client = await _ensureSshClient();
+      final result = await client
+          .runWithResult('test -d ${shellQuote(_normalizeUnraidPath(path))}')
+          .timeout(const Duration(seconds: 10));
+      return result.exitCode == 0;
+    } on Object {
+      return false;
+    }
   }
 
   Future<void> _login() async {
@@ -406,70 +784,6 @@ class UnraidWebGuiClient {
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw UnraidClientException('电源命令失败：HTTP ${response.statusCode}');
-    }
-  }
-
-  Future<void> _postUploadChunk({
-    required String targetPath,
-    required int offset,
-    required Uint8List bytes,
-  }) async {
-    final uri = _uri('/webGui/include/Control.php').replace(
-      queryParameters: <String, String>{
-        'mode': 'upload',
-        'file': targetPath,
-        'start': '$offset',
-        'cancel': '0',
-      },
-    );
-    http.Response response;
-    try {
-      response = await _sendRawPost(
-        uri,
-        bytes,
-        timeout: const Duration(minutes: 10),
-      );
-    } on TimeoutException {
-      throw const UnraidClientException('上传文件超时');
-    } on Object catch (error) {
-      throw UnraidClientException('无法上传文件：$error');
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw UnraidClientException('上传接口返回 HTTP ${response.statusCode}');
-    }
-    final body = response.body.trim();
-    if (body == 'stop') {
-      throw const UnraidClientException('服务器拒绝上传，请检查目标目录');
-    }
-    if (body.startsWith('error')) {
-      throw UnraidClientException('上传失败：$body');
-    }
-  }
-
-  Future<void> _postUploadStop(String targetPath) async {
-    await _send(
-      'POST',
-      '/webGui/include/Control.php',
-      fields: <String, String>{
-        'mode': 'stop',
-        'file': Uri.encodeComponent(_basename(targetPath)),
-      },
-    );
-  }
-
-  Future<void> _postUploadCancel(String targetPath) async {
-    try {
-      final uri = _uri('/webGui/include/Control.php').replace(
-        queryParameters: <String, String>{
-          'mode': 'upload',
-          'file': targetPath,
-          'start': '0',
-          'cancel': '1',
-        },
-      );
-      await _sendRawPost(uri, Uint8List(0));
-    } on Object {
-      // Best effort cleanup only.
     }
   }
 
@@ -653,28 +967,25 @@ class UnraidWebGuiClient {
     return response;
   }
 
-  Future<http.Response> _sendRawPost(
+  Future<http.Response> _sendJsonPost(
     Uri uri,
-    Uint8List bytes, {
+    Map<String, Object?> payload, {
     Duration timeout = const Duration(seconds: 30),
   }) async {
-    final csrf = _csrfToken;
-    if (csrf == null) {
-      throw const UnraidClientException('缺少 csrf_token');
-    }
     final request = http.Request('POST', uri);
     request.followRedirects = false;
+    final csrf = _csrfToken;
     request.headers.addAll(<String, String>{
-      'Accept': '*/*',
+      'Accept': 'application/json',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': 'application/json',
       'Referer': '$baseUrl/',
       'User-Agent': 'unraider-webgui',
-      'X-CSRF-Token': csrf,
+      if (csrf != null) 'X-CSRF-Token': csrf,
       'X-Requested-With': 'XMLHttpRequest',
       if (_cookies.isNotEmpty) 'Cookie': _cookieHeader,
     });
-    request.bodyBytes = bytes;
+    request.body = jsonEncode(payload);
     final streamed = await _httpClient.send(request).timeout(timeout);
     final response = await http.Response.fromStream(streamed);
     _storeCookies(response);
@@ -684,16 +995,18 @@ class UnraidWebGuiClient {
         throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
       }
     }
+    final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+    _extractCsrf(body);
+    if (!_isRedirect(response.statusCode) && _looksLikeLoginPage(body)) {
+      throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
+    }
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw UnraidClientException('WebGUI 拒绝访问：HTTP ${response.statusCode}');
+    }
     return response;
   }
 
   Uri _uri(String path) => Uri.parse(baseUrl).resolve(path);
-
-  Uri _fileUri(String path) {
-    final normalized = path.startsWith('/') ? path : '/$path';
-    return Uri.parse(baseUrl)
-        .replace(pathSegments: normalized.split('/').skip(1));
-  }
 
   String get _cookieHeader =>
       _cookies.entries.map((entry) => '${entry.key}=${entry.value}').join('; ');
@@ -918,6 +1231,7 @@ class UnraidFileEntry {
     required this.name,
     required this.path,
     required this.isDirectory,
+    required this.sizeBytes,
     required this.size,
     required this.modified,
     required this.modifiedDate,
@@ -926,6 +1240,7 @@ class UnraidFileEntry {
   final String name;
   final String path;
   final bool isDirectory;
+  final int sizeBytes;
   final String size;
   final String modified;
   final DateTime? modifiedDate;
@@ -1043,64 +1358,53 @@ List<UnraidManagementItem> _parseVmItems(String body) {
   return items;
 }
 
-List<UnraidFileEntry> _parseBrowseHtml(String html, String parentPath) {
+@visibleForTesting
+String buildSshDirectoryListCommand(String path) {
+  return _buildSshDirectoryListCommand(_normalizeUnraidPath(path));
+}
+
+@visibleForTesting
+String buildSetModifiedTimeCommand(String path, DateTime modifiedDate) {
+  final seconds = modifiedDate.toUtc().millisecondsSinceEpoch ~/ 1000;
+  return 'touch -m -d @$seconds -- ${shellQuote(_normalizeUnraidPath(path))}';
+}
+
+String _buildSshDirectoryListCommand(String normalizedPath) {
+  return "LC_ALL=C find ${shellQuote(normalizedPath)} -mindepth 1 "
+      "-maxdepth 1 -printf '%p\\0%y\\0%s\\0%T@\\0%f\\0'";
+}
+
+@visibleForTesting
+List<UnraidFileEntry> parseSshDirectoryListing(
+  String output,
+  String parentPath,
+) {
   final entries = <UnraidFileEntry>[];
-  final rows = RegExp(
-    r'<tr\b[^>]*>(.*?)</tr>',
-    caseSensitive: false,
-    dotAll: true,
-  ).allMatches(html);
-
-  for (final row in rows) {
-    final rowHtml = row.group(1) ?? '';
-    if (rowHtml.contains('Parent Directory')) {
+  final fields = output.split('\u0000');
+  for (var i = 0; i + 4 < fields.length; i += 5) {
+    final rawPath = fields[i];
+    final type = fields[i + 1].trim();
+    final rawSize = fields[i + 2].trim();
+    final rawModified = fields[i + 3].trim();
+    final rawName = fields[i + 4];
+    if (rawPath.isEmpty || rawName.isEmpty) {
       continue;
     }
 
-    final rowAction = RegExp(
-      r'''<i\b[^>]*\bid=["']row_\d+["'][^>]*\bdata=["']([^"']*)["'][^>]*\btype=["']([df])["']''',
-      caseSensitive: false,
-      dotAll: true,
-    ).firstMatch(rowHtml);
-    final rawPath = rowAction?.group(1);
-    final type = rowAction?.group(2);
     final isDirectory = type == 'd';
-
-    final name = _decodeHtml(
-      _stripHtml(
-        _firstMatch(
-              rowHtml,
-              RegExp(
-                r'''<td\b[^>]*id=["']name_[^"']*["'][^>]*>(.*?)</td>''',
-                caseSensitive: false,
-                dotAll: true,
-              ),
-            ) ??
-            _firstMatch(
-              rowHtml,
-              RegExp(r'''<a\b[^>]*>(.*?)</a>''',
-                  caseSensitive: false, dotAll: true),
-            ) ??
-            '',
-      ),
-    ).trim();
-
-    if (name.isEmpty || rawPath == null) {
-      continue;
-    }
-
-    final decodedPath = _decodeHtml(rawPath);
-    final path = decodedPath.startsWith('/')
-        ? decodedPath
-        : _joinPath(parentPath, decodedPath);
-    final cells = _parseTableCells(rowHtml);
-    final size = isDirectory ? 0 : _parseSizeCell(cells, rowHtml);
-    final modifiedDate = _parseModifiedCell(cells, rowHtml);
+    final size = int.tryParse(rawSize) ?? 0;
+    final modifiedSeconds = double.tryParse(rawModified)?.floor() ?? 0;
+    final modifiedDate = modifiedSeconds > 0
+        ? DateTime.fromMillisecondsSinceEpoch(modifiedSeconds * 1000)
+        : DateTime.fromMillisecondsSinceEpoch(0);
+    final path =
+        rawPath.startsWith('/') ? rawPath : _joinPath(parentPath, rawPath);
     entries.add(
       UnraidFileEntry(
-        name: name,
+        name: rawName,
         path: path,
         isDirectory: isDirectory,
+        sizeBytes: isDirectory ? 0 : size,
         size: isDirectory ? '' : _formatSize(size),
         modified: _formatDate(modifiedDate),
         modifiedDate: modifiedDate,
@@ -1242,9 +1546,45 @@ bool _isWritableFilePath(String path) {
 
 bool _isWritableDirectoryPath(String path) {
   final normalized = _normalizeUnraidPath(path);
+  if (_hasUnsafePathSegment(normalized)) {
+    return false;
+  }
   return normalized.startsWith('/mnt/') ||
       normalized == '/boot' ||
       normalized.startsWith('/boot/');
+}
+
+@visibleForTesting
+bool isUnsafeDestructivePath(String path) {
+  final normalized = _normalizeUnraidPath(path);
+  if (normalized == '/' ||
+      normalized == '/mnt' ||
+      normalized == '/mnt/user' ||
+      normalized == '/boot') {
+    return true;
+  }
+  return RegExp(r'^/mnt/(?:disk[^/]*|cache[^/]*)$').hasMatch(normalized);
+}
+
+void _throwIfUnsafeDestructivePath(String path, String label) {
+  if (isUnsafeDestructivePath(path) || _hasUnsafePathSegment(path)) {
+    throw UnraidClientException('$label 不允许执行该操作');
+  }
+}
+
+bool _hasUnsafePathSegment(String path) {
+  return _normalizeUnraidPath(path)
+      .split('/')
+      .any((segment) => segment == '..' || segment == '.');
+}
+
+bool _isValidRemoteName(String name) {
+  return name.isNotEmpty &&
+      name != '.' &&
+      name != '..' &&
+      !name.contains('/') &&
+      !name.contains(r'\') &&
+      !name.contains('\u0000');
 }
 
 String _normalizeUnraidPath(String path) {
@@ -1271,10 +1611,204 @@ String _parentPath(String path) {
   return normalized.substring(0, slash);
 }
 
-String _basename(String path) {
-  final normalized = path.replaceAll('\\', '/');
-  final slash = normalized.lastIndexOf('/');
-  return slash >= 0 ? normalized.substring(slash + 1) : normalized;
+@visibleForTesting
+class SmbSharePath {
+  const SmbSharePath({
+    required this.share,
+    required this.relativePath,
+  });
+
+  final String share;
+  final String relativePath;
+}
+
+@visibleForTesting
+SmbSharePath? smbSharePathFromUnraidPath(String path) {
+  final normalized = _normalizeUnraidPath(path);
+  const prefix = '/mnt/user/';
+  if (!normalized.startsWith(prefix)) {
+    return null;
+  }
+
+  final remainder = normalized.substring(prefix.length);
+  final slash = remainder.indexOf('/');
+  if (slash <= 0 || slash == remainder.length - 1) {
+    return null;
+  }
+
+  return SmbSharePath(
+    share: remainder.substring(0, slash),
+    relativePath: remainder.substring(slash + 1),
+  );
+}
+
+class _LocalMediaUploadRequest {
+  const _LocalMediaUploadRequest({
+    required this.rootToken,
+    required this.host,
+    required this.port,
+    required this.username,
+    required this.password,
+    required this.targetPath,
+    required this.sourceUri,
+    required this.sizeBytes,
+    required this.chunkSize,
+    this.modifiedMs,
+  });
+
+  final RootIsolateToken rootToken;
+  final String host;
+  final int port;
+  final String username;
+  final String password;
+  final String targetPath;
+  final String sourceUri;
+  final int sizeBytes;
+  final int chunkSize;
+  final int? modifiedMs;
+}
+
+Future<void> _uploadLocalMediaFileInBackground(
+  _LocalMediaUploadRequest request,
+) async {
+  BackgroundIsolateBinaryMessenger.ensureInitialized(request.rootToken);
+  const localMediaChannel = MethodChannel('unraider/local_media');
+  SSHClient? client;
+  SftpFile? file;
+  try {
+    final socket = await SSHSocket.connect(
+      request.host,
+      request.port,
+      timeout: const Duration(seconds: 10),
+    );
+    client = SSHClient(
+      socket,
+      username: request.username,
+      onPasswordRequest: () => request.password,
+      ident: 'unraider-sync',
+    );
+    await client.authenticated.timeout(const Duration(seconds: 15));
+    final sftp = await client.sftp().timeout(const Duration(seconds: 15));
+    await sftp.handshake.timeout(const Duration(seconds: 15));
+    file = await sftp.open(
+      request.targetPath,
+      mode: SftpFileOpenMode.create |
+          SftpFileOpenMode.truncate |
+          SftpFileOpenMode.write,
+    );
+
+    var offset = 0;
+    while (
+        offset < request.sizeBytes || (request.sizeBytes == 0 && offset == 0)) {
+      final remaining = request.sizeBytes - offset;
+      final length = request.sizeBytes == 0
+          ? 0
+          : remaining < request.chunkSize
+              ? remaining
+              : request.chunkSize;
+      final chunk = request.sizeBytes == 0
+          ? Uint8List(0)
+          : await localMediaChannel.invokeMethod<Uint8List>('readChunk', {
+              'uri': request.sourceUri,
+              'offset': offset,
+              'length': length,
+            });
+      final bytes = chunk ?? Uint8List(0);
+      if (bytes.length < length) {
+        throw const UnraidClientException('读取本机媒体文件失败');
+      }
+      if (bytes.isNotEmpty) {
+        await file.writeBytes(bytes, offset: offset);
+      }
+      offset += bytes.length;
+      if (request.sizeBytes == 0) {
+        break;
+      }
+    }
+    await file.close();
+    file = null;
+
+    final modifiedMs = request.modifiedMs;
+    if (modifiedMs != null && modifiedMs > 0) {
+      final result = await client
+          .runWithResult(
+            buildSetModifiedTimeCommand(
+              request.targetPath,
+              DateTime.fromMillisecondsSinceEpoch(modifiedMs, isUtc: true),
+            ),
+            stdout: true,
+            stderr: true,
+          )
+          .timeout(const Duration(seconds: 20));
+      if (result.exitCode != 0) {
+        final error = utf8
+            .decode(
+              result.stderr.isNotEmpty ? result.stderr : result.stdout,
+              allowMalformed: true,
+            )
+            .trim();
+        throw UnraidClientException(
+          error.isEmpty ? '保留文件时间失败' : '保留文件时间失败：$error',
+        );
+      }
+    }
+  } finally {
+    await file?.close();
+    client?.close();
+  }
+}
+
+@visibleForTesting
+String shellQuote(String value) {
+  if (value.isEmpty) {
+    return "''";
+  }
+  return "'${value.replaceAll("'", "'\"'\"'")}'";
+}
+
+Future<Uint8List> _readRemoteFileViaSsh({
+  required String host,
+  required int port,
+  required String username,
+  required String password,
+  required String path,
+}) async {
+  SSHClient? client;
+  try {
+    final socket = await SSHSocket.connect(
+      host,
+      port,
+      timeout: const Duration(seconds: 10),
+    );
+    client = SSHClient(
+      socket,
+      username: username,
+      onPasswordRequest: () => password,
+      ident: 'unraider-preview',
+    );
+    await client.authenticated.timeout(const Duration(seconds: 15));
+    final result = await client
+        .runWithResult(
+          'cat -- ${shellQuote(path)}',
+          stdout: true,
+          stderr: true,
+        )
+        .timeout(const Duration(seconds: 30));
+    if (result.exitCode != 0) {
+      final error = utf8
+          .decode(
+            result.stderr.isNotEmpty ? result.stderr : result.stdout,
+            allowMalformed: true,
+          )
+          .trim();
+      throw Exception(
+        error.isEmpty ? '读取文件失败：退出码 ${result.exitCode}' : '读取文件失败：$error',
+      );
+    }
+    return result.stdout;
+  } finally {
+    client?.close();
+  }
 }
 
 bool _looksLikeLoginPage(String body) {
@@ -1282,6 +1816,86 @@ bool _looksLikeLoginPage(String body) {
   return lower.contains('name="username"') &&
       lower.contains('name="password"') &&
       (lower.contains('/login') || lower.contains('unraid_login'));
+}
+
+Map<String, dynamic>? _findNestedMap(Object? value, List<String> path) {
+  Object? current = value;
+  for (final segment in path) {
+    if (current is! Map) {
+      return null;
+    }
+    current = current[segment];
+  }
+  if (current is Map<String, dynamic>) {
+    return current;
+  }
+  if (current is Map) {
+    return current.map(
+      (key, value) => MapEntry(key.toString(), value),
+    );
+  }
+  return null;
+}
+
+bool? _parseBoolish(Object? value) {
+  if (value is bool) {
+    return value;
+  }
+  final text = value?.toString().trim().toLowerCase();
+  if (text == null || text.isEmpty) {
+    return null;
+  }
+  if (text == 'yes' || text == 'true' || text == '1' || text == 'enabled') {
+    return true;
+  }
+  if (text == 'no' || text == 'false' || text == '0' || text == 'disabled') {
+    return false;
+  }
+  return null;
+}
+
+int? _parsePort(Object? value) {
+  final port = int.tryParse(value?.toString().trim() ?? '');
+  if (port == null || port <= 0 || port > 65535) {
+    return null;
+  }
+  return port;
+}
+
+String? _htmlInputValue(String html, String name) {
+  final namePattern = RegExp.escape(name);
+  final nameThenValue = RegExp(
+    '''<input\\b[^>]*\\bname=["']$namePattern["'][^>]*\\bvalue=["']([^"']*)["']''',
+    caseSensitive: false,
+    dotAll: true,
+  ).firstMatch(html);
+  final valueThenName = RegExp(
+    '''<input\\b[^>]*\\bvalue=["']([^"']*)["'][^>]*\\bname=["']$namePattern["']''',
+    caseSensitive: false,
+    dotAll: true,
+  ).firstMatch(html);
+  final value = nameThenValue?.group(1) ?? valueThenName?.group(1);
+  return value == null ? null : _decodeHtml(value).trim();
+}
+
+bool? _parseSettingsBool(String html, String name) {
+  final namePattern = RegExp.escape(name);
+  final input = RegExp(
+    '''<input\\b(?=[^>]*\\bname=["']$namePattern["'])([^>]*)>''',
+    caseSensitive: false,
+    dotAll: true,
+  ).firstMatch(html)?.group(1);
+  if (input == null) {
+    return _parseBoolish(_htmlInputValue(html, name));
+  }
+  if (RegExp(r'\bchecked\b', caseSensitive: false).hasMatch(input)) {
+    return true;
+  }
+  final value = RegExp(
+    r'''value=["']([^"']*)["']''',
+    caseSensitive: false,
+  ).firstMatch(input)?.group(1);
+  return _parseBoolish(value);
 }
 
 List<String> _splitSetCookie(String header) {
@@ -1401,78 +2015,11 @@ String _stripHtml(String html) {
   return html.replaceAll(RegExp(r'<[^>]+>'), ' ');
 }
 
-List<_HtmlCell> _parseTableCells(String rowHtml) {
-  final matches = RegExp(
-    r'<td\b([^>]*)>(.*?)</td>',
-    caseSensitive: false,
-    dotAll: true,
-  ).allMatches(rowHtml);
-  return matches
-      .map(
-        (match) => _HtmlCell(
-          attributes: match.group(1) ?? '',
-          text: _decodeHtml(_stripHtml(match.group(2) ?? '')).trim(),
-        ),
-      )
-      .toList(growable: false);
-}
-
-int _parseSizeCell(List<_HtmlCell> cells, String rowHtml) {
-  if (cells.length > 5) {
-    final data = _attributeValue(cells[5].attributes, 'data');
-    final bytes = int.tryParse(data ?? '');
-    if (bytes != null) {
-      return bytes;
-    }
-    return _parseSize(cells[5].text);
-  }
-  return _parseSize(_stripHtml(rowHtml));
-}
-
-DateTime _parseModifiedCell(List<_HtmlCell> cells, String rowHtml) {
-  if (cells.length > 6) {
-    final data = _attributeValue(cells[6].attributes, 'data');
-    final seconds = int.tryParse(data ?? '');
-    if (seconds != null && seconds > 0) {
-      return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
-    }
-    return _parseModified(cells[6].text);
-  }
-  return _parseModified(_stripHtml(rowHtml));
-}
-
-String? _attributeValue(String attributes, String name) {
-  final match = RegExp(
-    '''$name=["']([^"']*)["']''',
-    caseSensitive: false,
-  ).firstMatch(attributes);
-  return match?.group(1);
-}
-
 String _joinPath(String parent, String child) {
   final left =
       parent.endsWith('/') ? parent.substring(0, parent.length - 1) : parent;
   final right = child.startsWith('/') ? child.substring(1) : child;
   return '$left/$right';
-}
-
-int _parseSize(String text) {
-  final match =
-      RegExp(r'(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)', caseSensitive: false)
-          .firstMatch(text);
-  if (match == null) {
-    return 0;
-  }
-  final value = double.tryParse(match.group(1) ?? '') ?? 0;
-  final unit = (match.group(2) ?? 'B').toUpperCase();
-  final multiplier = switch (unit) {
-    'KB' => 1024,
-    'MB' => 1024 * 1024,
-    'GB' => 1024 * 1024 * 1024,
-    'TB' => 1024 * 1024 * 1024 * 1024,
-    _ => 1,
-  };
-  return (value * multiplier).round();
 }
 
 String _formatSize(int bytes) {
@@ -1490,18 +2037,6 @@ String _formatSize(int bytes) {
   return '${value.toStringAsFixed(precision)} ${units[unitIndex]}';
 }
 
-DateTime _parseModified(String text) {
-  final match = RegExp(r'(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?')
-      .firstMatch(text);
-  if (match == null) {
-    return DateTime.fromMillisecondsSinceEpoch(0);
-  }
-  final date = match.group(1) ?? '';
-  final time = match.group(2) ?? '00:00:00';
-  return DateTime.tryParse('$date $time') ??
-      DateTime.fromMillisecondsSinceEpoch(0);
-}
-
 String _formatDate(DateTime value) {
   if (value.millisecondsSinceEpoch == 0) {
     return '';
@@ -1509,16 +2044,6 @@ String _formatDate(DateTime value) {
   String two(int number) => number.toString().padLeft(2, '0');
   return '${value.year}-${two(value.month)}-${two(value.day)} '
       '${two(value.hour)}:${two(value.minute)}';
-}
-
-class _HtmlCell {
-  const _HtmlCell({
-    required this.attributes,
-    required this.text,
-  });
-
-  final String attributes;
-  final String text;
 }
 
 class _DashboardSnapshot {
@@ -1535,4 +2060,14 @@ class _DashboardSnapshot {
   final String arrayState;
   final String arrayUsage;
   final double arrayPercent;
+}
+
+class _SshServiceConfig {
+  const _SshServiceConfig({
+    required this.useSsh,
+    required this.port,
+  });
+
+  final bool? useSsh;
+  final int? port;
 }

@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
+import '../services/app_logger.dart';
 import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
 import '../widgets/bottom_nav.dart';
@@ -10,6 +15,10 @@ import '../widgets/server_icon.dart';
 import 'album_page.dart';
 import 'detail_page.dart';
 import 'music_page.dart';
+
+const _maxImagePreviewBytes = 32 * 1024 * 1024;
+const _maxImagePreviewDecodeExtent = 2400;
+const _maxTextPreviewBytes = 1024 * 1024;
 
 class MainShellPage extends StatefulWidget {
   const MainShellPage({super.key});
@@ -1867,6 +1876,9 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                   }
 
                   final entries = snapshot.data ?? const <UnraidFileEntry>[];
+                  final imageEntries = entries
+                      .where((entry) => entry.isImage)
+                      .toList(growable: false);
                   if (entries.isEmpty) {
                     return const _StateMessage(
                       icon: Icons.inbox_outlined,
@@ -1891,7 +1903,9 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                               ? Icons.folder
                               : entry.isImage
                                   ? Icons.image
-                                  : Icons.insert_drive_file,
+                                  : _isTextPreviewFile(entry.name)
+                                      ? Icons.description_outlined
+                                      : Icons.insert_drive_file,
                           title: entry.name,
                           subtitle:
                               entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
@@ -1899,7 +1913,9 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                             if (entry.isDirectory) {
                               _openSharePath(entry.path);
                             } else if (entry.isImage) {
-                              _previewImage(args, entry);
+                              _previewImage(args, entry, imageEntries);
+                            } else if (_isTextPreviewFile(entry.name)) {
+                              _previewText(args, entry);
                             } else {
                               _showMessage('暂不支持预览该文件类型');
                             }
@@ -2011,6 +2027,34 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   Future<void> _previewImage(
     ManagementDetailArgs args,
     UnraidFileEntry entry,
+    List<UnraidFileEntry> imageEntries,
+  ) async {
+    final client = args.unraidClient;
+    if (client == null) {
+      _showMessage('缺少服务器连接');
+      return;
+    }
+    await AppLogger.log(
+      'share_preview_tap path=${entry.path} name=${entry.name} '
+      'sizeBytes=${entry.sizeBytes} size=${entry.size}',
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog.fullscreen(
+        child: _ImagePreview(
+          client: client,
+          entries:
+              imageEntries.isEmpty ? <UnraidFileEntry>[entry] : imageEntries,
+          initialIndex:
+              imageEntries.indexWhere((item) => item.path == entry.path),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _previewText(
+    ManagementDetailArgs args,
+    UnraidFileEntry entry,
   ) async {
     final client = args.unraidClient;
     if (client == null) {
@@ -2021,7 +2065,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       context: context,
       builder: (context) => Dialog(
         insetPadding: const EdgeInsets.all(18),
-        child: _ImagePreview(client: client, entry: entry),
+        child: _TextPreview(client: client, entry: entry),
       ),
     );
   }
@@ -2198,14 +2242,297 @@ class _FileEntryTile extends StatelessWidget {
   }
 }
 
-class _ImagePreview extends StatelessWidget {
+class _ImagePreview extends StatefulWidget {
   const _ImagePreview({
+    required this.client,
+    required this.entries,
+    required this.initialIndex,
+  });
+
+  final UnraidClient client;
+  final List<UnraidFileEntry> entries;
+  final int initialIndex;
+
+  @override
+  State<_ImagePreview> createState() => _ImagePreviewState();
+}
+
+class _ImagePreviewState extends State<_ImagePreview> {
+  late final PageController _controller;
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex < 0 ? 0 : widget.initialIndex;
+    _controller = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _go(int delta) {
+    final next = (_index + delta).clamp(0, widget.entries.length - 1);
+    if (next == _index) {
+      return;
+    }
+    _controller.animateToPage(
+      next,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = widget.entries[_index];
+    return ColoredBox(
+      color: Colors.black,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: 52,
+              child: Row(
+                children: [
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      widget.entries.length > 1
+                          ? '${entry.name}  ${_index + 1}/${widget.entries.length}'
+                          : entry.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '上一张',
+                    onPressed: _index == 0 ? null : () => _go(-1),
+                    icon: const Icon(Icons.chevron_left, color: Colors.white),
+                  ),
+                  IconButton(
+                    tooltip: '下一张',
+                    onPressed: _index == widget.entries.length - 1
+                        ? null
+                        : () => _go(1),
+                    icon: const Icon(Icons.chevron_right, color: Colors.white),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: PageView.builder(
+                controller: _controller,
+                itemCount: widget.entries.length,
+                onPageChanged: (value) => setState(() => _index = value),
+                itemBuilder: (context, index) => _ImagePreviewPage(
+                  client: widget.client,
+                  entry: widget.entries[index],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ImagePreviewPage extends StatefulWidget {
+  const _ImagePreviewPage({
     required this.client,
     required this.entry,
   });
 
   final UnraidClient client;
   final UnraidFileEntry entry;
+
+  @override
+  State<_ImagePreviewPage> createState() => _ImagePreviewPageState();
+}
+
+class _ImagePreviewPageState extends State<_ImagePreviewPage> {
+  late final bool _isTooLarge;
+  late final Future<Uint8List>? _bytesFuture;
+  bool _decodeSuccessLogged = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isTooLarge = widget.entry.sizeBytes > _maxImagePreviewBytes;
+    if (_isTooLarge) {
+      _bytesFuture = null;
+      unawaited(
+        AppLogger.log(
+          'share_preview_skip_large path=${widget.entry.path} '
+          'sizeBytes=${widget.entry.sizeBytes} limit=$_maxImagePreviewBytes',
+        ),
+      );
+    } else {
+      _bytesFuture = _loadPreviewBytes();
+    }
+  }
+
+  Future<Uint8List> _loadPreviewBytes() async {
+    await AppLogger.log(
+      'share_preview_fetch_start path=${widget.entry.path} '
+      'sizeBytes=${widget.entry.sizeBytes}',
+    );
+    try {
+      final bytes = await widget.client.fetchFileBytes(widget.entry.path);
+      await AppLogger.log(
+        'share_preview_fetch_success path=${widget.entry.path} '
+        'bytes=${bytes.length}',
+      );
+      return bytes;
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'share_preview_fetch_error path=${widget.entry.path}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isTooLarge) {
+      return _PreviewMessage(
+        message: '文件超过 32 MB，暂不直接预览（${widget.entry.size}）',
+        color: AppTheme.danger,
+      );
+    }
+
+    return FutureBuilder<Uint8List>(
+      future: _bytesFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (snapshot.hasError || !snapshot.hasData) {
+          return _PreviewMessage(
+            message: snapshot.error?.toString() ?? '图片加载失败',
+            color: AppTheme.danger,
+          );
+        }
+
+        return InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 4,
+          child: Center(
+            child: Image.memory(
+              snapshot.data!,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              cacheWidth: _maxImagePreviewDecodeExtent,
+              cacheHeight: _maxImagePreviewDecodeExtent,
+              frameBuilder: (context, child, frame, _) {
+                if (frame != null && !_decodeSuccessLogged) {
+                  _decodeSuccessLogged = true;
+                  unawaited(
+                    AppLogger.log(
+                      'share_preview_decode_success '
+                      'path=${widget.entry.path} '
+                      'bytes=${snapshot.data!.length}',
+                    ),
+                  );
+                }
+                return child;
+              },
+              errorBuilder: (_, error, stackTrace) {
+                unawaited(
+                  AppLogger.log(
+                    'share_preview_decode_error '
+                    'path=${widget.entry.path} '
+                    'bytes=${snapshot.data!.length}',
+                    error: error,
+                    stackTrace: stackTrace,
+                  ),
+                );
+                return const _PreviewMessage(
+                  message: '图片格式不支持或文件已损坏',
+                  color: AppTheme.danger,
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PreviewMessage extends StatelessWidget {
+  const _PreviewMessage({
+    required this.message,
+    required this.color,
+  });
+
+  final String message;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Center(
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: color,
+            fontSize: 14,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TextPreview extends StatefulWidget {
+  const _TextPreview({
+    required this.client,
+    required this.entry,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+
+  @override
+  State<_TextPreview> createState() => _TextPreviewState();
+}
+
+class _TextPreviewState extends State<_TextPreview> {
+  late final bool _isTooLarge;
+  late final Future<String>? _textFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _isTooLarge = widget.entry.sizeBytes > _maxTextPreviewBytes;
+    _textFuture = _isTooLarge ? null : _loadText();
+  }
+
+  Future<String> _loadText() async {
+    final bytes = await widget.client.fetchFileBytes(widget.entry.path);
+    return utf8.decode(bytes, allowMalformed: true);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2220,7 +2547,7 @@ class _ImagePreview extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    entry.name,
+                    widget.entry.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -2239,46 +2566,66 @@ class _ImagePreview extends StatelessWidget {
             ),
           ),
           Flexible(
-            child: FutureBuilder(
-              future: client.fetchFileBytes(entry.path),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return const Padding(
-                    padding: EdgeInsets.all(48),
-                    child: CircularProgressIndicator(),
-                  );
-                }
-
-                if (snapshot.hasError || !snapshot.hasData) {
-                  return Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      snapshot.error?.toString() ?? '图片加载失败',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: AppTheme.danger,
-                        fontSize: 14,
-                      ),
-                    ),
-                  );
-                }
-
-                return InteractiveViewer(
-                  minScale: 0.5,
-                  maxScale: 4,
-                  child: Image.memory(
-                    snapshot.data!,
-                    fit: BoxFit.contain,
-                    gaplessPlayback: true,
+            child: _isTooLarge
+                ? _PreviewMessage(
+                    message: '文本超过 1 MB，暂不直接预览（${widget.entry.size}）',
+                    color: AppTheme.danger,
+                  )
+                : FutureBuilder<String>(
+                    future: _textFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Padding(
+                          padding: EdgeInsets.all(48),
+                          child: CircularProgressIndicator(),
+                        );
+                      }
+                      if (snapshot.hasError || !snapshot.hasData) {
+                        return _PreviewMessage(
+                          message: snapshot.error?.toString() ?? '文本加载失败',
+                          color: AppTheme.danger,
+                        );
+                      }
+                      return Scrollbar(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(16),
+                          child: SelectableText(
+                            snapshot.data!,
+                            style: const TextStyle(
+                              color: AppTheme.textDark,
+                              fontSize: 13,
+                              height: 1.45,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
     );
   }
+}
+
+bool _isTextPreviewFile(String name) {
+  final lower = name.toLowerCase();
+  return const <String>[
+    '.txt',
+    '.log',
+    '.md',
+    '.json',
+    '.xml',
+    '.yaml',
+    '.yml',
+    '.csv',
+    '.ini',
+    '.conf',
+    '.cfg',
+    '.sh',
+    '.dart',
+  ].any(lower.endsWith);
 }
 
 class _StateMessage extends StatelessWidget {
