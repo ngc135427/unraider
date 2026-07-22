@@ -65,14 +65,20 @@ class LocalMediaStore {
     int limit = 0,
     String? bucketId,
   }) async {
-    final result = await _channel.invokeMethod<List<dynamic>>('listMedia', {
-      'limit': limit,
-      if (bucketId != null && bucketId.isNotEmpty) 'bucketId': bucketId,
-    });
-    return (result ?? const <dynamic>[])
-        .whereType<Map<dynamic, dynamic>>()
-        .map(LocalMediaAsset.fromMap)
-        .toList(growable: false);
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>('listMedia', {
+        'limit': limit,
+        if (bucketId != null && bucketId.isNotEmpty) 'bucketId': bucketId,
+      });
+      return (result ?? const <dynamic>[])
+          .whereType<Map<dynamic, dynamic>>()
+          .map(LocalMediaAsset.fromMap)
+          .toList(growable: false);
+    } on MissingPluginException {
+      return const <LocalMediaAsset>[];
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '读取本机媒体失败');
+    }
   }
 
   static Future<List<LocalMediaAsset>> listImages({
@@ -83,18 +89,30 @@ class LocalMediaStore {
   }
 
   static Future<List<LocalMediaBucket>> listBuckets() async {
-    final result = await _channel.invokeMethod<List<dynamic>>('listBuckets');
-    return (result ?? const <dynamic>[])
-        .whereType<Map<dynamic, dynamic>>()
-        .map(LocalMediaBucket.fromMap)
-        .toList(growable: false);
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>('listBuckets');
+      return (result ?? const <dynamic>[])
+          .whereType<Map<dynamic, dynamic>>()
+          .map(LocalMediaBucket.fromMap)
+          .toList(growable: false);
+    } on MissingPluginException {
+      return const <LocalMediaBucket>[];
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '读取相册分组失败');
+    }
   }
 
   static Future<Uint8List?> loadThumbnail(String uri) async {
-    return _channel.invokeMethod<Uint8List>('loadThumbnail', {
-      'uri': uri,
-      'size': 320,
-    });
+    try {
+      return await _channel.invokeMethod<Uint8List>('loadThumbnail', {
+        'uri': uri,
+        'size': 320,
+      });
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
   }
 
   static Future<Uint8List> readChunk({
@@ -102,11 +120,26 @@ class LocalMediaStore {
     required int offset,
     required int length,
   }) async {
-    final bytes = await _channel.invokeMethod<Uint8List>('readChunk', {
-      'uri': uri,
-      'offset': offset,
-      'length': length,
-    });
-    return bytes ?? Uint8List(0);
+    try {
+      final bytes = await _channel.invokeMethod<Uint8List>('readChunk', {
+        'uri': uri,
+        'offset': offset,
+        'length': length,
+      });
+      return bytes ?? Uint8List(0);
+    } on MissingPluginException {
+      return Uint8List(0);
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '读取媒体文件失败');
+    }
   }
+}
+
+class LocalMediaException implements Exception {
+  const LocalMediaException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }

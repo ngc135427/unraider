@@ -32,8 +32,6 @@ class UnraiderApp extends StatelessWidget {
         AlbumVideosPage.routeName: (_) => const AlbumVideosPage(),
         AlbumBackupPage.routeName: (_) => const AlbumBackupPage(),
         MusicPage.routeName: (_) => const MusicPage(),
-        MusicTracksPage.routeName: (_) => const MusicTracksPage(),
-        MusicPlayerPage.routeName: (_) => const MusicPlayerPage(),
         DetailPage.routeName: (_) => const DetailPage(),
       },
     );

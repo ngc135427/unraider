@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -128,7 +128,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     final args = _args;
     if (args == null) {
       setState(() {
-        _error = '缺少连接参数';
+        _error = '缺少连接参数，请从主页应用入口打开相册';
         _loadingLocal = false;
         _loadingRemote = false;
       });
@@ -142,47 +142,115 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       _remoteError = null;
     });
 
+    final preferences = await AlbumPreferences.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _preferences = preferences);
+
+    // Load local and remote independently so one side failing does not blank
+    // the entire album page.
+    await Future.wait<void>([
+      _loadLocalMedia(),
+      _loadRemoteMedia(client: args.unraidClient, targetDir: preferences.targetDir),
+    ]);
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _pendingCount = _findPendingUploads(
+        local: _localMedia,
+        remote: _remoteMedia,
+        targetDir: _preferences.targetDir,
+        sourceId: _preferences.sourceId,
+      ).length;
+    });
+
+    if (preferences.autoBackup && runAutoSync && _error == null) {
+      unawaited(_syncPending());
+    }
+  }
+
+  Future<void> _loadLocalMedia() async {
     try {
       final permissionsGranted = await _requestMediaAccess();
       if (!permissionsGranted) {
-        throw const UnraidClientException('需要照片和视频权限');
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _error = '需要照片和视频权限。请在系统设置中允许访问相册后重试。';
+          _localMedia = const <LocalMediaAsset>[];
+          _buckets = const <LocalMediaBucket>[];
+          _loadingLocal = false;
+        });
+        return;
       }
 
-      final preferences = await AlbumPreferences.load();
       final results = await Future.wait<Object>([
         LocalMediaStore.listMedia(),
         LocalMediaStore.listBuckets(),
-        args.unraidClient.fetchMediaFiles(preferences.targetDir, maxDepth: 6),
       ]);
-
       if (!mounted) {
         return;
       }
       setState(() {
-        _preferences = preferences;
         _localMedia = results[0] as List<LocalMediaAsset>;
         _buckets = results[1] as List<LocalMediaBucket>;
-        _remoteMedia = results[2] as List<UnraidFileEntry>;
-        _pendingCount = _findPendingUploads(
-          local: results[0] as List<LocalMediaAsset>,
-          remote: results[2] as List<UnraidFileEntry>,
-          targetDir: preferences.targetDir,
-          sourceId: preferences.sourceId,
-        ).length;
+        _error = null;
         _loadingLocal = false;
-        _loadingRemote = false;
       });
-
-      if (preferences.autoBackup && runAutoSync) {
-        unawaited(_syncPending());
-      }
-    } on UnraidClientException catch (error) {
+    } on LocalMediaException catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
         _error = error.message;
+        _localMedia = const <LocalMediaAsset>[];
+        _buckets = const <LocalMediaBucket>[];
         _loadingLocal = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = '本机相册加载失败：$error';
+        _localMedia = const <LocalMediaAsset>[];
+        _buckets = const <LocalMediaBucket>[];
+        _loadingLocal = false;
+      });
+    }
+  }
+
+  Future<void> _loadRemoteMedia({
+    required UnraidClient client,
+    required String targetDir,
+  }) async {
+    try {
+      final remote = await client.fetchMediaFiles(
+        targetDir,
+        maxDepth: 6,
+        includeImages: true,
+        includeVideos: true,
+        includeAudio: false,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _remoteMedia = remote;
+        _remoteError = null;
+        _loadingRemote = false;
+      });
+    } on UnraidClientException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _remoteMedia = const <UnraidFileEntry>[];
+        _remoteError = error.message;
         _loadingRemote = false;
       });
     } catch (error) {
@@ -190,8 +258,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
       setState(() {
-        _error = '加载失败：$error';
-        _loadingLocal = false;
+        _remoteMedia = const <UnraidFileEntry>[];
+        _remoteError = '云端读取失败：$error';
         _loadingRemote = false;
       });
     }
@@ -206,33 +274,21 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       _loadingRemote = true;
       _remoteError = null;
     });
-    try {
-      final remote = await client.fetchMediaFiles(
-        _preferences.targetDir,
-        maxDepth: 6,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _remoteMedia = remote;
-        _pendingCount = _findPendingUploads(
-          local: _localMedia,
-          remote: remote,
-          targetDir: _preferences.targetDir,
-          sourceId: _preferences.sourceId,
-        ).length;
-        _loadingRemote = false;
-      });
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _remoteError = '云端读取失败：$error';
-        _loadingRemote = false;
-      });
+    await _loadRemoteMedia(
+      client: client,
+      targetDir: _preferences.targetDir,
+    );
+    if (!mounted) {
+      return;
     }
+    setState(() {
+      _pendingCount = _findPendingUploads(
+        local: _localMedia,
+        remote: _remoteMedia,
+        targetDir: _preferences.targetDir,
+        sourceId: _preferences.sourceId,
+      ).length;
+    });
   }
 
   Future<void> _syncPending() async {
@@ -432,10 +488,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                       onChanged: (tab) => setState(() => _tab = tab),
                     ),
                     const SizedBox(height: 18),
-                    if (_error != null)
+                    if (_error != null && _tab == _PhoAlbumTab.local)
                       _InlineState(
                         icon: Icons.error_outline,
-                        title: '相册读取失败',
+                        title: '本机相册读取失败',
                         detail: _error!,
                         actionLabel: '重试',
                         onAction: () => _loadAll(runAutoSync: false),
@@ -1431,18 +1487,39 @@ class _RemoteSection {
 }
 
 Future<bool> _requestMediaAccess() async {
-  final results = await <Permission>[
-    Permission.photos,
-    Permission.videos,
-  ].request();
-  final modernGranted =
-      (results[Permission.photos]?.isGranted ?? false) &&
-      (results[Permission.videos]?.isGranted ?? false);
-  if (modernGranted) {
+  // Desktop/web: local media MethodChannel is Android-only; open the page and
+  // let the store return an empty list instead of blocking the whole feature.
+  final isMobile = defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+  if (kIsWeb || !isMobile) {
     return true;
   }
-  final storage = await Permission.storage.request();
-  return storage.isGranted || modernGranted;
+
+  // Android 13+ uses granular media permissions; older releases use storage.
+  // Limited / partial access is treated as usable so the album can still open.
+  try {
+    final photos = await Permission.photos.request();
+    final videos = await Permission.videos.request();
+    if (photos.isGranted ||
+        photos.isLimited ||
+        videos.isGranted ||
+        videos.isLimited) {
+      return true;
+    }
+  } catch (_) {
+    // Some platforms do not expose photos/videos permissions.
+  }
+
+  try {
+    final storage = await Permission.storage.request();
+    if (storage.isGranted || storage.isLimited) {
+      return true;
+    }
+  } catch (_) {
+    // Fall through to denied.
+  }
+
+  return false;
 }
 
 List<LocalMediaAsset> _findPendingUploads({
