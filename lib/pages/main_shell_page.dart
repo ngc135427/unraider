@@ -1060,7 +1060,22 @@ class _HomeAppShortcuts extends StatelessWidget {
           label: '音乐',
           icon: Icons.music_note,
           colors: const [Color(0xFF3498DB), Color(0xFF52C41A)],
-          onTap: () => Navigator.of(context).pushNamed(MusicPage.routeName),
+          onTap: () {
+            final client = unraidClient;
+            if (client == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('请先连接服务器')),
+              );
+              return;
+            }
+            Navigator.of(context).pushNamed(
+              MusicPage.routeName,
+              arguments: MusicPageArgs(
+                unraidClient: client,
+                rootPath: '/mnt/user/music',
+              ),
+            );
+          },
         ),
       ],
     );

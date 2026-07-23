@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -132,7 +132,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     final args = _args;
     if (args == null) {
       setState(() {
-        _error = '缺少连接参数';
+        _error = '缺少连接参数，请从主页应用入口打开相册';
         _loadingLocal = false;
         _loadingRemote = false;
       });
@@ -147,66 +147,99 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       _remoteError = null;
     });
 
+    final preferences = await AlbumPreferences.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _preferences = preferences);
+
+    // Load local and remote independently so one side failing does not blank
+    // the entire album page.
+    await Future.wait<void>([
+      _loadLocalMedia(),
+      _loadRemoteMedia(client: args.unraidClient, targetDir: preferences.targetDir),
+    ]);
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _pendingCount = _findPendingUploads(
+        local: _localMedia,
+        remote: _remoteMedia,
+        targetDir: _preferences.targetDir,
+        sourceId: _preferences.sourceId,
+      ).length;
+    });
+
+    if (preferences.autoBackup && runAutoSync && _error == null) {
+      unawaited(_syncPending());
+    }
+  }
+
+  Future<void> _loadLocalMedia() async {
     try {
-      final preferences = await AlbumPreferences.load();
-      var localMedia = const <LocalMediaAsset>[];
-      var buckets = const <LocalMediaBucket>[];
-      String? localError;
-      try {
-        final permissionsGranted = await _requestMediaAccess();
-        if (!permissionsGranted) {
-          throw const UnraidClientException('需要照片和视频权限');
+      final permissionsGranted = await _requestMediaAccess();
+      if (!permissionsGranted) {
+        if (!mounted) {
+          return;
         }
-
-        final localResults = await Future.wait<Object>([
-          LocalMediaStore.listMedia(),
-          LocalMediaStore.listBuckets(),
-        ]);
-        localMedia = localResults[0] as List<LocalMediaAsset>;
-        buckets = localResults[1] as List<LocalMediaBucket>;
-      } on UnraidClientException catch (error) {
-        localError = error.message;
-      } catch (error) {
-        localError = '本机读取失败：$error';
+        setState(() {
+          _error = '需要照片和视频权限。请在系统设置中允许访问相册后重试。';
+          _localMedia = const <LocalMediaAsset>[];
+          _buckets = const <LocalMediaBucket>[];
+          _loadingLocal = false;
+        });
+        return;
       }
 
-      var remoteMedia = const <UnraidFileEntry>[];
-      String? remoteError;
-      try {
-        remoteMedia = await args.unraidClient.fetchMediaFiles(
-          preferences.targetDir,
-          maxDepth: 6,
-        );
-      } catch (error) {
-        remoteError = '云端读取失败：$error';
-      }
+      final preferences = await AlbumPreferences.load();
+      final results = await Future.wait<Object>([
+        LocalMediaStore.listMedia(),
+        LocalMediaStore.listBuckets(),
+      ]);
 
       if (!mounted) {
         return;
       }
       setState(() {
         _preferences = preferences;
-        _localMedia = localMedia;
-        _buckets = buckets;
-        _localError = localError;
-        _remoteMedia = remoteMedia;
-        _remoteError = remoteError;
-        _pendingCount = localError == null && remoteError == null
-            ? _findPendingUploads(
-                local: localMedia,
-                remote: remoteMedia,
-                targetDir: preferences.targetDir,
-                sourceIds: preferences.selectedSourceIds,
-              ).length
-            : 0;
+        _localMedia = results[0] as List<LocalMediaAsset>;
+        _buckets = results[1] as List<LocalMediaBucket>;
+        _remoteMedia = results[2] as List<UnraidFileEntry>;
+        _pendingCount = _findPendingUploads(
+          local: results[0] as List<LocalMediaAsset>,
+          remote: results[2] as List<UnraidFileEntry>,
+          targetDir: preferences.targetDir,
+          sourceId: preferences.sourceId,
+        ).length;
         _loadingLocal = false;
+      });
+    }
+  }
+
+  Future<void> _loadRemoteMedia({
+    required UnraidClient client,
+    required String targetDir,
+  }) async {
+    try {
+      final remote = await client.fetchMediaFiles(
+        targetDir,
+        maxDepth: 6,
+        includeImages: true,
+        includeVideos: true,
+        includeAudio: false,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _remoteMedia = remote;
+        _remoteError = null;
         _loadingRemote = false;
       });
 
-      if (localError == null &&
-          remoteError == null &&
-          preferences.autoBackup &&
-          runAutoSync) {
+      if (preferences.autoBackup && runAutoSync) {
         unawaited(_syncPending());
       }
     } on UnraidClientException catch (error) {
@@ -214,8 +247,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
       setState(() {
-        _error = error.message;
-        _loadingLocal = false;
+        _remoteMedia = const <UnraidFileEntry>[];
+        _remoteError = error.message;
         _loadingRemote = false;
       });
     } catch (error) {
@@ -223,8 +256,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
       setState(() {
-        _error = '加载失败：$error';
-        _loadingLocal = false;
+        _remoteMedia = const <UnraidFileEntry>[];
+        _remoteError = '云端读取失败：$error';
         _loadingRemote = false;
       });
     }
@@ -239,33 +272,21 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       _loadingRemote = true;
       _remoteError = null;
     });
-    try {
-      final remote = await client.fetchMediaFiles(
-        _preferences.targetDir,
-        maxDepth: 6,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _remoteMedia = remote;
-        _pendingCount = _findPendingUploads(
-          local: _localMedia,
-          remote: remote,
-          targetDir: _preferences.targetDir,
-          sourceIds: _preferences.selectedSourceIds,
-        ).length;
-        _loadingRemote = false;
-      });
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _remoteError = '云端读取失败：$error';
-        _loadingRemote = false;
-      });
+    await _loadRemoteMedia(
+      client: client,
+      targetDir: _preferences.targetDir,
+    );
+    if (!mounted) {
+      return;
     }
+    setState(() {
+      _pendingCount = _findPendingUploads(
+        local: _localMedia,
+        remote: _remoteMedia,
+        targetDir: _preferences.targetDir,
+          sourceId: _preferences.sourceId,
+      ).length;
+    });
   }
 
   Future<void> _syncPending() async {
@@ -273,79 +294,38 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     if (client == null || _syncing) {
       return;
     }
-    if (_localError != null) {
-      setState(() => _syncMessage = _localError);
+
+    final pending = _findPendingUploads(
+      local: _localMedia,
+      remote: _remoteMedia,
+      targetDir: _preferences.targetDir,
+      sourceId: _preferences.sourceId,
+    );
+    if (pending.isEmpty) {
+      setState(() {
+        _pendingCount = 0;
+        _syncMessage = '已同步';
+      });
       return;
     }
 
     setState(() {
       _syncing = true;
       _uploadedCount = 0;
-      _syncMessage = '检查云端目录';
-    });
-
-    late final List<UnraidFileEntry> remoteMedia;
-    try {
-      await client.ensureDirectory(_preferences.targetDir);
-      remoteMedia = await client.fetchMediaFiles(
-        _preferences.targetDir,
-        maxDepth: 6,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _remoteMedia = remoteMedia;
-        _remoteError = null;
-        _syncMessage = '比对云端文件';
-      });
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _syncing = false;
-        _remoteError = '云端读取失败：$error';
-        _syncMessage = '同步失败：无法读取云端目录';
-      });
-      return;
-    }
-
-    final allPending = _findPendingUploads(
-      local: _localMedia,
-      remote: remoteMedia,
-      targetDir: _preferences.targetDir,
-      sourceIds: _preferences.selectedSourceIds,
-    );
-    if (allPending.isEmpty) {
-      setState(() {
-        _pendingCount = 0;
-        _syncMessage = '已同步';
-        _syncing = false;
-      });
-      return;
-    }
-    final pending = allPending.take(_maxSyncBatchSize).toList(growable: false);
-
-    setState(() {
-      _pendingCount = allPending.length;
-      _syncMessage = allPending.length > pending.length
-          ? '准备同步 ${pending.length}/${allPending.length}'
-          : '准备同步';
+      _pendingCount = pending.length;
+      _syncMessage = '准备同步';
     });
 
     try {
       var uploaded = 0;
       for (final asset in pending) {
-        await Future<void>.delayed(Duration.zero);
         final targetPath = _targetPathFor(_preferences.targetDir, asset);
         final targetDir = _parentPath(targetPath);
         if (!mounted) {
           return;
         }
         setState(() {
-          _syncMessage =
-              '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}';
+          _syncMessage = '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}';
         });
         await client.ensureDirectory(targetDir);
 
@@ -355,11 +335,16 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         setState(() {
           _syncMessage = '上传 ${uploaded + 1}/${pending.length}：${asset.name}';
         });
-        await client.uploadLocalMediaFile(
+        await client.uploadFile(
           targetPath: targetPath,
-          sourceUri: asset.uri,
           sizeBytes: asset.sizeBytes,
-          modifiedDate: asset.dateModified,
+          readChunk: (offset, length) {
+            return LocalMediaStore.readChunk(
+              uri: asset.uri,
+              offset: offset,
+              length: length,
+            );
+          },
         );
         uploaded += 1;
         if (!mounted) {
@@ -367,9 +352,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         }
         setState(() {
           _uploadedCount = uploaded;
-          _pendingCount = allPending.length - uploaded;
+          _pendingCount = pending.length - uploaded;
         });
-        await Future<void>.delayed(const Duration(milliseconds: 120));
       }
 
       if (!mounted) {
@@ -377,9 +361,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
       setState(() {
         _syncing = false;
-        final left = allPending.length - uploaded;
-        _syncMessage =
-            left > 0 ? '已上传 $uploaded 个，还有 $left 个待同步' : '已上传 $uploaded 个照片/视频';
+        _syncMessage = '已上传 $uploaded 个照片/视频';
       });
       await _reloadRemote();
     } catch (error) {
@@ -403,70 +385,52 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   }
 
   Future<void> _chooseSource() async {
-    final initialSelected = _preferences.selectedSourceIds.toSet();
     final selected = await showModalBottomSheet<AlbumBackupPreferences>(
       context: context,
       showDragHandle: true,
       builder: (context) {
-        final selectedIds = initialSelected.toSet();
         return SafeArea(
-          child: StatefulBuilder(
-            builder: (context, setSheetState) {
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CheckboxListTile(
-                    secondary: const Icon(Icons.photo_library_outlined),
-                    title: const Text('本机所有照片和视频'),
-                    value: selectedIds.isEmpty,
-                    onChanged: (_) => setSheetState(selectedIds.clear),
-                  ),
-                  Flexible(
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
-                        for (final bucket in _buckets)
-                          CheckboxListTile(
-                            secondary: const Icon(Icons.folder_copy_outlined),
-                            title: Text(bucket.name),
-                            subtitle: Text('${bucket.count} 个项目'),
-                            value: selectedIds.contains(bucket.id),
-                            onChanged: (_) {
-                              setSheetState(() {
-                                if (!selectedIds.remove(bucket.id)) {
-                                  selectedIds.add(bucket.id);
-                                }
-                              });
-                            },
-                          ),
-                      ],
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('本机所有照片和视频'),
+                trailing: _preferences.sourceId.isEmpty
+                    ? const Icon(Icons.check, color: AppTheme.primary)
+                    : null,
+                onTap: () {
+                  Navigator.of(context).pop(
+                    AlbumBackupPreferences(
+                      autoBackup: _preferences.autoBackup,
+                      targetDir: _preferences.targetDir,
+                      sourceId: '',
+                      sourceName: '本机所有照片',
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: FilledButton(
-                        onPressed: () {
-                          final ids = selectedIds.toList(growable: false);
-                          final sourceName = _sourceNameForIds(ids, _buckets);
-                          Navigator.of(context).pop(
-                            AlbumBackupPreferences(
-                              autoBackup: _preferences.autoBackup,
-                              targetDir: _preferences.targetDir,
-                              sourceId: ids.length == 1 ? ids.single : '',
-                              sourceIds: ids,
-                              sourceName: sourceName,
-                            ),
-                          );
-                        },
-                        child: const Text('确定'),
+                  );
+                },
+              ),
+              for (final bucket in _buckets)
+                ListTile(
+                  leading: const Icon(Icons.folder_copy_outlined),
+                  title: Text(bucket.name),
+                  subtitle: Text('${bucket.count} 个项目'),
+                  trailing: _preferences.sourceId == bucket.id
+                      ? const Icon(Icons.check, color: AppTheme.primary)
+                      : null,
+                  onTap: () {
+                    Navigator.of(context).pop(
+                      AlbumBackupPreferences(
+                        autoBackup: _preferences.autoBackup,
+                        targetDir: _preferences.targetDir,
+                        sourceId: bucket.id,
+                        sourceName: bucket.name,
                       ),
-                    ),
-                  ),
-                ],
-              );
-            },
+                    );
+                  },
+                ),
+            ],
           ),
         );
       },
@@ -522,10 +486,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                       onChanged: (tab) => setState(() => _tab = tab),
                     ),
                     const SizedBox(height: 18),
-                    if (_error != null)
+                    if (_error != null && _tab == _PhoAlbumTab.local)
                       _InlineState(
                         icon: Icons.error_outline,
-                        title: '相册读取失败',
+                        title: '本机相册读取失败',
                         detail: _error!,
                         actionLabel: '重试',
                         onAction: () => _loadAll(runAutoSync: false),
@@ -546,7 +510,6 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     return switch (_tab) {
       _PhoAlbumTab.local => _LocalTimeline(
           loading: _loadingLocal,
-          error: _localError,
           media: local,
           videosOnly: widget.videosOnly,
         ),
@@ -573,27 +536,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
           buckets: _buckets,
           onSave: _savePreferences,
           onChooseSource: _chooseSource,
-          onChooseTargetDir: _chooseTargetDir,
         ),
     };
-  }
-
-  Future<String?> _chooseTargetDir(String currentPath) {
-    final client = _client;
-    if (client == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('缺少服务器连接')),
-      );
-      return Future.value();
-    }
-    return showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => _TargetDirectoryPicker(
-        client: client,
-        initialPath: _albumTargetPickerStartPath(currentPath),
-      ),
-    );
   }
 }
 
@@ -609,28 +553,27 @@ class _AlbumHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
       child: Row(
         children: [
           IconButton(
             tooltip: '返回',
-            constraints: const BoxConstraints.tightFor(width: 40, height: 40),
             onPressed: onBack,
             icon: const Icon(Icons.arrow_back, color: Colors.white),
           ),
+          const SizedBox(width: 6),
           const Expanded(
             child: Text(
               '相册',
               style: TextStyle(
                 color: Colors.white,
-                fontSize: 18,
+                fontSize: 24,
                 fontWeight: FontWeight.w700,
               ),
             ),
           ),
           IconButton(
             tooltip: '刷新',
-            constraints: const BoxConstraints.tightFor(width: 40, height: 40),
             onPressed: onRefresh,
             icon: const Icon(Icons.refresh, color: Colors.white),
           ),
@@ -658,7 +601,7 @@ class _AlbumStats extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: AppTheme.inputBackground,
         borderRadius: BorderRadius.circular(8),
@@ -710,16 +653,16 @@ class _StatItem extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(label, style: const TextStyle(color: AppTheme.textLight)),
-        const SizedBox(height: 3),
+        const SizedBox(height: 6),
         Text(
           value,
           style: const TextStyle(
             color: AppTheme.textDark,
-            fontSize: 18,
+            fontSize: 26,
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(height: 2),
+        const SizedBox(height: 4),
         Text(
           detail,
           maxLines: 1,
@@ -745,11 +688,7 @@ class _AlbumTabs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final items = <(_PhoAlbumTab, IconData, String)>[
-      (
-        _PhoAlbumTab.local,
-        videosOnly ? Icons.video_library : Icons.photo_library,
-        '本机'
-      ),
+      (_PhoAlbumTab.local, videosOnly ? Icons.video_library : Icons.photo_library, '本机'),
       (_PhoAlbumTab.remote, Icons.cloud_outlined, '云端'),
       (_PhoAlbumTab.sync, Icons.sync, '同步'),
       (_PhoAlbumTab.settings, Icons.tune, '设置'),
@@ -845,11 +784,9 @@ class _LocalTimeline extends StatelessWidget {
     required this.loading,
     required this.media,
     required this.videosOnly,
-    this.error,
   });
 
   final bool loading;
-  final String? error;
   final List<LocalMediaAsset> media;
   final bool videosOnly;
 
@@ -857,13 +794,6 @@ class _LocalTimeline extends StatelessWidget {
   Widget build(BuildContext context) {
     if (loading) {
       return const _LoadingState(label: '正在读取本机相册');
-    }
-    if (error != null) {
-      return _InlineState(
-        icon: Icons.photo_library_outlined,
-        title: '本机读取失败',
-        detail: error!,
-      );
     }
     if (media.isEmpty) {
       return _InlineState(
@@ -973,8 +903,7 @@ class _SyncPanel extends StatelessWidget {
         _InfoCard(
           icon: Icons.sync,
           title: syncing ? '正在同步' : '同步',
-          subtitle:
-              message ?? (pendingCount == 0 ? '已同步' : '$pendingCount 个待上传'),
+          subtitle: message ?? (pendingCount == 0 ? '已同步' : '$pendingCount 个待上传'),
           child: syncing
               ? Padding(
                   padding: const EdgeInsets.only(top: 14),
@@ -1020,14 +949,12 @@ class _SettingsPanel extends StatefulWidget {
     required this.buckets,
     required this.onSave,
     required this.onChooseSource,
-    required this.onChooseTargetDir,
   });
 
   final AlbumBackupPreferences preferences;
   final List<LocalMediaBucket> buckets;
   final Future<void> Function(AlbumBackupPreferences preferences) onSave;
   final VoidCallback onChooseSource;
-  final Future<String?> Function(String currentPath) onChooseTargetDir;
 
   @override
   State<_SettingsPanel> createState() => _SettingsPanelState();
@@ -1061,9 +988,9 @@ class _SettingsPanelState extends State<_SettingsPanel> {
 
   Future<void> _save({bool? autoBackup}) async {
     final target = _normalizeLocalPath(_targetController.text);
-    if (!_isAlbumTargetPath(target)) {
+    if (target.isEmpty || (!target.startsWith('/mnt/') && !target.startsWith('/boot'))) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('目标目录必须位于 /mnt/user 下')),
+        const SnackBar(content: Text('目标目录必须位于 /mnt 或 /boot 下')),
       );
       return;
     }
@@ -1073,7 +1000,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
         autoBackup: autoBackup ?? widget.preferences.autoBackup,
         targetDir: target,
         sourceId: widget.preferences.sourceId,
-        sourceIds: widget.preferences.selectedSourceIds,
         sourceName: widget.preferences.sourceName,
       ),
     );
@@ -1113,22 +1039,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           decoration: const InputDecoration(
             labelText: '目标目录',
             prefixIcon: Icon(Icons.cloud_queue),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OutlinedButton.icon(
-            onPressed: () async {
-              final selected = await widget.onChooseTargetDir(
-                _targetController.text,
-              );
-              if (selected != null) {
-                _targetController.text = selected;
-              }
-            },
-            icon: const Icon(Icons.folder_open),
-            label: const Text('选择目录'),
           ),
         ),
         const SizedBox(height: 14),
@@ -1216,46 +1126,31 @@ class _LocalTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: asset.isVideo
-          ? null
-          : () => _showAlbumImagePreview(
-                context,
-                title: asset.name,
-                sizeBytes: asset.sizeBytes,
-                loadBytes: () => LocalMediaStore.readChunk(
-                  uri: asset.uri,
-                  offset: 0,
-                  length: asset.sizeBytes,
-                ),
-              ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            FutureBuilder<Uint8List?>(
-              future: LocalMediaStore.loadThumbnail(asset.uri),
-              builder: (context, snapshot) {
-                final bytes = snapshot.data;
-                if (bytes == null || bytes.isEmpty) {
-                  return const ColoredBox(
-                    color: AppTheme.inputBackground,
-                    child:
-                        Icon(Icons.image_outlined, color: AppTheme.textLight),
-                  );
-                }
-                return Image.memory(bytes, fit: BoxFit.cover);
-              },
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          FutureBuilder<Uint8List?>(
+            future: LocalMediaStore.loadThumbnail(asset.uri),
+            builder: (context, snapshot) {
+              final bytes = snapshot.data;
+              if (bytes == null || bytes.isEmpty) {
+                return const ColoredBox(
+                  color: AppTheme.inputBackground,
+                  child: Icon(Icons.image_outlined, color: AppTheme.textLight),
+                );
+              }
+              return Image.memory(bytes, fit: BoxFit.cover);
+            },
+          ),
+          if (asset.isVideo)
+            const Positioned(
+              right: 6,
+              bottom: 6,
+              child: _MediaBadge(icon: Icons.play_arrow),
             ),
-            if (asset.isVideo)
-              const Positioned(
-                right: 6,
-                bottom: 6,
-                child: _MediaBadge(icon: Icons.play_arrow),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -1272,16 +1167,25 @@ class _RemoteTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: entry.isVideo || client == null
-          ? null
-          : () => _showAlbumImagePreview(
-                context,
-                title: entry.name,
-                sizeBytes: entry.sizeBytes,
-                loadBytes: () => client!.fetchFileBytes(entry.path),
-              ),
-      child: _RemotePlaceholder(entry: entry),
+    if (entry.isVideo || client == null) {
+      return _RemotePlaceholder(entry: entry);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: FutureBuilder<Uint8List>(
+        future: client!.fetchFileBytes(entry.path),
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes == null || bytes.isEmpty) {
+            return _RemotePlaceholder(entry: entry);
+          }
+          return Image.memory(
+            bytes,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _RemotePlaceholder(entry: entry),
+          );
+        },
+      ),
     );
   }
 }
@@ -1345,116 +1249,6 @@ class _MediaBadge extends StatelessWidget {
   }
 }
 
-Future<void> _showAlbumImagePreview(
-  BuildContext context, {
-  required String title,
-  required int sizeBytes,
-  required Future<Uint8List> Function() loadBytes,
-}) {
-  return showDialog<void>(
-    context: context,
-    builder: (context) => Dialog.fullscreen(
-      child: _AlbumImagePreview(
-        title: title,
-        sizeBytes: sizeBytes,
-        loadBytes: loadBytes,
-      ),
-    ),
-  );
-}
-
-class _AlbumImagePreview extends StatelessWidget {
-  const _AlbumImagePreview({
-    required this.title,
-    required this.sizeBytes,
-    required this.loadBytes,
-  });
-
-  final String title;
-  final int sizeBytes;
-  final Future<Uint8List> Function() loadBytes;
-
-  @override
-  Widget build(BuildContext context) {
-    final tooLarge = sizeBytes > _maxAlbumPreviewBytes;
-    return ColoredBox(
-      color: Colors.black,
-      child: SafeArea(
-        child: Column(
-          children: [
-            SizedBox(
-              height: 52,
-              child: Row(
-                children: [
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '关闭',
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close, color: Colors.white),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: tooLarge
-                  ? const _InlineState(
-                      icon: Icons.image_not_supported_outlined,
-                      title: '图片过大',
-                      detail: '文件超过 32 MB，暂不直接预览',
-                    )
-                  : FutureBuilder<Uint8List>(
-                      future: loadBytes(),
-                      builder: (context, snapshot) {
-                        if (snapshot.connectionState != ConnectionState.done) {
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        }
-                        final bytes = snapshot.data;
-                        if (snapshot.hasError || bytes == null) {
-                          return _InlineState(
-                            icon: Icons.broken_image_outlined,
-                            title: '图片加载失败',
-                            detail: snapshot.error?.toString() ?? '无法读取图片',
-                          );
-                        }
-                        return InteractiveViewer(
-                          minScale: 0.5,
-                          maxScale: 4,
-                          child: Center(
-                            child: Image.memory(
-                              bytes,
-                              fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) => const _InlineState(
-                                icon: Icons.broken_image_outlined,
-                                title: '图片无法预览',
-                                detail: '图片格式不支持或文件已损坏',
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle({
     required this.title,
@@ -1479,116 +1273,6 @@ class _SectionTitle extends StatelessWidget {
           style: const TextStyle(color: AppTheme.textLight),
         ),
       ],
-    );
-  }
-}
-
-class _TargetDirectoryPicker extends StatefulWidget {
-  const _TargetDirectoryPicker({
-    required this.client,
-    required this.initialPath,
-  });
-
-  final UnraidClient client;
-  final String initialPath;
-
-  @override
-  State<_TargetDirectoryPicker> createState() => _TargetDirectoryPickerState();
-}
-
-class _TargetDirectoryPickerState extends State<_TargetDirectoryPicker> {
-  late String _path;
-  late Future<List<UnraidFileEntry>> _future;
-
-  @override
-  void initState() {
-    super.initState();
-    _open(widget.initialPath);
-  }
-
-  void _open(String path) {
-    _path = _normalizeLocalPath(path);
-    _future = widget.client.fetchDirectory(_path);
-  }
-
-  void _goTo(String path) {
-    setState(() => _open(path));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final canGoUp = _path != '/mnt/user';
-    final canChoose = _isAlbumTargetPath(_path);
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.72,
-        child: Column(
-          children: [
-            ListTile(
-              leading: IconButton(
-                tooltip: '上一级',
-                onPressed: canGoUp ? () => _goTo(_parentPath(_path)) : null,
-                icon: const Icon(Icons.arrow_upward),
-              ),
-              title: Text(
-                _path,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: FilledButton(
-                onPressed:
-                    canChoose ? () => Navigator.of(context).pop(_path) : null,
-                child: const Text('选择'),
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: FutureBuilder<List<UnraidFileEntry>>(
-                future: _future,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (snapshot.hasError) {
-                    return _InlineState(
-                      icon: Icons.error_outline,
-                      title: '目录读取失败',
-                      detail: snapshot.error.toString(),
-                      actionLabel: canGoUp ? '返回上一级' : null,
-                      onAction:
-                          canGoUp ? () => _goTo(_parentPath(_path)) : null,
-                    );
-                  }
-
-                  final dirs = (snapshot.data ?? const <UnraidFileEntry>[])
-                      .where((entry) => entry.isDirectory)
-                      .toList(growable: false);
-                  if (dirs.isEmpty) {
-                    return const _InlineState(
-                      icon: Icons.folder_open,
-                      title: '没有子目录',
-                      detail: '可以选择当前目录作为备份目标',
-                    );
-                  }
-
-                  return ListView.builder(
-                    itemCount: dirs.length,
-                    itemBuilder: (context, index) {
-                      final entry = dirs[index];
-                      return ListTile(
-                        leading: const Icon(Icons.folder),
-                        title: Text(entry.name),
-                        subtitle: Text(entry.path),
-                        onTap: () => _goTo(entry.path),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -1805,30 +1489,56 @@ Future<bool> _requestMediaAccess() async {
     Permission.photos,
     Permission.videos,
   ].request();
-  final modernGranted = (results[Permission.photos]?.isGranted ?? false) &&
+  final modernGranted =
+      (results[Permission.photos]?.isGranted ?? false) &&
       (results[Permission.videos]?.isGranted ?? false);
   if (modernGranted) {
     return true;
   }
-  final storage = await Permission.storage.request();
-  return storage.isGranted || modernGranted;
+
+  // Android 13+ uses granular media permissions; older releases use storage.
+  // Limited / partial access is treated as usable so the album can still open.
+  try {
+    final photos = await Permission.photos.request();
+    final videos = await Permission.videos.request();
+    if (photos.isGranted ||
+        photos.isLimited ||
+        videos.isGranted ||
+        videos.isLimited) {
+      return true;
+    }
+  } catch (_) {
+    // Some platforms do not expose photos/videos permissions.
+  }
+
+  try {
+    final storage = await Permission.storage.request();
+    if (storage.isGranted || storage.isLimited) {
+      return true;
+    }
+  } catch (_) {
+    // Fall through to denied.
+  }
+
+  return false;
 }
 
 List<LocalMediaAsset> _findPendingUploads({
   required List<LocalMediaAsset> local,
   required List<UnraidFileEntry> remote,
   required String targetDir,
-  required List<String> sourceIds,
+  required String sourceId,
 }) {
   final remotePaths = remote
       .map((entry) => _relativePath(targetDir, entry.path).toLowerCase())
       .toSet();
   return local
-      .where((asset) => sourceIds.isEmpty || sourceIds.contains(asset.bucketId))
+      .where((asset) => sourceId.isEmpty || asset.bucketId == sourceId)
       .where((asset) {
-    final relative = _relativePath(targetDir, _targetPathFor(targetDir, asset));
-    return !remotePaths.contains(relative.toLowerCase());
-  }).toList(growable: false);
+        final relative = _relativePath(targetDir, _targetPathFor(targetDir, asset));
+        return !remotePaths.contains(relative.toLowerCase());
+      })
+      .toList(growable: false);
 }
 
 List<_LocalSection> _groupLocalByDate(List<LocalMediaAsset> media) {
@@ -1852,23 +1562,6 @@ List<_RemoteSection> _groupRemoteByDate(List<UnraidFileEntry> entries) {
   return buckets.entries
       .map((entry) => _RemoteSection(title: entry.key, items: entry.value))
       .toList(growable: false);
-}
-
-String _sourceNameForIds(List<String> ids, List<LocalMediaBucket> buckets) {
-  if (ids.isEmpty) {
-    return '本机所有照片';
-  }
-  final names = buckets
-      .where((bucket) => ids.contains(bucket.id))
-      .map((bucket) => bucket.name)
-      .toList(growable: false);
-  if (names.isEmpty) {
-    return '已选择 ${ids.length} 个来源';
-  }
-  if (names.length <= 2) {
-    return names.join('、');
-  }
-  return '已选择 ${names.length} 个来源';
 }
 
 String _targetPathFor(String targetDir, LocalMediaAsset asset) {
@@ -1924,18 +1617,6 @@ String _parentPath(String path) {
     return '/';
   }
   return normalized.substring(0, slash);
-}
-
-bool _isAlbumTargetPath(String path) {
-  return _normalizeLocalPath(path).startsWith('/mnt/user/');
-}
-
-String _albumTargetPickerStartPath(String path) {
-  final normalized = _normalizeLocalPath(path);
-  if (normalized == '/mnt/user' || normalized.startsWith('/mnt/user/')) {
-    return normalized;
-  }
-  return '/mnt/user';
 }
 
 String _trimSlash(String path) {

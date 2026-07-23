@@ -491,20 +491,46 @@ class UnraidWebGuiClient {
   Future<List<UnraidFileEntry>> fetchMediaFiles(
     String path, {
     int maxDepth = 6,
+    bool includeImages = true,
+    bool includeVideos = true,
+    bool includeAudio = false,
   }) async {
     final results = <UnraidFileEntry>[];
     final visited = <String>{};
+
+    bool matches(UnraidFileEntry entry) {
+      if (includeImages && entry.isImage) {
+        return true;
+      }
+      if (includeVideos && entry.isVideo) {
+        return true;
+      }
+      if (includeAudio && entry.isAudio) {
+        return true;
+      }
+      return false;
+    }
 
     Future<void> walk(String currentPath, int depth) async {
       if (depth > maxDepth || !visited.add(currentPath)) {
         return;
       }
 
-      final entries = await fetchDirectory(currentPath);
+      List<UnraidFileEntry> entries;
+      try {
+        entries = await fetchDirectory(currentPath);
+      } on UnraidClientException {
+        // Missing or unreadable directories (common for first-time backup
+        // targets and optional music roots) are treated as empty.
+        return;
+      } on Object {
+        return;
+      }
+
       for (final entry in entries) {
         if (entry.isDirectory) {
           await walk(entry.path, depth + 1);
-        } else if (entry.isMedia) {
+        } else if (matches(entry)) {
           results.add(entry);
         }
       }
@@ -516,6 +542,32 @@ class UnraidWebGuiClient {
           .compareTo(a.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0)),
     );
     return results;
+  }
+
+  Future<List<UnraidFileEntry>> fetchAudioFiles(
+    String path, {
+    int maxDepth = 8,
+  }) {
+    return fetchMediaFiles(
+      path,
+      maxDepth: maxDepth,
+      includeImages: false,
+      includeVideos: false,
+      includeAudio: true,
+    );
+  }
+
+  /// Absolute URL that can stream/download a file through the WebGUI session.
+  Uri fileStreamUri(String path) => _fileUri(path);
+
+  Map<String, String> get sessionHeaders {
+    return <String, String>{
+      'Accept': '*/*',
+      'Referer': '$baseUrl/',
+      'User-Agent': 'unraider-webgui',
+      if (_cookies.isNotEmpty) 'Cookie': _cookieHeader,
+      if (_csrfToken != null) 'X-CSRF-Token': _csrfToken!,
+    };
   }
 
   void close() {
@@ -1248,12 +1300,15 @@ class UnraidFileEntry {
   bool get isMedia {
     final lower = name.toLowerCase();
     return _imageExtensions.any(lower.endsWith) ||
-        _videoExtensions.any(lower.endsWith);
+        _videoExtensions.any(lower.endsWith) ||
+        _audioExtensions.any(lower.endsWith);
   }
 
   bool get isImage => _imageExtensions.any(name.toLowerCase().endsWith);
 
   bool get isVideo => _videoExtensions.any(name.toLowerCase().endsWith);
+
+  bool get isAudio => _audioExtensions.any(name.toLowerCase().endsWith);
 }
 
 const _imageExtensions = <String>[
@@ -1273,6 +1328,20 @@ const _videoExtensions = <String>[
   '.mkv',
   '.avi',
   '.webm',
+];
+
+const _audioExtensions = <String>[
+  '.mp3',
+  '.flac',
+  '.wav',
+  '.aac',
+  '.m4a',
+  '.ogg',
+  '.opus',
+  '.wma',
+  '.aiff',
+  '.ape',
+  '.alac',
 ];
 
 List<UnraidManagementItem> _parseDockerItems(String body) {
