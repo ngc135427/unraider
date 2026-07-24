@@ -14,6 +14,12 @@ import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Keep decoded image memory bounded when scrolling large photo grids.
+  final imageCache = PaintingBinding.instance.imageCache;
+  imageCache.maximumSize = 120;
+  imageCache.maximumSizeBytes = 48 << 20; // 48 MB
+
   await AppLogger.initialize();
 
   FlutterError.onError = (details) {

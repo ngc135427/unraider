@@ -49,16 +49,28 @@ class LoginPreferences {
     required bool useHttps,
   }) async {
     try {
+      // Never persist credentials when "remember me" is off.
       await _channel.invokeMethod<void>('save', {
         'rememberMe': rememberMe,
-        'domain': domain,
-        'username': username,
-        'password': password,
-        'useHttps': useHttps,
+        'domain': rememberMe ? domain : '',
+        'username': rememberMe ? username : 'root',
+        'password': rememberMe ? password : '',
+        'useHttps': rememberMe ? useHttps : false,
       });
     } on MissingPluginException {
       return;
     }
+  }
+
+  /// Explicitly wipe stored login preferences (e.g. logout / clear form).
+  static Future<void> clear() {
+    return save(
+      rememberMe: false,
+      domain: '',
+      username: 'root',
+      password: '',
+      useHttps: false,
+    );
   }
 
   static String _asString(Object? value) {

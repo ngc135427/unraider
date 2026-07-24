@@ -9,6 +9,10 @@ import 'package:http/http.dart' as http;
 
 import 'app_logger.dart';
 
+part 'unraid_models.dart';
+part 'unraid_client_parsers.dart';
+part 'unraid_client_ssh.dart';
+
 class UnraidClientException implements Exception {
   const UnraidClientException(this.message);
 
@@ -19,6 +23,32 @@ class UnraidClientException implements Exception {
 }
 
 typedef UnraidClient = UnraidWebGuiClient;
+
+class _DirectoryCacheEntry {
+  const _DirectoryCacheEntry({
+    required this.entries,
+    required this.fetchedAt,
+  });
+
+  final List<UnraidFileEntry> entries;
+  final DateTime fetchedAt;
+}
+
+class _DashboardSegmentCache {
+  const _DashboardSegmentCache({
+    required this.dashboard,
+    required this.overviewFetchedAt,
+    required this.dockerFetchedAt,
+    required this.vmFetchedAt,
+    required this.shareFetchedAt,
+  });
+
+  final UnraidDashboard dashboard;
+  final DateTime overviewFetchedAt;
+  final DateTime dockerFetchedAt;
+  final DateTime vmFetchedAt;
+  final DateTime shareFetchedAt;
+}
 
 const _remoteFileChannel = MethodChannel('unraider/remote_file');
 
@@ -33,86 +63,239 @@ class UnraidWebGuiClient {
         _password = password,
         _httpClient = httpClient ?? http.Client();
 
+  static const _directoryCacheTtl = Duration(seconds: 20);
+  static const _maxDirectoryCacheEntries = 48;
+  static const _mediaScanCacheTtl = Duration(seconds: 45);
+  static const _maxMediaScanCacheEntries = 16;
+  static const _dashboardOverviewTtl = Duration(seconds: 8);
+  static const _dashboardListTtl = Duration(seconds: 20);
+
+  /// Shared WebGUI HTTP timeout for ordinary page/API calls.
+  static const httpTimeout = Duration(seconds: 20);
+
+  /// Login + CSRF handshake may need a little longer on slow LANs.
+  static const loginTimeout = Duration(seconds: 25);
+
+  /// Long-running SSH/SFTP file transfers.
+  static const fileTransferTimeout = Duration(seconds: 45);
+
+  /// Short probes (SSH port discovery, directory existence).
+  static const probeTimeout = Duration(seconds: 10);
+
+  /// Idle SSH keep-alive so long album/share sessions do not drop mid-use.
+  static const sshKeepAliveInterval = Duration(seconds: 30);
+
   final String baseUrl;
   final String username;
   final String _password;
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
+  final Map<String, _DirectoryCacheEntry> _directoryCache =
+      <String, _DirectoryCacheEntry>{};
+  /// In-flight directory reads keyed by normalized path, so concurrent
+  /// callers (share list + dashboard shares, double-taps) share one SSH call.
+  final Map<String, Future<List<UnraidFileEntry>>> _directoryInflight =
+      <String, Future<List<UnraidFileEntry>>>{};
+  final Map<String, _DirectoryCacheEntry> _mediaScanCache =
+      <String, _DirectoryCacheEntry>{};
+  final Map<String, Future<List<UnraidFileEntry>>> _mediaScanInflight =
+      <String, Future<List<UnraidFileEntry>>>{};
   String? _csrfToken;
   SSHClient? _sshClient;
   SftpClient? _sftpClient;
   Future<int>? _sshPortFuture;
+  Future<SSHClient>? _sshConnectFuture;
+  Future<SftpClient>? _sftpConnectFuture;
   Future<void> _sftpTransferQueue = Future<void>.value();
+  _DashboardSegmentCache? _dashboardSegmentCache;
 
   Future<void> checkConnection() async {
-    await _login();
-    await _ensureCsrfToken();
-    await _checkAuth();
+    try {
+      await _login().timeout(loginTimeout);
+      await _ensureCsrfToken().timeout(httpTimeout);
+      await _checkAuth().timeout(httpTimeout);
+    } on TimeoutException {
+      throw const UnraidClientException('连接服务器超时，请检查地址、协议和网络');
+    }
   }
 
-  Future<UnraidDashboard> fetchDashboard() async {
+  /// Best-effort SSH handshake so the first share/album open is faster.
+  /// Failures are swallowed — WebGUI session remains valid without SSH.
+  Future<void> warmSsh() async {
+    if (kIsWeb) {
+      return;
+    }
+    try {
+      await _ensureSshClient();
+    } on Object {
+      // SSH may be disabled or firewalled; ignore prewarm failures.
+    }
+  }
+
+  /// Loads dashboard overview + management lists with independent TTLs.
+  ///
+  /// Overview (CPU/memory/array) refreshes more often than Docker/VM/share
+  /// lists, so a quick home pull does not always re-hit every endpoint.
+  Future<UnraidDashboard> fetchDashboard({bool forceRefresh = false}) async {
+    final now = DateTime.now();
+    final cache = _dashboardSegmentCache;
+
+    final needOverview = forceRefresh ||
+        cache == null ||
+        now.difference(cache.overviewFetchedAt) >= _dashboardOverviewTtl;
+    final needDocker = forceRefresh ||
+        cache == null ||
+        now.difference(cache.dockerFetchedAt) >= _dashboardListTtl;
+    final needVm = forceRefresh ||
+        cache == null ||
+        now.difference(cache.vmFetchedAt) >= _dashboardListTtl;
+    final needShare = forceRefresh ||
+        cache == null ||
+        now.difference(cache.shareFetchedAt) >= _dashboardListTtl;
+
+    // When every segment is still fresh, need* implies cache is present.
+    if (cache != null &&
+        !needOverview &&
+        !needDocker &&
+        !needVm &&
+        !needShare) {
+      return cache.dashboard;
+    }
+
     await _ensureCsrfToken();
-    final dashboard = await _send('GET', '/Dashboard');
-    final dashboardHtml = utf8.decode(
-      dashboard.bodyBytes,
-      allowMalformed: true,
-    );
-    _extractCsrf(dashboardHtml);
 
-    final dockerItems = await _fetchDockerItems();
-    final vmItems = await _fetchVmItems();
-    final shareItems = await _fetchShareItems();
-    final dashboardSnapshot = _parseDashboardSnapshot(dashboardHtml);
+    final futures = <Future<Object>>[];
+    final kinds = <String>[];
+    if (needOverview) {
+      futures.add(_send('GET', '/Dashboard'));
+      kinds.add('overview');
+    }
+    if (needDocker) {
+      futures.add(_fetchDockerItems());
+      kinds.add('docker');
+    }
+    if (needVm) {
+      futures.add(_fetchVmItems());
+      kinds.add('vm');
+    }
+    if (needShare) {
+      futures.add(_fetchShareItems());
+      kinds.add('share');
+    }
 
-    return UnraidDashboard(
-      serverName: _serverNameFromHtml(dashboardHtml),
-      serverDescription: 'Unraid WebGUI',
-      guid: '',
-      ownerName: '',
-      registration: '',
-      model: '',
-      version: _firstMatch(
+    final results =
+        futures.isEmpty ? const <Object>[] : await Future.wait<Object>(futures);
+
+    http.Response? overviewResponse;
+    List<UnraidManagementItem>? dockerItems;
+    List<UnraidManagementItem>? vmItems;
+    List<UnraidManagementItem>? shareItems;
+    for (var i = 0; i < kinds.length; i++) {
+      switch (kinds[i]) {
+        case 'overview':
+          overviewResponse = results[i] as http.Response;
+        case 'docker':
+          dockerItems = results[i] as List<UnraidManagementItem>;
+        case 'vm':
+          vmItems = results[i] as List<UnraidManagementItem>;
+        case 'share':
+          shareItems = results[i] as List<UnraidManagementItem>;
+      }
+    }
+
+    final previous = cache?.dashboard;
+    var serverName = previous?.serverName ?? 'Unraid';
+    var version = previous?.version ?? 'WebGUI';
+    var cpuSummary = previous?.cpuSummary ?? '';
+    var memoryUsage = previous?.memoryUsage ?? '';
+    var arrayState = previous?.arrayState ?? '';
+    var arrayUsage = previous?.arrayUsage ?? '';
+    var arrayPercent = previous?.arrayPercent ?? 0.0;
+
+    if (overviewResponse != null) {
+      final dashboardHtml = utf8.decode(
+        overviewResponse.bodyBytes,
+        allowMalformed: true,
+      );
+      _extractCsrf(dashboardHtml);
+      final snapshot = _parseDashboardSnapshot(dashboardHtml);
+      serverName = _serverNameFromHtml(dashboardHtml);
+      version = _firstMatch(
             dashboardHtml,
             RegExp(r'Unraid(?: OS)?\s+([0-9][^<\s"]*)', caseSensitive: false),
           ) ??
-          'WebGUI',
+          'WebGUI';
+      cpuSummary = snapshot.cpuSummary;
+      memoryUsage = snapshot.memoryUsage;
+      arrayState = snapshot.arrayState;
+      arrayUsage = snapshot.arrayUsage;
+      arrayPercent = snapshot.arrayPercent;
+    }
+
+    final resolvedDocker = dockerItems ?? previous?.dockerItems ?? const [];
+    final resolvedVm = vmItems ?? previous?.vmItems ?? const [];
+    final resolvedShare = shareItems ?? previous?.shareItems ?? const [];
+
+    final dashboard = UnraidDashboard(
+      serverName: serverName,
+      serverDescription: 'Unraid WebGUI',
+      guid: previous?.guid ?? '',
+      ownerName: previous?.ownerName ?? '',
+      registration: previous?.registration ?? '',
+      model: previous?.model ?? '',
+      version: version,
       status: '已连接',
       lanIp: Uri.parse(baseUrl).host,
-      wanIp: '',
+      wanIp: previous?.wanIp ?? '',
       localUrl: baseUrl,
-      remoteUrl: '',
-      uptime: '',
-      cpuSummary: dashboardSnapshot.cpuSummary,
-      cpuPercent: 0,
-      baseboardSummary: '',
-      osSummary: '',
-      packagesSummary: '',
-      memoryUsage: dashboardSnapshot.memoryUsage,
-      memoryPercent: 0,
-      arrayState: dashboardSnapshot.arrayState,
-      arrayUsage: dashboardSnapshot.arrayUsage,
-      arrayPercent: dashboardSnapshot.arrayPercent,
-      paritySummary: '暂无校验任务',
-      notificationInfo: 0,
-      notificationWarning: 0,
-      notificationAlert: 0,
-      notificationTotal: 0,
-      notifications: const <UnraidNotification>[],
-      diskItems: const <UnraidInfoItem>[],
-      networkItems: const <UnraidInfoItem>[],
-      upsItems: const <UnraidInfoItem>[],
-      pluginItems: const <UnraidInfoItem>[],
-      securityItems: const <UnraidInfoItem>[],
-      cloudItems: const <UnraidInfoItem>[],
-      logItems: const <UnraidInfoItem>[],
+      remoteUrl: previous?.remoteUrl ?? '',
+      uptime: previous?.uptime ?? '',
+      cpuSummary: cpuSummary,
+      cpuPercent: previous?.cpuPercent ?? 0,
+      baseboardSummary: previous?.baseboardSummary ?? '',
+      osSummary: previous?.osSummary ?? '',
+      packagesSummary: previous?.packagesSummary ?? '',
+      memoryUsage: memoryUsage,
+      memoryPercent: previous?.memoryPercent ?? 0,
+      arrayState: arrayState,
+      arrayUsage: arrayUsage,
+      arrayPercent: arrayPercent,
+      paritySummary: previous?.paritySummary ?? '暂无校验任务',
+      notificationInfo: previous?.notificationInfo ?? 0,
+      notificationWarning: previous?.notificationWarning ?? 0,
+      notificationAlert: previous?.notificationAlert ?? 0,
+      notificationTotal: previous?.notificationTotal ?? 0,
+      notifications: previous?.notifications ?? const <UnraidNotification>[],
+      diskItems: previous?.diskItems ?? const <UnraidInfoItem>[],
+      networkItems: previous?.networkItems ?? const <UnraidInfoItem>[],
+      upsItems: previous?.upsItems ?? const <UnraidInfoItem>[],
+      pluginItems: previous?.pluginItems ?? const <UnraidInfoItem>[],
+      securityItems: previous?.securityItems ?? const <UnraidInfoItem>[],
+      cloudItems: previous?.cloudItems ?? const <UnraidInfoItem>[],
+      logItems: previous?.logItems ?? const <UnraidInfoItem>[],
       servicesSummary:
-          'Docker ${dockerItems.length} 个 / 虚拟机 ${vmItems.length} 个 / 共享 ${shareItems.length} 个',
-      dockerNetworkSummary: '',
-      dockerConflictSummary: '',
-      dockerItems: dockerItems,
-      vmItems: vmItems,
-      shareItems: shareItems,
+          'Docker ${resolvedDocker.length} 个 / 虚拟机 ${resolvedVm.length} 个 / 共享 ${resolvedShare.length} 个',
+      dockerNetworkSummary: previous?.dockerNetworkSummary ?? '',
+      dockerConflictSummary: previous?.dockerConflictSummary ?? '',
+      dockerItems: resolvedDocker,
+      vmItems: resolvedVm,
+      shareItems: resolvedShare,
     );
+
+    // need* false means that segment was already fresh on a non-null cache.
+    final previousTimestamps = cache;
+    _dashboardSegmentCache = _DashboardSegmentCache(
+      dashboard: dashboard,
+      overviewFetchedAt: needOverview
+          ? now
+          : previousTimestamps!.overviewFetchedAt,
+      dockerFetchedAt:
+          needDocker ? now : previousTimestamps!.dockerFetchedAt,
+      vmFetchedAt: needVm ? now : previousTimestamps!.vmFetchedAt,
+      shareFetchedAt:
+          needShare ? now : previousTimestamps!.shareFetchedAt,
+    );
+    return dashboard;
   }
 
   Future<void> shutdown() => _postBootCommand('shutdown');
@@ -134,19 +317,48 @@ class UnraidWebGuiClient {
     }
   }
 
-  Future<List<UnraidFileEntry>> fetchDirectory(String path) async {
+  Future<List<UnraidFileEntry>> fetchDirectory(
+    String path, {
+    bool forceRefresh = false,
+  }) async {
     if (kIsWeb) {
       throw const UnraidClientException('Web 端暂不支持浏览 Unraid 文件系统');
     }
 
     final normalized = _normalizeUnraidPath(path);
+    if (!forceRefresh) {
+      final cached = _directoryCache[normalized];
+      if (cached != null &&
+          DateTime.now().difference(cached.fetchedAt) < _directoryCacheTtl) {
+        return cached.entries;
+      }
+      final inflight = _directoryInflight[normalized];
+      if (inflight != null) {
+        return inflight;
+      }
+    }
+
+    final future = _loadDirectory(normalized);
+    _directoryInflight[normalized] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_directoryInflight[normalized], future)) {
+        _directoryInflight.remove(normalized);
+      }
+    }
+  }
+
+  Future<List<UnraidFileEntry>> _loadDirectory(String normalized) async {
     try {
       final output = await _runSshCommand(
         '读取目录',
         _buildSshDirectoryListCommand(normalized),
-        timeout: const Duration(seconds: 20),
+        timeout: httpTimeout,
       );
-      return parseSshDirectoryListing(output, normalized);
+      final entries = parseSshDirectoryListing(output, normalized);
+      _storeDirectoryCache(normalized, entries);
+      return entries;
     } on TimeoutException {
       throw const UnraidClientException('读取目录超时');
     } on UnraidClientException {
@@ -194,8 +406,10 @@ class UnraidWebGuiClient {
     await _runSshCommand(
       '创建目录',
       'mkdir -p -- ${shellQuote(normalized)}',
-      timeout: const Duration(seconds: 30),
+      timeout: httpTimeout,
     );
+    _invalidateDirectoryCache(normalized);
+    _invalidateDirectoryCache(_parentPath(normalized));
   }
 
   Future<Uint8List> fetchFileBytes(String path) async {
@@ -228,7 +442,7 @@ class UnraidWebGuiClient {
           password: sshPassword,
           path: normalized,
         ),
-      ).timeout(const Duration(seconds: 45));
+      ).timeout(fileTransferTimeout);
       await AppLogger.log(
         'fetch_file_bytes_isolate_success path=$normalized bytes=${bytes.length} '
         'elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -280,7 +494,7 @@ class UnraidWebGuiClient {
           'share': smbPath.share,
           'relativePath': smbPath.relativePath,
         },
-      ).timeout(const Duration(seconds: 45));
+      ).timeout(fileTransferTimeout);
       if (bytes == null) {
         throw const UnraidClientException('SMB 没有返回文件内容');
       }
@@ -382,9 +596,10 @@ class UnraidWebGuiClient {
         await _runSshCommand(
           '保留文件时间',
           buildSetModifiedTimeCommand(normalized, modifiedDate),
-          timeout: const Duration(seconds: 20),
+          timeout: httpTimeout,
         );
       }
+      _invalidateDirectoryCache(_parentPath(normalized));
     } on TimeoutException {
       throw const UnraidClientException('上传文件超时');
     } on UnraidClientException {
@@ -432,6 +647,7 @@ class UnraidWebGuiClient {
           ),
         ),
       );
+      _invalidateDirectoryCache(_parentPath(normalized));
     } on TimeoutException {
       throw const UnraidClientException('上传文件超时');
     } on UnraidClientException {
@@ -456,6 +672,10 @@ class UnraidWebGuiClient {
       'mv -- ${shellQuote(source)} ${shellQuote(target)}',
       timeout: const Duration(minutes: 2),
     );
+    _invalidateDirectoryCache(source);
+    _invalidateDirectoryCache(_parentPath(source));
+    _invalidateDirectoryCache(target);
+    _invalidateDirectoryCache(_parentPath(target));
   }
 
   Future<void> renamePath({
@@ -486,6 +706,47 @@ class UnraidWebGuiClient {
           'rm -f -- ${shellQuote(normalized)}; fi',
       timeout: const Duration(minutes: 2),
     );
+    _invalidateDirectoryCache(normalized);
+    _invalidateDirectoryCache(_parentPath(normalized));
+  }
+
+  void _storeDirectoryCache(String path, List<UnraidFileEntry> entries) {
+    if (_directoryCache.length >= _maxDirectoryCacheEntries) {
+      _directoryCache.remove(_directoryCache.keys.first);
+    }
+    _directoryCache[path] = _DirectoryCacheEntry(
+      entries: List<UnraidFileEntry>.unmodifiable(entries),
+      fetchedAt: DateTime.now(),
+    );
+  }
+
+  void _invalidateDirectoryCache(String path) {
+    final normalized = _normalizeUnraidPath(path);
+    _directoryCache.remove(normalized);
+    _directoryInflight.remove(normalized);
+    // Drop nested cache keys under this path so tree mutations stay consistent.
+    final prefix = normalized == '/' ? '/' : '$normalized/';
+    _directoryCache.removeWhere(
+      (key, _) => key == normalized || key.startsWith(prefix),
+    );
+    _directoryInflight.removeWhere(
+      (key, _) => key == normalized || key.startsWith(prefix),
+    );
+    // Media scan keys look like "/mnt/user/photos|6|img=...". Drop any scan
+    // whose root path is this path or a descendant.
+    bool mediaKeyAffected(String key) {
+      final root = key.split('|').first;
+      return root == normalized || root.startsWith(prefix);
+    }
+
+    _mediaScanCache.removeWhere((key, _) => mediaKeyAffected(key));
+    _mediaScanInflight.removeWhere((key, _) => mediaKeyAffected(key));
+  }
+
+  @visibleForTesting
+  void clearMediaScanCacheForTest() {
+    _mediaScanCache.clear();
+    _mediaScanInflight.clear();
   }
 
   Future<List<UnraidFileEntry>> fetchMediaFiles(
@@ -494,54 +755,105 @@ class UnraidWebGuiClient {
     bool includeImages = true,
     bool includeVideos = true,
     bool includeAudio = false,
+    bool forceRefresh = false,
   }) async {
-    final results = <UnraidFileEntry>[];
-    final visited = <String>{};
-
-    bool matches(UnraidFileEntry entry) {
-      if (includeImages && entry.isImage) {
-        return true;
-      }
-      if (includeVideos && entry.isVideo) {
-        return true;
-      }
-      if (includeAudio && entry.isAudio) {
-        return true;
-      }
-      return false;
+    if (kIsWeb) {
+      throw const UnraidClientException('Web 端暂不支持浏览 Unraid 文件系统');
     }
 
-    Future<void> walk(String currentPath, int depth) async {
-      if (depth > maxDepth || !visited.add(currentPath)) {
-        return;
-      }
+    final normalized = _normalizeUnraidPath(path);
+    final depth = maxDepth < 0 ? 0 : maxDepth;
+    final cacheKey =
+        '$normalized|$depth|img=$includeImages|vid=$includeVideos|aud=$includeAudio';
 
-      List<UnraidFileEntry> entries;
-      try {
-        entries = await fetchDirectory(currentPath);
-      } on UnraidClientException {
-        // Missing or unreadable directories (common for first-time backup
-        // targets and optional music roots) are treated as empty.
-        return;
-      } on Object {
-        return;
+    if (!forceRefresh) {
+      final cached = _mediaScanCache[cacheKey];
+      if (cached != null &&
+          DateTime.now().difference(cached.fetchedAt) < _mediaScanCacheTtl) {
+        return cached.entries;
       }
-
-      for (final entry in entries) {
-        if (entry.isDirectory) {
-          await walk(entry.path, depth + 1);
-        } else if (matches(entry)) {
-          results.add(entry);
-        }
+      final inflight = _mediaScanInflight[cacheKey];
+      if (inflight != null) {
+        return inflight;
       }
     }
 
-    await walk(path, 0);
-    results.sort(
-      (a, b) => (b.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0))
-          .compareTo(a.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0)),
+    final future = _scanMediaFiles(
+      normalized: normalized,
+      depth: depth,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      includeAudio: includeAudio,
     );
-    return results;
+    _mediaScanInflight[cacheKey] = future;
+    try {
+      final results = await future;
+      if (_mediaScanCache.length >= _maxMediaScanCacheEntries) {
+        _mediaScanCache.remove(_mediaScanCache.keys.first);
+      }
+      _mediaScanCache[cacheKey] = _DirectoryCacheEntry(
+        entries: List<UnraidFileEntry>.unmodifiable(results),
+        fetchedAt: DateTime.now(),
+      );
+      return results;
+    } finally {
+      if (identical(_mediaScanInflight[cacheKey], future)) {
+        _mediaScanInflight.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<List<UnraidFileEntry>> _scanMediaFiles({
+    required String normalized,
+    required int depth,
+    required bool includeImages,
+    required bool includeVideos,
+    required bool includeAudio,
+  }) async {
+    try {
+      // Single remote find avoids N recursive directory round-trips.
+      final output = await _runSshCommand(
+        '扫描媒体文件',
+        _buildSshMediaScanCommand(normalized, maxDepth: depth),
+        timeout: fileTransferTimeout,
+      );
+      final entries = parseSshDirectoryListing(output, normalized);
+      final results = entries.where((entry) {
+        if (entry.isDirectory) {
+          return false;
+        }
+        if (includeImages && entry.isImage) {
+          return true;
+        }
+        if (includeVideos && entry.isVideo) {
+          return true;
+        }
+        if (includeAudio && entry.isAudio) {
+          return true;
+        }
+        return false;
+      }).toList(growable: false)
+        ..sort(
+          (a, b) => (b.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0))
+              .compareTo(
+            a.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0),
+          ),
+        );
+      return results;
+    } on TimeoutException {
+      throw const UnraidClientException('扫描媒体文件超时');
+    } on UnraidClientException catch (error) {
+      // Missing or unreadable roots are common for first-time backup targets.
+      final message = error.message.toLowerCase();
+      if (message.contains('no such file') ||
+          message.contains('not a directory') ||
+          message.contains('permission denied')) {
+        return const <UnraidFileEntry>[];
+      }
+      rethrow;
+    } on Object catch (error) {
+      throw UnraidClientException('无法扫描媒体文件：$error');
+    }
   }
 
   Future<List<UnraidFileEntry>> fetchAudioFiles(
@@ -570,7 +882,22 @@ class UnraidWebGuiClient {
     };
   }
 
+  /// Maps an Unraid filesystem path onto the WebGUI base URL path segments.
+  Uri _fileUri(String path) {
+    final normalized = path.startsWith('/') ? path : '/$path';
+    return Uri.parse(baseUrl).replace(
+      pathSegments: normalized.split('/').where((part) => part.isNotEmpty),
+    );
+  }
+
   void close() {
+    _directoryCache.clear();
+    _directoryInflight.clear();
+    _mediaScanCache.clear();
+    _mediaScanInflight.clear();
+    _dashboardSegmentCache = null;
+    _sshConnectFuture = null;
+    _sftpConnectFuture = null;
     _sftpClient?.close();
     _sshClient?.close();
     _httpClient.close();
@@ -582,23 +909,43 @@ class UnraidWebGuiClient {
       return existing;
     }
 
+    // Coalesce concurrent warmSsh / fetchDirectory / upload handshakes.
+    final inflight = _sshConnectFuture;
+    if (inflight != null) {
+      return inflight;
+    }
+
+    final future = _connectSshClient();
+    _sshConnectFuture = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_sshConnectFuture, future)) {
+        _sshConnectFuture = null;
+      }
+    }
+  }
+
+  Future<SSHClient> _connectSshClient() async {
     final host = Uri.parse(baseUrl).host;
     final port = await _resolveSshPort();
     try {
       final socket = await SSHSocket.connect(
         host,
         port,
-        timeout: const Duration(seconds: 10),
+        timeout: probeTimeout,
       );
       final client = SSHClient(
         socket,
         username: username,
         onPasswordRequest: () => _password,
         ident: 'unraider',
+        keepAliveInterval: sshKeepAliveInterval,
       );
-      await client.authenticated.timeout(const Duration(seconds: 15));
+      await client.authenticated.timeout(httpTimeout);
       _sshClient = client;
       _sftpClient = null;
+      _sftpConnectFuture = null;
       return client;
     } on TimeoutException {
       throw UnraidClientException('SSH 连接超时：$host:$port');
@@ -616,9 +963,26 @@ class UnraidWebGuiClient {
       return existing;
     }
 
+    final inflight = _sftpConnectFuture;
+    if (inflight != null) {
+      return inflight;
+    }
+
+    final future = _connectSftpClient(ssh);
+    _sftpConnectFuture = future;
     try {
-      final sftp = await ssh.sftp().timeout(const Duration(seconds: 15));
-      await sftp.handshake.timeout(const Duration(seconds: 15));
+      return await future;
+    } finally {
+      if (identical(_sftpConnectFuture, future)) {
+        _sftpConnectFuture = null;
+      }
+    }
+  }
+
+  Future<SftpClient> _connectSftpClient(SSHClient ssh) async {
+    try {
+      final sftp = await ssh.sftp().timeout(httpTimeout);
+      await sftp.handshake.timeout(httpTimeout);
       _sftpClient = sftp;
       return sftp;
     } on TimeoutException {
@@ -688,7 +1052,7 @@ query UnraiderSshConfig {
         final response = await _sendJsonPost(
           _uri(path),
           <String, Object?>{'query': query},
-          timeout: const Duration(seconds: 10),
+          timeout: probeTimeout,
         );
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
@@ -723,7 +1087,7 @@ query UnraiderSshConfig {
     ]) {
       try {
         final response =
-            await _send('GET', path).timeout(const Duration(seconds: 10));
+            await _send('GET', path).timeout(probeTimeout);
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
         }
@@ -743,7 +1107,7 @@ query UnraiderSshConfig {
   Future<String> _runSshCommand(
     String action,
     String command, {
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = httpTimeout,
   }) async {
     final client = await _ensureSshClient();
     try {
@@ -778,7 +1142,7 @@ query UnraiderSshConfig {
       final client = await _ensureSshClient();
       final result = await client
           .runWithResult('test -d ${shellQuote(_normalizeUnraidPath(path))}')
-          .timeout(const Duration(seconds: 10));
+          .timeout(probeTimeout);
       return result.exitCode == 0;
     } on Object {
       return false;
@@ -853,6 +1217,17 @@ query UnraiderSshConfig {
       },
     );
     _throwForJsonFailure(response, 'Docker 操作失败');
+    // Expire docker list segment so the next dashboard pull is fresh.
+    final cache = _dashboardSegmentCache;
+    if (cache != null) {
+      _dashboardSegmentCache = _DashboardSegmentCache(
+        dashboard: cache.dashboard,
+        overviewFetchedAt: cache.overviewFetchedAt,
+        dockerFetchedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        vmFetchedAt: cache.vmFetchedAt,
+        shareFetchedAt: cache.shareFetchedAt,
+      );
+    }
   }
 
   Future<void> _runVmAction({
@@ -869,6 +1244,16 @@ query UnraiderSshConfig {
       },
     );
     _throwForJsonFailure(response, '虚拟机操作失败');
+    final cache = _dashboardSegmentCache;
+    if (cache != null) {
+      _dashboardSegmentCache = _DashboardSegmentCache(
+        dashboard: cache.dashboard,
+        overviewFetchedAt: cache.overviewFetchedAt,
+        dockerFetchedAt: cache.dockerFetchedAt,
+        vmFetchedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        shareFetchedAt: cache.shareFetchedAt,
+      );
+    }
   }
 
   Future<List<UnraidManagementItem>> _fetchDockerItems() async {
@@ -930,6 +1315,7 @@ query UnraiderSshConfig {
     Map<String, String>? fields,
     bool includeCsrf = true,
     bool allowLoginRedirect = false,
+    Duration timeout = httpTimeout,
   }) {
     return _sendUri(
       method,
@@ -937,6 +1323,7 @@ query UnraiderSshConfig {
       fields: fields,
       includeCsrf: includeCsrf,
       allowLoginRedirect: allowLoginRedirect,
+      timeout: timeout,
     );
   }
 
@@ -947,6 +1334,7 @@ query UnraiderSshConfig {
     bool includeCsrf = true,
     bool allowLoginRedirect = false,
     int redirectCount = 0,
+    Duration timeout = httpTimeout,
   }) async {
     if (redirectCount > 5) {
       throw const UnraidClientException('服务器重定向次数过多');
@@ -984,45 +1372,52 @@ query UnraiderSshConfig {
       request.bodyFields = <String, String>{'csrf_token': csrf};
     }
 
-    final streamed = await _httpClient.send(request);
-    final response = await http.Response.fromStream(streamed);
-    _storeCookies(response);
+    try {
+      final streamed = await _httpClient.send(request).timeout(timeout);
+      final response = await http.Response.fromStream(streamed).timeout(timeout);
+      _storeCookies(response);
 
-    if (_isRedirect(response.statusCode)) {
-      final location = response.headers['location'];
-      if (location == null || location.isEmpty) {
-        return response;
+      if (_isRedirect(response.statusCode)) {
+        final location = response.headers['location'];
+        if (location == null || location.isEmpty) {
+          return response;
+        }
+        final nextUri = uri.resolve(location);
+        if (!allowLoginRedirect && _isLoginPath(nextUri.path)) {
+          throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
+        }
+        return _sendUri(
+          'GET',
+          nextUri,
+          includeCsrf: false,
+          allowLoginRedirect: allowLoginRedirect,
+          redirectCount: redirectCount + 1,
+          timeout: timeout,
+        );
       }
-      final nextUri = uri.resolve(location);
-      if (!allowLoginRedirect && _isLoginPath(nextUri.path)) {
+
+      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+      _extractCsrf(body);
+
+      if (!allowLoginRedirect && _looksLikeLoginPage(body)) {
         throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
       }
-      return _sendUri(
-        'GET',
-        nextUri,
-        includeCsrf: false,
-        allowLoginRedirect: allowLoginRedirect,
-        redirectCount: redirectCount + 1,
-      );
-    }
 
-    final body = utf8.decode(response.bodyBytes, allowMalformed: true);
-    _extractCsrf(body);
-
-    if (!allowLoginRedirect && _looksLikeLoginPage(body)) {
-      throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        throw UnraidClientException(
+          'WebGUI 拒绝访问：HTTP ${response.statusCode}',
+        );
+      }
+      return response;
+    } on TimeoutException {
+      throw const UnraidClientException('请求超时，请检查服务器地址和网络');
     }
-
-    if (response.statusCode == 401 || response.statusCode == 403) {
-      throw UnraidClientException('WebGUI 拒绝访问：HTTP ${response.statusCode}');
-    }
-    return response;
   }
 
   Future<http.Response> _sendJsonPost(
     Uri uri,
     Map<String, Object?> payload, {
-    Duration timeout = const Duration(seconds: 30),
+    Duration timeout = httpTimeout,
   }) async {
     final request = http.Request('POST', uri);
     request.followRedirects = false;
@@ -1038,24 +1433,31 @@ query UnraiderSshConfig {
       if (_cookies.isNotEmpty) 'Cookie': _cookieHeader,
     });
     request.body = jsonEncode(payload);
-    final streamed = await _httpClient.send(request).timeout(timeout);
-    final response = await http.Response.fromStream(streamed);
-    _storeCookies(response);
-    if (_isRedirect(response.statusCode)) {
-      final location = response.headers['location'];
-      if (location != null && _isLoginPath(uri.resolve(location).path)) {
+    try {
+      final streamed = await _httpClient.send(request).timeout(timeout);
+      final response =
+          await http.Response.fromStream(streamed).timeout(timeout);
+      _storeCookies(response);
+      if (_isRedirect(response.statusCode)) {
+        final location = response.headers['location'];
+        if (location != null && _isLoginPath(uri.resolve(location).path)) {
+          throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
+        }
+      }
+      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+      _extractCsrf(body);
+      if (!_isRedirect(response.statusCode) && _looksLikeLoginPage(body)) {
         throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
       }
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        throw UnraidClientException(
+          'WebGUI 拒绝访问：HTTP ${response.statusCode}',
+        );
+      }
+      return response;
+    } on TimeoutException {
+      throw const UnraidClientException('请求超时，请检查服务器地址和网络');
     }
-    final body = utf8.decode(response.bodyBytes, allowMalformed: true);
-    _extractCsrf(body);
-    if (!_isRedirect(response.statusCode) && _looksLikeLoginPage(body)) {
-      throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
-    }
-    if (response.statusCode == 401 || response.statusCode == 403) {
-      throw UnraidClientException('WebGUI 拒绝访问：HTTP ${response.statusCode}');
-    }
-    return response;
   }
 
   Uri _uri(String path) => Uri.parse(baseUrl).resolve(path);
@@ -1128,1015 +1530,3 @@ query UnraiderSshConfig {
   }
 }
 
-enum ManagementItemType { docker, vm, share }
-
-enum ManagementAction { start, stop, restart }
-
-class UnraidDashboard {
-  const UnraidDashboard({
-    required this.serverName,
-    required this.serverDescription,
-    required this.guid,
-    required this.ownerName,
-    required this.registration,
-    required this.model,
-    required this.version,
-    required this.status,
-    required this.lanIp,
-    required this.wanIp,
-    required this.localUrl,
-    required this.remoteUrl,
-    required this.uptime,
-    required this.cpuSummary,
-    required this.cpuPercent,
-    required this.baseboardSummary,
-    required this.osSummary,
-    required this.packagesSummary,
-    required this.memoryUsage,
-    required this.memoryPercent,
-    required this.arrayState,
-    required this.arrayUsage,
-    required this.arrayPercent,
-    required this.paritySummary,
-    required this.notificationInfo,
-    required this.notificationWarning,
-    required this.notificationAlert,
-    required this.notificationTotal,
-    required this.notifications,
-    required this.diskItems,
-    required this.networkItems,
-    required this.upsItems,
-    required this.pluginItems,
-    required this.securityItems,
-    required this.cloudItems,
-    required this.logItems,
-    required this.servicesSummary,
-    required this.dockerNetworkSummary,
-    required this.dockerConflictSummary,
-    required this.dockerItems,
-    required this.vmItems,
-    required this.shareItems,
-  });
-
-  final String serverName;
-  final String serverDescription;
-  final String guid;
-  final String ownerName;
-  final String registration;
-  final String model;
-  final String version;
-  final String status;
-  final String lanIp;
-  final String wanIp;
-  final String localUrl;
-  final String remoteUrl;
-  final String uptime;
-  final String cpuSummary;
-  final double cpuPercent;
-  final String baseboardSummary;
-  final String osSummary;
-  final String packagesSummary;
-  final String memoryUsage;
-  final double memoryPercent;
-  final String arrayState;
-  final String arrayUsage;
-  final double arrayPercent;
-  final String paritySummary;
-  final int notificationInfo;
-  final int notificationWarning;
-  final int notificationAlert;
-  final int notificationTotal;
-  final List<UnraidNotification> notifications;
-  final List<UnraidInfoItem> diskItems;
-  final List<UnraidInfoItem> networkItems;
-  final List<UnraidInfoItem> upsItems;
-  final List<UnraidInfoItem> pluginItems;
-  final List<UnraidInfoItem> securityItems;
-  final List<UnraidInfoItem> cloudItems;
-  final List<UnraidInfoItem> logItems;
-  final String servicesSummary;
-  final String dockerNetworkSummary;
-  final String dockerConflictSummary;
-  final List<UnraidManagementItem> dockerItems;
-  final List<UnraidManagementItem> vmItems;
-  final List<UnraidManagementItem> shareItems;
-}
-
-class UnraidManagementItem {
-  const UnraidManagementItem({
-    required this.id,
-    required this.title,
-    required this.status,
-    required this.description,
-    required this.type,
-    this.detail = '',
-    this.progress = 0,
-    this.tags = const <String>[],
-    this.details = const <UnraidInfoItem>[],
-  });
-
-  final String id;
-  final String title;
-  final String status;
-  final String description;
-  final String detail;
-  final double progress;
-  final List<String> tags;
-  final List<UnraidInfoItem> details;
-  final ManagementItemType type;
-}
-
-enum InfoSeverity { normal, success, warning, danger }
-
-class UnraidInfoItem {
-  const UnraidInfoItem({
-    required this.title,
-    required this.value,
-    this.description = '',
-    this.severity = InfoSeverity.normal,
-  });
-
-  final String title;
-  final String value;
-  final String description;
-  final InfoSeverity severity;
-}
-
-class UnraidNotification {
-  const UnraidNotification({
-    required this.title,
-    required this.description,
-    required this.severity,
-    this.subject = '',
-    this.timestamp = '',
-  });
-
-  final String title;
-  final String subject;
-  final String description;
-  final InfoSeverity severity;
-  final String timestamp;
-}
-
-class UnraidFileEntry {
-  const UnraidFileEntry({
-    required this.name,
-    required this.path,
-    required this.isDirectory,
-    required this.sizeBytes,
-    required this.size,
-    required this.modified,
-    required this.modifiedDate,
-  });
-
-  final String name;
-  final String path;
-  final bool isDirectory;
-  final int sizeBytes;
-  final String size;
-  final String modified;
-  final DateTime? modifiedDate;
-
-  bool get isMedia {
-    final lower = name.toLowerCase();
-    return _imageExtensions.any(lower.endsWith) ||
-        _videoExtensions.any(lower.endsWith) ||
-        _audioExtensions.any(lower.endsWith);
-  }
-
-  bool get isImage => _imageExtensions.any(name.toLowerCase().endsWith);
-
-  bool get isVideo => _videoExtensions.any(name.toLowerCase().endsWith);
-
-  bool get isAudio => _audioExtensions.any(name.toLowerCase().endsWith);
-}
-
-const _imageExtensions = <String>[
-  '.jpg',
-  '.jpeg',
-  '.png',
-  '.gif',
-  '.webp',
-  '.bmp',
-  '.heic',
-];
-
-const _videoExtensions = <String>[
-  '.mp4',
-  '.mov',
-  '.m4v',
-  '.mkv',
-  '.avi',
-  '.webm',
-];
-
-const _audioExtensions = <String>[
-  '.mp3',
-  '.flac',
-  '.wav',
-  '.aac',
-  '.m4a',
-  '.ogg',
-  '.opus',
-  '.wma',
-  '.aiff',
-  '.ape',
-  '.alac',
-];
-
-List<UnraidManagementItem> _parseDockerItems(String body) {
-  final items = <UnraidManagementItem>[];
-  final script =
-      body.split('\u0000').length > 1 ? body.split('\u0000')[1] : body;
-  final regex = RegExp(
-    r'''docker\.push\(\{name:'((?:\\'|[^'])*)',id:'([^']*)',state:(\d+),pause:(\d+),update:(\d+)''',
-  );
-
-  for (final match in regex.allMatches(script)) {
-    final name = _decodeJsString(match.group(1) ?? '');
-    final id = match.group(2) ?? name;
-    final isRunning = match.group(3) == '1';
-    final isPaused = match.group(4) == '1';
-    final hasUpdate = match.group(5) == '1';
-    final status = isPaused
-        ? '已暂停'
-        : isRunning
-            ? '运行中'
-            : '已停止';
-    items.add(
-      UnraidManagementItem(
-        id: id,
-        title: name,
-        status: status,
-        description: 'Docker 容器',
-        type: ManagementItemType.docker,
-        detail: id,
-        tags: <String>[
-          if (hasUpdate) '有更新',
-        ],
-      ),
-    );
-  }
-  return items;
-}
-
-List<UnraidManagementItem> _parseVmItems(String body) {
-  final parts = body.split('\u0000');
-  final html = parts.isNotEmpty ? parts.first : body;
-  final script = parts.length > 1 ? parts.last : body;
-  final states = <String, String>{};
-  final stateRegex =
-      RegExp(r'''kvm\.push\(\{id:'([^']*)',state:'([^']*)'\}\);''');
-  for (final match in stateRegex.allMatches(script)) {
-    states[match.group(1) ?? ''] = match.group(2) ?? '';
-  }
-
-  final items = <UnraidManagementItem>[];
-  final nameRegex = RegExp(r"addVMContext\('((?:\\'|[^'])*)','([^']*)'");
-  for (final match in nameRegex.allMatches(html)) {
-    final name = _decodeJsString(match.group(1) ?? '');
-    final uuid = match.group(2) ?? name;
-    final state = states[uuid] ?? '';
-    items.add(
-      UnraidManagementItem(
-        id: uuid,
-        title: name,
-        status: _vmStatus(state),
-        description: '虚拟机',
-        type: ManagementItemType.vm,
-        detail: uuid,
-      ),
-    );
-  }
-
-  for (final entry in states.entries) {
-    if (items.any((item) => item.id == entry.key)) {
-      continue;
-    }
-    items.add(
-      UnraidManagementItem(
-        id: entry.key,
-        title: entry.key,
-        status: _vmStatus(entry.value),
-        description: '虚拟机',
-        type: ManagementItemType.vm,
-        detail: entry.key,
-      ),
-    );
-  }
-  return items;
-}
-
-@visibleForTesting
-String buildSshDirectoryListCommand(String path) {
-  return _buildSshDirectoryListCommand(_normalizeUnraidPath(path));
-}
-
-@visibleForTesting
-String buildSetModifiedTimeCommand(String path, DateTime modifiedDate) {
-  final seconds = modifiedDate.toUtc().millisecondsSinceEpoch ~/ 1000;
-  return 'touch -m -d @$seconds -- ${shellQuote(_normalizeUnraidPath(path))}';
-}
-
-String _buildSshDirectoryListCommand(String normalizedPath) {
-  return "LC_ALL=C find ${shellQuote(normalizedPath)} -mindepth 1 "
-      "-maxdepth 1 -printf '%p\\0%y\\0%s\\0%T@\\0%f\\0'";
-}
-
-@visibleForTesting
-List<UnraidFileEntry> parseSshDirectoryListing(
-  String output,
-  String parentPath,
-) {
-  final entries = <UnraidFileEntry>[];
-  final fields = output.split('\u0000');
-  for (var i = 0; i + 4 < fields.length; i += 5) {
-    final rawPath = fields[i];
-    final type = fields[i + 1].trim();
-    final rawSize = fields[i + 2].trim();
-    final rawModified = fields[i + 3].trim();
-    final rawName = fields[i + 4];
-    if (rawPath.isEmpty || rawName.isEmpty) {
-      continue;
-    }
-
-    final isDirectory = type == 'd';
-    final size = int.tryParse(rawSize) ?? 0;
-    final modifiedSeconds = double.tryParse(rawModified)?.floor() ?? 0;
-    final modifiedDate = modifiedSeconds > 0
-        ? DateTime.fromMillisecondsSinceEpoch(modifiedSeconds * 1000)
-        : DateTime.fromMillisecondsSinceEpoch(0);
-    final path =
-        rawPath.startsWith('/') ? rawPath : _joinPath(parentPath, rawPath);
-    entries.add(
-      UnraidFileEntry(
-        name: rawName,
-        path: path,
-        isDirectory: isDirectory,
-        sizeBytes: isDirectory ? 0 : size,
-        size: isDirectory ? '' : _formatSize(size),
-        modified: _formatDate(modifiedDate),
-        modifiedDate: modifiedDate,
-      ),
-    );
-  }
-
-  entries.sort((a, b) {
-    if (a.isDirectory != b.isDirectory) {
-      return a.isDirectory ? -1 : 1;
-    }
-    return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-  });
-  return entries;
-}
-
-_DashboardSnapshot _parseDashboardSnapshot(String html) {
-  final cpuSummary = _normalizeText(_extractSectionTextAfterHeader(
-        html: html,
-        marker: 'icon-cpu',
-        headerClass: 'tile-header-main',
-      )) ??
-      '';
-  final memoryInstalled = _normalizeText(_firstMatch(
-    html,
-    RegExp(
-      r'''fa-line-chart[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
-      caseSensitive: false,
-      dotAll: true,
-    ),
-  ));
-  final memoryUsable = _normalizeText(_firstMatch(
-    html,
-    RegExp(
-      r'''fa-compress[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
-      caseSensitive: false,
-      dotAll: true,
-    ),
-  ));
-  final arrayBlock = _firstMatch(
-        html,
-        RegExp(
-          r'''<tbody\b[^>]*\bid=["']array_list["'][^>]*>(.*?)</tbody>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      ) ??
-      '';
-  final arrayHeader = _normalizeText(_firstMatch(
-        arrayBlock,
-        RegExp(
-          r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>(.*?)</h3>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      )) ??
-      '';
-  final arrayUsage = _normalizeText(_firstMatch(
-        arrayBlock,
-        RegExp(
-          r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>.*?</h3>\s*<span>\s*(.*?)\s*</span>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      )) ??
-      '';
-  final arrayPercent = _parsePercent(arrayUsage);
-
-  return _DashboardSnapshot(
-    cpuSummary: cpuSummary,
-    memoryUsage: memoryUsable ??
-        memoryInstalled ??
-        (html.contains('tile-system-memory') ? '等待实时数据' : ''),
-    arrayState: arrayHeader.toLowerCase().contains('stopped') ||
-            arrayHeader.contains('停止')
-        ? '已停止'
-        : arrayBlock.isNotEmpty
-            ? '已启动'
-            : '未知',
-    arrayUsage: arrayUsage.isEmpty ? '等待实时数据' : arrayUsage,
-    arrayPercent: arrayPercent,
-  );
-}
-
-String _normalizeBaseUrl(String baseUrl) {
-  final trimmed = baseUrl.trim();
-  final withScheme =
-      trimmed.startsWith('http://') || trimmed.startsWith('https://')
-          ? trimmed
-          : 'http://$trimmed';
-  return withScheme.endsWith('/')
-      ? withScheme.substring(0, withScheme.length - 1)
-      : withScheme;
-}
-
-String _dockerAction(ManagementAction action) {
-  return switch (action) {
-    ManagementAction.start => 'start',
-    ManagementAction.stop => 'stop',
-    ManagementAction.restart => 'restart',
-  };
-}
-
-String _vmAction(ManagementAction action) {
-  return switch (action) {
-    ManagementAction.start => 'domain-start',
-    ManagementAction.stop => 'domain-stop',
-    ManagementAction.restart => 'domain-restart',
-  };
-}
-
-String _vmStatus(String state) {
-  return switch (state.toLowerCase()) {
-    'running' => '运行中',
-    'paused' => '已暂停',
-    'shutoff' || 'shutdown' || 'stopped' => '已停止',
-    '' => '未知',
-    _ => state,
-  };
-}
-
-bool _isRedirect(int statusCode) =>
-    statusCode == 301 ||
-    statusCode == 302 ||
-    statusCode == 303 ||
-    statusCode == 307 ||
-    statusCode == 308;
-
-bool _isLoginPath(String path) {
-  final lower = path.toLowerCase();
-  return lower == '/login' ||
-      lower.endsWith('/login') ||
-      lower.endsWith('/login.php');
-}
-
-bool _isWritableFilePath(String path) {
-  return _isWritableDirectoryPath(_parentPath(path));
-}
-
-bool _isWritableDirectoryPath(String path) {
-  final normalized = _normalizeUnraidPath(path);
-  if (_hasUnsafePathSegment(normalized)) {
-    return false;
-  }
-  return normalized.startsWith('/mnt/') ||
-      normalized == '/boot' ||
-      normalized.startsWith('/boot/');
-}
-
-@visibleForTesting
-bool isUnsafeDestructivePath(String path) {
-  final normalized = _normalizeUnraidPath(path);
-  if (normalized == '/' ||
-      normalized == '/mnt' ||
-      normalized == '/mnt/user' ||
-      normalized == '/boot') {
-    return true;
-  }
-  return RegExp(r'^/mnt/(?:disk[^/]*|cache[^/]*)$').hasMatch(normalized);
-}
-
-void _throwIfUnsafeDestructivePath(String path, String label) {
-  if (isUnsafeDestructivePath(path) || _hasUnsafePathSegment(path)) {
-    throw UnraidClientException('$label 不允许执行该操作');
-  }
-}
-
-bool _hasUnsafePathSegment(String path) {
-  return _normalizeUnraidPath(path)
-      .split('/')
-      .any((segment) => segment == '..' || segment == '.');
-}
-
-bool _isValidRemoteName(String name) {
-  return name.isNotEmpty &&
-      name != '.' &&
-      name != '..' &&
-      !name.contains('/') &&
-      !name.contains(r'\') &&
-      !name.contains('\u0000');
-}
-
-String _normalizeUnraidPath(String path) {
-  var normalized = path.trim().replaceAll('\\', '/');
-  if (normalized.isEmpty) {
-    return '/';
-  }
-  if (!normalized.startsWith('/')) {
-    normalized = '/$normalized';
-  }
-  normalized = normalized.replaceAll(RegExp(r'/+'), '/');
-  while (normalized.length > 1 && normalized.endsWith('/')) {
-    normalized = normalized.substring(0, normalized.length - 1);
-  }
-  return normalized;
-}
-
-String _parentPath(String path) {
-  final normalized = _normalizeUnraidPath(path);
-  final slash = normalized.lastIndexOf('/');
-  if (slash <= 0) {
-    return '/';
-  }
-  return normalized.substring(0, slash);
-}
-
-@visibleForTesting
-class SmbSharePath {
-  const SmbSharePath({
-    required this.share,
-    required this.relativePath,
-  });
-
-  final String share;
-  final String relativePath;
-}
-
-@visibleForTesting
-SmbSharePath? smbSharePathFromUnraidPath(String path) {
-  final normalized = _normalizeUnraidPath(path);
-  const prefix = '/mnt/user/';
-  if (!normalized.startsWith(prefix)) {
-    return null;
-  }
-
-  final remainder = normalized.substring(prefix.length);
-  final slash = remainder.indexOf('/');
-  if (slash <= 0 || slash == remainder.length - 1) {
-    return null;
-  }
-
-  return SmbSharePath(
-    share: remainder.substring(0, slash),
-    relativePath: remainder.substring(slash + 1),
-  );
-}
-
-class _LocalMediaUploadRequest {
-  const _LocalMediaUploadRequest({
-    required this.rootToken,
-    required this.host,
-    required this.port,
-    required this.username,
-    required this.password,
-    required this.targetPath,
-    required this.sourceUri,
-    required this.sizeBytes,
-    required this.chunkSize,
-    this.modifiedMs,
-  });
-
-  final RootIsolateToken rootToken;
-  final String host;
-  final int port;
-  final String username;
-  final String password;
-  final String targetPath;
-  final String sourceUri;
-  final int sizeBytes;
-  final int chunkSize;
-  final int? modifiedMs;
-}
-
-Future<void> _uploadLocalMediaFileInBackground(
-  _LocalMediaUploadRequest request,
-) async {
-  BackgroundIsolateBinaryMessenger.ensureInitialized(request.rootToken);
-  const localMediaChannel = MethodChannel('unraider/local_media');
-  SSHClient? client;
-  SftpFile? file;
-  try {
-    final socket = await SSHSocket.connect(
-      request.host,
-      request.port,
-      timeout: const Duration(seconds: 10),
-    );
-    client = SSHClient(
-      socket,
-      username: request.username,
-      onPasswordRequest: () => request.password,
-      ident: 'unraider-sync',
-    );
-    await client.authenticated.timeout(const Duration(seconds: 15));
-    final sftp = await client.sftp().timeout(const Duration(seconds: 15));
-    await sftp.handshake.timeout(const Duration(seconds: 15));
-    file = await sftp.open(
-      request.targetPath,
-      mode: SftpFileOpenMode.create |
-          SftpFileOpenMode.truncate |
-          SftpFileOpenMode.write,
-    );
-
-    var offset = 0;
-    while (
-        offset < request.sizeBytes || (request.sizeBytes == 0 && offset == 0)) {
-      final remaining = request.sizeBytes - offset;
-      final length = request.sizeBytes == 0
-          ? 0
-          : remaining < request.chunkSize
-              ? remaining
-              : request.chunkSize;
-      final chunk = request.sizeBytes == 0
-          ? Uint8List(0)
-          : await localMediaChannel.invokeMethod<Uint8List>('readChunk', {
-              'uri': request.sourceUri,
-              'offset': offset,
-              'length': length,
-            });
-      final bytes = chunk ?? Uint8List(0);
-      if (bytes.length < length) {
-        throw const UnraidClientException('读取本机媒体文件失败');
-      }
-      if (bytes.isNotEmpty) {
-        await file.writeBytes(bytes, offset: offset);
-      }
-      offset += bytes.length;
-      if (request.sizeBytes == 0) {
-        break;
-      }
-    }
-    await file.close();
-    file = null;
-
-    final modifiedMs = request.modifiedMs;
-    if (modifiedMs != null && modifiedMs > 0) {
-      final result = await client
-          .runWithResult(
-            buildSetModifiedTimeCommand(
-              request.targetPath,
-              DateTime.fromMillisecondsSinceEpoch(modifiedMs, isUtc: true),
-            ),
-            stdout: true,
-            stderr: true,
-          )
-          .timeout(const Duration(seconds: 20));
-      if (result.exitCode != 0) {
-        final error = utf8
-            .decode(
-              result.stderr.isNotEmpty ? result.stderr : result.stdout,
-              allowMalformed: true,
-            )
-            .trim();
-        throw UnraidClientException(
-          error.isEmpty ? '保留文件时间失败' : '保留文件时间失败：$error',
-        );
-      }
-    }
-  } finally {
-    await file?.close();
-    client?.close();
-  }
-}
-
-@visibleForTesting
-String shellQuote(String value) {
-  if (value.isEmpty) {
-    return "''";
-  }
-  return "'${value.replaceAll("'", "'\"'\"'")}'";
-}
-
-Future<Uint8List> _readRemoteFileViaSsh({
-  required String host,
-  required int port,
-  required String username,
-  required String password,
-  required String path,
-}) async {
-  SSHClient? client;
-  try {
-    final socket = await SSHSocket.connect(
-      host,
-      port,
-      timeout: const Duration(seconds: 10),
-    );
-    client = SSHClient(
-      socket,
-      username: username,
-      onPasswordRequest: () => password,
-      ident: 'unraider-preview',
-    );
-    await client.authenticated.timeout(const Duration(seconds: 15));
-    final result = await client
-        .runWithResult(
-          'cat -- ${shellQuote(path)}',
-          stdout: true,
-          stderr: true,
-        )
-        .timeout(const Duration(seconds: 30));
-    if (result.exitCode != 0) {
-      final error = utf8
-          .decode(
-            result.stderr.isNotEmpty ? result.stderr : result.stdout,
-            allowMalformed: true,
-          )
-          .trim();
-      throw Exception(
-        error.isEmpty ? '读取文件失败：退出码 ${result.exitCode}' : '读取文件失败：$error',
-      );
-    }
-    return result.stdout;
-  } finally {
-    client?.close();
-  }
-}
-
-bool _looksLikeLoginPage(String body) {
-  final lower = body.toLowerCase();
-  return lower.contains('name="username"') &&
-      lower.contains('name="password"') &&
-      (lower.contains('/login') || lower.contains('unraid_login'));
-}
-
-Map<String, dynamic>? _findNestedMap(Object? value, List<String> path) {
-  Object? current = value;
-  for (final segment in path) {
-    if (current is! Map) {
-      return null;
-    }
-    current = current[segment];
-  }
-  if (current is Map<String, dynamic>) {
-    return current;
-  }
-  if (current is Map) {
-    return current.map(
-      (key, value) => MapEntry(key.toString(), value),
-    );
-  }
-  return null;
-}
-
-bool? _parseBoolish(Object? value) {
-  if (value is bool) {
-    return value;
-  }
-  final text = value?.toString().trim().toLowerCase();
-  if (text == null || text.isEmpty) {
-    return null;
-  }
-  if (text == 'yes' || text == 'true' || text == '1' || text == 'enabled') {
-    return true;
-  }
-  if (text == 'no' || text == 'false' || text == '0' || text == 'disabled') {
-    return false;
-  }
-  return null;
-}
-
-int? _parsePort(Object? value) {
-  final port = int.tryParse(value?.toString().trim() ?? '');
-  if (port == null || port <= 0 || port > 65535) {
-    return null;
-  }
-  return port;
-}
-
-String? _htmlInputValue(String html, String name) {
-  final namePattern = RegExp.escape(name);
-  final nameThenValue = RegExp(
-    '''<input\\b[^>]*\\bname=["']$namePattern["'][^>]*\\bvalue=["']([^"']*)["']''',
-    caseSensitive: false,
-    dotAll: true,
-  ).firstMatch(html);
-  final valueThenName = RegExp(
-    '''<input\\b[^>]*\\bvalue=["']([^"']*)["'][^>]*\\bname=["']$namePattern["']''',
-    caseSensitive: false,
-    dotAll: true,
-  ).firstMatch(html);
-  final value = nameThenValue?.group(1) ?? valueThenName?.group(1);
-  return value == null ? null : _decodeHtml(value).trim();
-}
-
-bool? _parseSettingsBool(String html, String name) {
-  final namePattern = RegExp.escape(name);
-  final input = RegExp(
-    '''<input\\b(?=[^>]*\\bname=["']$namePattern["'])([^>]*)>''',
-    caseSensitive: false,
-    dotAll: true,
-  ).firstMatch(html)?.group(1);
-  if (input == null) {
-    return _parseBoolish(_htmlInputValue(html, name));
-  }
-  if (RegExp(r'\bchecked\b', caseSensitive: false).hasMatch(input)) {
-    return true;
-  }
-  final value = RegExp(
-    r'''value=["']([^"']*)["']''',
-    caseSensitive: false,
-  ).firstMatch(input)?.group(1);
-  return _parseBoolish(value);
-}
-
-List<String> _splitSetCookie(String header) {
-  final cookies = <String>[];
-  final buffer = StringBuffer();
-  for (var i = 0; i < header.length; i += 1) {
-    final char = header[i];
-    if (char == ',' && !_looksLikeExpiresComma(header, i)) {
-      cookies.add(buffer.toString());
-      buffer.clear();
-    } else {
-      buffer.write(char);
-    }
-  }
-  if (buffer.isNotEmpty) {
-    cookies.add(buffer.toString());
-  }
-  return cookies;
-}
-
-bool _looksLikeExpiresComma(String header, int commaIndex) {
-  final prefix = header.substring(0, commaIndex).toLowerCase();
-  final suffix = header.substring(commaIndex + 1);
-  return prefix.lastIndexOf('expires=') > prefix.lastIndexOf(';') &&
-      RegExp(r'^\s*\d{2}\s').hasMatch(suffix);
-}
-
-String? _firstMatch(String input, RegExp regex) {
-  final match = regex.firstMatch(input);
-  return match == null ? null : match.group(1);
-}
-
-String? _extractSectionTextAfterHeader({
-  required String html,
-  required String marker,
-  required String headerClass,
-}) {
-  final markerIndex = html.indexOf(marker);
-  if (markerIndex < 0) {
-    return null;
-  }
-  final section = html.substring(markerIndex).split('</tbody>').first;
-  final header = RegExp(
-    '<h3\\b[^>]*class=["\\\']$headerClass["\\\'][^>]*>.*?</h3>',
-    caseSensitive: false,
-    dotAll: true,
-  ).firstMatch(section);
-  if (header == null) {
-    return null;
-  }
-  final afterHeader = section.substring(header.end);
-  final nextTag = afterHeader.indexOf('<span class');
-  final text = nextTag >= 0 ? afterHeader.substring(0, nextTag) : afterHeader;
-  return _stripHtml(text);
-}
-
-String? _normalizeText(String? value) {
-  final text = _decodeHtml(_stripHtml(value ?? ''))
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
-  if (text.isEmpty || text == 'N/A') {
-    return null;
-  }
-  return text;
-}
-
-double _parsePercent(String value) {
-  final match = RegExp(r'(\d+(?:[.,]\d+)?)\s*%').firstMatch(value);
-  if (match == null) {
-    return 0;
-  }
-  final number = double.tryParse((match.group(1) ?? '').replaceAll(',', '.'));
-  if (number == null) {
-    return 0;
-  }
-  return (number / 100).clamp(0, 1).toDouble();
-}
-
-String _serverNameFromHtml(String html) {
-  final title = _decodeHtml(
-    _stripHtml(
-      _firstMatch(
-            html,
-            RegExp(r'<title[^>]*>(.*?)</title>',
-                caseSensitive: false, dotAll: true),
-          ) ??
-          '',
-    ),
-  ).trim();
-  if (title.isEmpty) {
-    return 'Unraid';
-  }
-  return title
-      .replaceAll(RegExp(r'\s+-\s+Unraid.*$', caseSensitive: false), '')
-      .replaceAll(RegExp(r'\s+\|\s+Unraid.*$', caseSensitive: false), '')
-      .trim();
-}
-
-String _decodeJsString(String value) {
-  return value
-      .replaceAll(r"\'", "'")
-      .replaceAll(r'\"', '"')
-      .replaceAll(r'\\', '\\');
-}
-
-String _decodeHtml(String value) {
-  return value
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .replaceAll('&nbsp;', ' ');
-}
-
-String _stripHtml(String html) {
-  return html.replaceAll(RegExp(r'<[^>]+>'), ' ');
-}
-
-String _joinPath(String parent, String child) {
-  final left =
-      parent.endsWith('/') ? parent.substring(0, parent.length - 1) : parent;
-  final right = child.startsWith('/') ? child.substring(1) : child;
-  return '$left/$right';
-}
-
-String _formatSize(int bytes) {
-  if (bytes <= 0) {
-    return '';
-  }
-  const units = <String>['B', 'KB', 'MB', 'GB', 'TB'];
-  var value = bytes.toDouble();
-  var unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  final precision = value >= 10 || unitIndex == 0 ? 0 : 1;
-  return '${value.toStringAsFixed(precision)} ${units[unitIndex]}';
-}
-
-String _formatDate(DateTime value) {
-  if (value.millisecondsSinceEpoch == 0) {
-    return '';
-  }
-  String two(int number) => number.toString().padLeft(2, '0');
-  return '${value.year}-${two(value.month)}-${two(value.day)} '
-      '${two(value.hour)}:${two(value.minute)}';
-}
-
-class _DashboardSnapshot {
-  const _DashboardSnapshot({
-    required this.cpuSummary,
-    required this.memoryUsage,
-    required this.arrayState,
-    required this.arrayUsage,
-    required this.arrayPercent,
-  });
-
-  final String cpuSummary;
-  final String memoryUsage;
-  final String arrayState;
-  final String arrayUsage;
-  final double arrayPercent;
-}
-
-class _SshServiceConfig {
-  const _SshServiceConfig({
-    required this.useSsh,
-    required this.port,
-  });
-
-  final bool? useSsh;
-  final int? port;
-}

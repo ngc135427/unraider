@@ -43,6 +43,22 @@ void main() {
     expect(find.text('登录'), findsOneWidget);
   });
 
+  testWidgets('validates empty login fields', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(const UnraiderApp());
+    await tester.pumpAndSettle();
+
+    final loginButton = find.text('登录');
+    await tester.ensureVisible(loginButton);
+    await tester.tap(loginButton);
+    await tester.pumpAndSettle();
+
+    expect(find.text('请输入有效的 IP 地址或域名'), findsOneWidget);
+    expect(find.text('请输入密码'), findsOneWidget);
+  });
+
   testWidgets('restores remembered login fields', (tester) async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
@@ -99,5 +115,30 @@ void main() {
     expect(savedPayload?['username'], 'root');
     expect(savedPayload?['password'], 'secret');
     expect(savedPayload?['useHttps'], isTrue);
+  });
+
+  test('clears stored credentials when remember me is off', () async {
+    Map<dynamic, dynamic>? savedPayload;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'save') {
+        savedPayload = call.arguments as Map<dynamic, dynamic>;
+        return null;
+      }
+      throw MissingPluginException();
+    });
+
+    await LoginPreferences.save(
+      rememberMe: false,
+      domain: 'tower.local',
+      username: 'root',
+      password: 'secret',
+      useHttps: true,
+    );
+
+    expect(savedPayload?['rememberMe'], isFalse);
+    expect(savedPayload?['domain'], '');
+    expect(savedPayload?['password'], '');
+    expect(savedPayload?['useHttps'], isFalse);
   });
 }

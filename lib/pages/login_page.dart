@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
@@ -33,6 +35,8 @@ class _LoginPageState extends State<LoginPage> {
   bool _hasInputFocus = false;
   bool _isSubmitting = false;
   bool _showPassword = false;
+  bool _loadingPreferences = true;
+  String? _statusMessage;
   String? _errorMessage;
 
   @override
@@ -41,7 +45,7 @@ class _LoginPageState extends State<LoginPage> {
     _domainFocusNode.addListener(_handleFocusChange);
     _usernameFocusNode.addListener(_handleFocusChange);
     _passwordFocusNode.addListener(_handleFocusChange);
-    _loadRememberedLogin();
+    unawaited(_loadRememberedLogin());
   }
 
   @override
@@ -68,7 +72,22 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => _hasInputFocus = hasFocus);
   }
 
+  void _clearErrorOnEdit() {
+    if (_errorMessage == null && _statusMessage == null) {
+      return;
+    }
+    setState(() {
+      _errorMessage = null;
+      _statusMessage = null;
+    });
+  }
+
   Future<void> _submit() async {
+    if (_isSubmitting || _loginSucceeded || _loadingPreferences) {
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
     final isValid = _formKey.currentState?.validate() ?? false;
     if (!isValid) {
       return;
@@ -83,15 +102,22 @@ class _LoginPageState extends State<LoginPage> {
     setState(() {
       _isSubmitting = true;
       _errorMessage = null;
+      _statusMessage = '正在连接 ${_domainController.text.trim()}…';
     });
 
     try {
       await client.checkConnection();
+      // Pre-warm SSH while the success animation plays so share/album open
+      // does not pay the handshake cost on first use.
+      unawaited(client.warmSsh());
       await _saveRememberedLogin();
       if (!mounted) {
         return;
       }
-      setState(() => _loginSucceeded = true);
+      setState(() {
+        _loginSucceeded = true;
+        _statusMessage = '已连接，正在进入主页…';
+      });
       await Future<void>.delayed(const Duration(milliseconds: 450));
       if (!mounted) {
         return;
@@ -107,6 +133,17 @@ class _LoginPageState extends State<LoginPage> {
       }
       setState(() {
         _errorMessage = error.message;
+        _statusMessage = null;
+        _isSubmitting = false;
+      });
+    } on TimeoutException {
+      client.close();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = '连接超时，请检查服务器地址、协议和网络';
+        _statusMessage = null;
         _isSubmitting = false;
       });
     } on Object catch (error) {
@@ -116,31 +153,43 @@ class _LoginPageState extends State<LoginPage> {
       }
       setState(() {
         _errorMessage = '登录失败：$error';
+        _statusMessage = null;
         _isSubmitting = false;
       });
     }
   }
 
   Future<void> _loadRememberedLogin() async {
-    final rememberedLogin = await LoginPreferences.load();
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _rememberMe = rememberedLogin.rememberMe;
-      if (rememberedLogin.rememberMe) {
-        _domainController.text = rememberedLogin.domain;
-        _usernameController.text = rememberedLogin.username;
-        _passwordController.text = rememberedLogin.password;
-        _useHttps = rememberedLogin.useHttps;
+    try {
+      final rememberedLogin = await LoginPreferences.load();
+      if (!mounted) {
+        return;
       }
-    });
+      setState(() {
+        _rememberMe = rememberedLogin.rememberMe;
+        if (rememberedLogin.rememberMe) {
+          _domainController.text = rememberedLogin.domain;
+          _usernameController.text = rememberedLogin.username;
+          _passwordController.text = rememberedLogin.password;
+          _useHttps = rememberedLogin.useHttps;
+        }
+        _loadingPreferences = false;
+      });
+    } on Object {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _loadingPreferences = false);
+    }
   }
 
   Future<void> _saveRememberedLogin() async {
+    if (!_rememberMe) {
+      await LoginPreferences.clear();
+      return;
+    }
     await LoginPreferences.save(
-      rememberMe: _rememberMe,
+      rememberMe: true,
       domain: _domainController.text.trim(),
       username: _usernameController.text.trim().isEmpty
           ? 'root'
@@ -151,8 +200,13 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   String _buildBaseUrl() {
-    final input = _domainController.text.trim();
-    if (input.startsWith('http://') || input.startsWith('https://')) {
+    var input = _domainController.text.trim();
+    // Strip accidental trailing slashes for a cleaner base URL.
+    while (input.endsWith('/')) {
+      input = input.substring(0, input.length - 1);
+    }
+    // Users sometimes paste a full URL; honor the scheme as-is.
+    if (input.startsWith('https://') || input.startsWith('http://')) {
       return input;
     }
     return '${_useHttps ? 'https' : 'http'}://$input';
@@ -193,8 +247,17 @@ class _LoginPageState extends State<LoginPage> {
                           useHttps: _useHttps,
                           controller: _domainController,
                           focusNode: _domainFocusNode,
-                          onToggle: () =>
-                              setState(() => _useHttps = !_useHttps),
+                          enabled: !_isSubmitting && !_loginSucceeded,
+                          onChanged: (_) => _clearErrorOnEdit(),
+                          onToggle: () {
+                            if (_isSubmitting || _loginSucceeded) {
+                              return;
+                            }
+                            setState(() => _useHttps = !_useHttps);
+                            _clearErrorOnEdit();
+                          },
+                          onSubmitted: (_) =>
+                              _usernameFocusNode.requestFocus(),
                         ),
                         const SizedBox(height: 21),
                         AppTextField(
@@ -202,6 +265,12 @@ class _LoginPageState extends State<LoginPage> {
                           controller: _usernameController,
                           focusNode: _usernameFocusNode,
                           hint: 'root',
+                          enabled: !_isSubmitting && !_loginSucceeded,
+                          textInputAction: TextInputAction.next,
+                          autofillHints: const [AutofillHints.username],
+                          onChanged: (_) => _clearErrorOnEdit(),
+                          onFieldSubmitted: (_) =>
+                              _passwordFocusNode.requestFocus(),
                           suffixIcon: const Icon(
                             Icons.person_outline,
                             color: Color(0xFFA0A8B9),
@@ -224,11 +293,20 @@ class _LoginPageState extends State<LoginPage> {
                           focusNode: _passwordFocusNode,
                           hint: '请输入 root 密码',
                           obscureText: !_showPassword,
+                          enabled: !_isSubmitting && !_loginSucceeded,
+                          textInputAction: TextInputAction.done,
+                          autofillHints: const [AutofillHints.password],
+                          onChanged: (_) => _clearErrorOnEdit(),
+                          onFieldSubmitted: (_) => unawaited(_submit()),
                           suffixIcon: IconButton(
                             tooltip: _showPassword ? '隐藏密码' : '显示密码',
-                            onPressed: () {
-                              setState(() => _showPassword = !_showPassword);
-                            },
+                            onPressed: _isSubmitting || _loginSucceeded
+                                ? null
+                                : () {
+                                    setState(
+                                      () => _showPassword = !_showPassword,
+                                    );
+                                  },
                             icon: Icon(
                               _showPassword
                                   ? Icons.visibility_off
@@ -237,7 +315,7 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                           ),
                           validator: (value) {
-                            if ((value ?? '').trim().isEmpty) {
+                            if ((value ?? '').isEmpty) {
                               return '请输入密码';
                             }
                             return null;
@@ -250,9 +328,13 @@ class _LoginPageState extends State<LoginPage> {
                               value: _rememberMe,
                               activeColor: AppTheme.secondary,
                               visualDensity: VisualDensity.compact,
-                              onChanged: (value) {
-                                setState(() => _rememberMe = value ?? false);
-                              },
+                              onChanged: _isSubmitting || _loginSucceeded
+                                  ? null
+                                  : (value) {
+                                      setState(
+                                        () => _rememberMe = value ?? false,
+                                      );
+                                    },
                             ),
                             const Text(
                               '记住我',
@@ -270,12 +352,66 @@ class _LoginPageState extends State<LoginPage> {
                           ],
                         ),
                         const SizedBox(height: 16),
+                        if (_statusMessage != null && _errorMessage == null) ...[
+                          Row(
+                            children: [
+                              if (_isSubmitting && !_loginSucceeded) ...[
+                                const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  _statusMessage!,
+                                  style: const TextStyle(
+                                    color: AppTheme.textMedium,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         if (_errorMessage != null) ...[
-                          Text(
-                            _errorMessage!,
-                            style: const TextStyle(
-                              color: AppTheme.danger,
-                              fontSize: 13,
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: AppTheme.danger.withValues(alpha: 0.08),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: AppTheme.danger.withValues(alpha: 0.28),
+                              ),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(
+                                  Icons.error_outline,
+                                  color: AppTheme.danger,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _errorMessage!,
+                                    style: const TextStyle(
+                                      color: AppTheme.danger,
+                                      fontSize: 13,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -284,12 +420,17 @@ class _LoginPageState extends State<LoginPage> {
                           label: _loginSucceeded
                               ? '登录成功'
                               : _isSubmitting
-                                  ? '正在连接'
-                                  : '登录',
+                                  ? '正在连接…'
+                                  : _loadingPreferences
+                                      ? '加载中…'
+                                      : '登录',
                           icon: _loginSucceeded ? Icons.check : null,
                           isSuccess: _loginSucceeded,
-                          onPressed:
-                              _loginSucceeded || _isSubmitting ? null : _submit,
+                          onPressed: _loginSucceeded ||
+                                  _isSubmitting ||
+                                  _loadingPreferences
+                              ? null
+                              : _submit,
                         ),
                       ],
                     ),
@@ -310,26 +451,42 @@ class _ProtocolDomainField extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.onToggle,
+    this.enabled = true,
+    this.onChanged,
+    this.onSubmitted,
   });
 
   final bool useHttps;
   final TextEditingController controller;
   final FocusNode focusNode;
   final VoidCallback onToggle;
+  final bool enabled;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSubmitted;
 
   @override
   Widget build(BuildContext context) {
     return TextFormField(
       controller: controller,
       focusNode: focusNode,
+      enabled: enabled,
+      textInputAction: TextInputAction.next,
+      keyboardType: TextInputType.url,
+      autofillHints: const [AutofillHints.url],
+      onChanged: onChanged,
+      onFieldSubmitted: onSubmitted,
       validator: (value) {
-        if ((value ?? '').trim().isEmpty) {
+        final text = (value ?? '').trim();
+        if (text.isEmpty) {
           return '请输入有效的 IP 地址或域名';
+        }
+        if (text.contains(' ')) {
+          return '地址不能包含空格';
         }
         return null;
       },
       decoration: InputDecoration(
-        hintText: '请输入 IP 地址或域名',
+        hintText: 'IP 地址或域名，如 tower.local',
         prefixIconConstraints: const BoxConstraints(
           minWidth: 102,
           minHeight: 24,
@@ -338,21 +495,21 @@ class _ProtocolDomainField extends StatelessWidget {
           padding: const EdgeInsets.only(left: 15, right: 10),
           child: InkWell(
             borderRadius: BorderRadius.circular(8),
-            onTap: onToggle,
+            onTap: enabled ? onToggle : null,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   useHttps ? 'https://' : 'http://',
-                  style: const TextStyle(
-                    color: AppTheme.textMedium,
+                  style: TextStyle(
+                    color: enabled ? AppTheme.textMedium : AppTheme.textLight,
                     fontSize: 15,
                   ),
                 ),
                 const SizedBox(width: 2),
-                const Icon(
+                Icon(
                   Icons.arrow_drop_down,
-                  color: AppTheme.textMedium,
+                  color: enabled ? AppTheme.textMedium : AppTheme.textLight,
                   size: 18,
                 ),
                 const SizedBox(width: 10),

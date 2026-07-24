@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../widgets/app_text_field.dart';
@@ -19,10 +21,12 @@ class _RegisterPageState extends State<RegisterPage> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
+  Timer? _navigateBackTimer;
   bool _registered = false;
 
   @override
   void dispose() {
+    _navigateBackTimer?.cancel();
     _usernameController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
@@ -30,15 +34,20 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 
   void _submit() {
+    if (_registered) {
+      return;
+    }
     final isValid = _formKey.currentState?.validate() ?? false;
     if (!isValid) {
       return;
     }
     setState(() => _registered = true);
-    Future<void>.delayed(const Duration(milliseconds: 900), () {
-      if (mounted) {
-        Navigator.of(context).pop();
+    _navigateBackTimer?.cancel();
+    _navigateBackTimer = Timer(const Duration(milliseconds: 900), () {
+      if (!mounted) {
+        return;
       }
+      Navigator.of(context).pop();
     });
   }
 

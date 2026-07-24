@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:unraider/services/app_logger.dart';
 import 'package:unraider/services/unraid_client.dart';
 
 void main() {
@@ -69,6 +70,33 @@ void main() {
     expect(command, contains(r"-printf '%p\0%y\0%s\0%T@\0%f\0'"));
   });
 
+  test('builds media scan command with recursive maxdepth', () {
+    final command = buildSshMediaScanCommand(
+      r'mnt\user//photos/mobile/',
+      maxDepth: 6,
+    );
+
+    expect(command, contains("find '/mnt/user/photos/mobile'"));
+    expect(command, contains('-mindepth 1'));
+    expect(command, contains('-maxdepth 6'));
+    expect(command, contains('-type f'));
+    expect(command, contains(r"-printf '%p\0%y\0%s\0%T@\0%f\0'"));
+  });
+
+  test('builds file stream URI under the WebGUI base URL', () {
+    final client = UnraidWebGuiClient(
+      baseUrl: 'http://tower.local',
+      username: 'root',
+      password: 'secret',
+    );
+    addTearDown(client.close);
+
+    final uri = client.fileStreamUri('/mnt/user/photos/a b.jpg');
+    expect(uri.scheme, 'http');
+    expect(uri.host, 'tower.local');
+    expect(uri.path, '/mnt/user/photos/a%20b.jpg');
+  });
+
   test('builds modified time command from source timestamp', () {
     final command = buildSetModifiedTimeCommand(
       "/mnt/user/media/it's here.jpg",
@@ -101,5 +129,11 @@ void main() {
     expect(isUnsafeDestructivePath('/mnt/user/media'), isFalse);
     expect(isUnsafeDestructivePath('/mnt/disk1/media'), isFalse);
     expect(isUnsafeDestructivePath('/boot/config'), isFalse);
+  });
+
+  test('AppLogger formats and flushes without throwing', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    await AppLogger.log('wave4_logger_smoke');
+    await AppLogger.flush();
   });
 }

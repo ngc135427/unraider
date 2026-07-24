@@ -13,6 +13,12 @@ class AppTextField extends StatelessWidget {
     this.focusNode,
     this.validator,
     this.suffixIcon,
+    this.textInputAction,
+    this.onChanged,
+    this.onFieldSubmitted,
+    this.autofillHints,
+    this.enabled = true,
+    this.keyboardType,
   });
 
   final String label;
@@ -23,6 +29,12 @@ class AppTextField extends StatelessWidget {
   final FocusNode? focusNode;
   final String? Function(String?)? validator;
   final Widget? suffixIcon;
+  final TextInputAction? textInputAction;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onFieldSubmitted;
+  final Iterable<String>? autofillHints;
+  final bool enabled;
+  final TextInputType? keyboardType;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +54,13 @@ class AppTextField extends StatelessWidget {
           controller: controller,
           focusNode: focusNode,
           obscureText: obscureText,
+          enabled: enabled,
           validator: validator,
+          textInputAction: textInputAction,
+          onChanged: onChanged,
+          onFieldSubmitted: onFieldSubmitted,
+          autofillHints: autofillHints,
+          keyboardType: keyboardType,
           decoration: InputDecoration(
             hintText: hint,
             suffixIcon: suffixIcon ??

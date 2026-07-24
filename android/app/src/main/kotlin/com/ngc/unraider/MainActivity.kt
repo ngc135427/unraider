@@ -226,6 +226,12 @@ class MainActivity : FlutterActivity() {
                     appendLogLine(line)
                     result.success(null)
                 }
+                "appendBatch" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val lines = call.argument<List<String>>("lines") ?: emptyList()
+                    appendLogLines(lines)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -250,10 +256,20 @@ class MainActivity : FlutterActivity() {
 
     private fun appendLogLine(line: String) {
         if (line.isBlank()) return
-        Log.i(LOG_TAG, line)
+        appendLogLines(listOf(line))
+    }
+
+    private fun appendLogLines(lines: List<String>) {
+        val filtered = lines.filter { it.isNotBlank() }
+        if (filtered.isEmpty) return
+        for (line in filtered) {
+            Log.i(LOG_TAG, line)
+        }
         try {
             FileWriter(logFile(), true).use { writer ->
-                writer.append(line).append('\n')
+                for (line in filtered) {
+                    writer.append(line).append('\n')
+                }
             }
         } catch (error: Exception) {
             Log.e(LOG_TAG, "failed to write log file", error)
