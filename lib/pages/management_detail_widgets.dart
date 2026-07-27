@@ -267,11 +267,19 @@ class _ImagePreviewState extends State<_ImagePreview> {
               child: PageView.builder(
                 controller: _controller,
                 itemCount: widget.entries.length,
+                // Keep only the current page + neighbors warm so swiping a
+                // large album does not start dozens of full-file downloads.
+                allowImplicitScrolling: false,
                 onPageChanged: (value) => setState(() => _index = value),
-                itemBuilder: (context, index) => _ImagePreviewPage(
-                  client: widget.client,
-                  entry: widget.entries[index],
-                ),
+                itemBuilder: (context, index) {
+                  final distance = (index - _index).abs();
+                  return _ImagePreviewPage(
+                    key: ValueKey<String>(widget.entries[index].path),
+                    client: widget.client,
+                    entry: widget.entries[index],
+                    active: distance <= 1,
+                  );
+                },
               ),
             ),
           ],
@@ -283,12 +291,15 @@ class _ImagePreviewState extends State<_ImagePreview> {
 
 class _ImagePreviewPage extends StatefulWidget {
   const _ImagePreviewPage({
+    super.key,
     required this.client,
     required this.entry,
+    required this.active,
   });
 
   final UnraidClient client;
   final UnraidFileEntry entry;
+  final bool active;
 
   @override
   State<_ImagePreviewPage> createState() => _ImagePreviewPageState();
@@ -296,8 +307,9 @@ class _ImagePreviewPage extends StatefulWidget {
 
 class _ImagePreviewPageState extends State<_ImagePreviewPage> {
   late final bool _isTooLarge;
-  late final Future<Uint8List>? _bytesFuture;
+  Future<Uint8List>? _bytesFuture;
   bool _decodeSuccessLogged = false;
+  bool _skipLogged = false;
 
   @override
   void initState() {
@@ -305,37 +317,78 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
     _isTooLarge = widget.entry.sizeBytes > _maxImagePreviewBytes;
     if (_isTooLarge) {
       _bytesFuture = null;
-      unawaited(
-        AppLogger.log(
-          'share_preview_skip_large path=${widget.entry.path} '
-          'sizeBytes=${widget.entry.sizeBytes} limit=$_maxImagePreviewBytes',
-        ),
-      );
-    } else {
+      if (!_skipLogged) {
+        _skipLogged = true;
+        unawaited(
+          AppLogger.log(
+            'share_preview_skip_large path=${widget.entry.path} '
+            'sizeBytes=${widget.entry.sizeBytes} limit=$_maxImagePreviewBytes',
+          ),
+        );
+      }
+    } else if (widget.active) {
       _bytesFuture = _loadPreviewBytes();
     }
   }
 
-  Future<Uint8List> _loadPreviewBytes() async {
-    await AppLogger.log(
-      'share_preview_fetch_start path=${widget.entry.path} '
-      'sizeBytes=${widget.entry.sizeBytes}',
-    );
-    try {
-      final bytes = await widget.client.fetchFileBytes(widget.entry.path);
-      await AppLogger.log(
-        'share_preview_fetch_success path=${widget.entry.path} '
-        'bytes=${bytes.length}',
-      );
-      return bytes;
-    } on Object catch (error, stackTrace) {
-      await AppLogger.log(
-        'share_preview_fetch_error path=${widget.entry.path}',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      rethrow;
+  @override
+  void didUpdateWidget(covariant _ImagePreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_isTooLarge &&
+        widget.active &&
+        _bytesFuture == null &&
+        oldWidget.entry.path == widget.entry.path) {
+      setState(() {
+        _bytesFuture = _loadPreviewBytes();
+      });
     }
+  }
+
+  Future<Uint8List> _loadPreviewBytes() {
+    final path = widget.entry.path;
+    final cached = _sharePreviewBytesCache[path];
+    if (cached != null) {
+      return cached;
+    }
+
+    final future = () async {
+      await AppLogger.log(
+        'share_preview_fetch_start path=$path '
+        'sizeBytes=${widget.entry.sizeBytes}',
+      );
+      try {
+        final bytes = await widget.client.fetchFileBytes(path);
+        await AppLogger.log(
+          'share_preview_fetch_success path=$path '
+          'bytes=${bytes.length}',
+        );
+        return bytes;
+      } on Object catch (error, stackTrace) {
+        await AppLogger.log(
+          'share_preview_fetch_error path=$path',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        rethrow;
+      }
+    }();
+
+    if (_sharePreviewBytesCache.length >= _maxSharePreviewCacheEntries) {
+      _sharePreviewBytesCache.remove(_sharePreviewBytesCache.keys.first);
+    }
+    _sharePreviewBytesCache[path] = future;
+    // Drop failed futures so a retry can re-fetch.
+    unawaited(
+      future.then<void>(
+        (_) {},
+        onError: (Object _) {
+          if (identical(_sharePreviewBytesCache[path], future)) {
+            _sharePreviewBytesCache.remove(path);
+          }
+        },
+      ),
+    );
+    return future;
   }
 
   @override
@@ -347,8 +400,19 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
       );
     }
 
+    final bytesFuture = _bytesFuture;
+    if (bytesFuture == null) {
+      // Inactive off-screen pages stay lightweight until swiped near.
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Icon(Icons.image_outlined, color: Colors.white24, size: 48),
+        ),
+      );
+    }
+
     return FutureBuilder<Uint8List>(
-      future: _bytesFuture,
+      future: bytesFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Center(child: CircularProgressIndicator());
@@ -458,9 +522,33 @@ class _TextPreviewState extends State<_TextPreview> {
     _textFuture = _isTooLarge ? null : _loadText();
   }
 
-  Future<String> _loadText() async {
-    final bytes = await widget.client.fetchFileBytes(widget.entry.path);
-    return utf8.decode(bytes, allowMalformed: true);
+  Future<String> _loadText() {
+    final path = widget.entry.path;
+    final cached = _sharePreviewTextCache[path];
+    if (cached != null) {
+      return cached;
+    }
+
+    final future = () async {
+      final bytes = await widget.client.fetchFileBytes(path);
+      return utf8.decode(bytes, allowMalformed: true);
+    }();
+
+    if (_sharePreviewTextCache.length >= _maxSharePreviewTextCacheEntries) {
+      _sharePreviewTextCache.remove(_sharePreviewTextCache.keys.first);
+    }
+    _sharePreviewTextCache[path] = future;
+    unawaited(
+      future.then<void>(
+        (_) {},
+        onError: (Object _) {
+          if (identical(_sharePreviewTextCache[path], future)) {
+            _sharePreviewTextCache.remove(path);
+          }
+        },
+      ),
+    );
+    return future;
   }
 
   @override

@@ -17,6 +17,23 @@ class _MusicScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Widget content = body ??
+        SingleChildScrollView(
+          physics: onRefresh == null
+              ? null
+              : const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(30, 12, 30, 30),
+          child: FadeSlide(
+            child: child!,
+          ),
+        );
+    if (onRefresh != null && body == null) {
+      content = RefreshIndicator(
+        onRefresh: () async => onRefresh!(),
+        child: content,
+      );
+    }
+
     return PhoneFrame(
       maxContentWidth: 900,
       child: Column(
@@ -74,13 +91,7 @@ class _MusicScaffold extends StatelessWidget {
                 color: Colors.white,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
               ),
-              child: body ??
-                  SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(30, 12, 30, 30),
-                    child: FadeSlide(
-                      child: child!,
-                    ),
-                  ),
+              child: content,
             ),
           ),
         ],

@@ -38,6 +38,7 @@ class _LoginPageState extends State<LoginPage> {
   bool _loadingPreferences = true;
   String? _statusMessage;
   String? _errorMessage;
+  Timer? _navigateHomeTimer;
 
   @override
   void initState() {
@@ -50,6 +51,7 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   void dispose() {
+    _navigateHomeTimer?.cancel();
     _domainFocusNode.removeListener(_handleFocusChange);
     _usernameFocusNode.removeListener(_handleFocusChange);
     _passwordFocusNode.removeListener(_handleFocusChange);
@@ -107,9 +109,10 @@ class _LoginPageState extends State<LoginPage> {
 
     try {
       await client.checkConnection();
-      // Pre-warm SSH while the success animation plays so share/album open
-      // does not pay the handshake cost on first use.
+      // Pre-warm SSH and dashboard while the success animation plays so the
+      // home shell can join the same in-flight fetches on open.
       unawaited(client.warmSsh());
+      unawaited(client.fetchDashboard(forceRefresh: true));
       await _saveRememberedLogin();
       if (!mounted) {
         return;
@@ -118,14 +121,16 @@ class _LoginPageState extends State<LoginPage> {
         _loginSucceeded = true;
         _statusMessage = '已连接，正在进入主页…';
       });
-      await Future<void>.delayed(const Duration(milliseconds: 450));
-      if (!mounted) {
-        return;
-      }
-      Navigator.of(context).pushReplacementNamed(
-        MainShellPage.routeName,
-        arguments: client,
-      );
+      _navigateHomeTimer?.cancel();
+      _navigateHomeTimer = Timer(const Duration(milliseconds: 320), () {
+        if (!mounted) {
+          return;
+        }
+        Navigator.of(context).pushReplacementNamed(
+          MainShellPage.routeName,
+          arguments: client,
+        );
+      });
     } on UnraidClientException catch (error) {
       client.close();
       if (!mounted) {

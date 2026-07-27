@@ -238,7 +238,7 @@ class _TabButton extends StatelessWidget {
   }
 }
 
-class _LocalTimeline extends StatelessWidget {
+class _LocalTimeline extends StatefulWidget {
   const _LocalTimeline({
     required this.loading,
     required this.media,
@@ -250,19 +250,38 @@ class _LocalTimeline extends StatelessWidget {
   final bool videosOnly;
 
   @override
+  State<_LocalTimeline> createState() => _LocalTimelineState();
+}
+
+class _LocalTimelineState extends State<_LocalTimeline> {
+  List<LocalMediaAsset>? _mediaRef;
+  List<_LocalSection> _sections = const <_LocalSection>[];
+
+  List<_LocalSection> get _groupedSections {
+    if (identical(_mediaRef, widget.media)) {
+      return _sections;
+    }
+    _mediaRef = widget.media;
+    _sections = _groupLocalByDate(widget.media);
+    return _sections;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (loading) {
+    if (widget.loading) {
       return const _LoadingState(label: '正在读取本机相册');
     }
-    if (media.isEmpty) {
+    if (widget.media.isEmpty) {
       return _InlineState(
-        icon: videosOnly ? Icons.video_library_outlined : Icons.photo_outlined,
-        title: videosOnly ? '没有视频' : '没有照片或视频',
+        icon: widget.videosOnly
+            ? Icons.video_library_outlined
+            : Icons.photo_outlined,
+        title: widget.videosOnly ? '没有视频' : '没有照片或视频',
         detail: '请检查系统媒体权限',
       );
     }
 
-    final sections = _groupLocalByDate(media);
+    final sections = _groupedSections;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -293,7 +312,7 @@ class _LocalTimeline extends StatelessWidget {
   }
 }
 
-class _RemoteTimeline extends StatelessWidget {
+class _RemoteTimeline extends StatefulWidget {
   const _RemoteTimeline({
     required this.loading,
     required this.entries,
@@ -309,20 +328,37 @@ class _RemoteTimeline extends StatelessWidget {
   final VoidCallback? onRetry;
 
   @override
+  State<_RemoteTimeline> createState() => _RemoteTimelineState();
+}
+
+class _RemoteTimelineState extends State<_RemoteTimeline> {
+  List<UnraidFileEntry>? _entriesRef;
+  List<_RemoteSection> _sections = const <_RemoteSection>[];
+
+  List<_RemoteSection> get _groupedSections {
+    if (identical(_entriesRef, widget.entries)) {
+      return _sections;
+    }
+    _entriesRef = widget.entries;
+    _sections = _groupRemoteByDate(widget.entries);
+    return _sections;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (loading) {
+    if (widget.loading) {
       return const _LoadingState(label: '正在读取 Unraid 相册');
     }
-    if (error != null) {
+    if (widget.error != null) {
       return _InlineState(
         icon: Icons.cloud_off_outlined,
         title: '云端读取失败',
-        detail: error!,
+        detail: widget.error!,
         actionLabel: '重试',
-        onAction: onRetry,
+        onAction: widget.onRetry,
       );
     }
-    if (entries.isEmpty) {
+    if (widget.entries.isEmpty) {
       return const _InlineState(
         icon: Icons.cloud_queue,
         title: '云端暂无媒体',
@@ -330,7 +366,7 @@ class _RemoteTimeline extends StatelessWidget {
       );
     }
 
-    final sections = _groupRemoteByDate(entries);
+    final sections = _groupedSections;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -338,7 +374,7 @@ class _RemoteTimeline extends StatelessWidget {
           _SectionTitle(title: section.title, count: section.items.length),
           const SizedBox(height: 10),
           _RemoteGrid(
-            client: client,
+            client: widget.client,
             items: section.items.length <= _maxAlbumSectionTiles
                 ? section.items
                 : section.items.take(_maxAlbumSectionTiles).toList(
@@ -578,7 +614,9 @@ class _LocalGrid extends StatelessWidget {
         crossAxisSpacing: 6,
       ),
       itemBuilder: (context, index) {
-        return _LocalTile(asset: items[index]);
+        return RepaintBoundary(
+          child: _LocalTile(asset: items[index]),
+        );
       },
     );
   }
@@ -605,7 +643,9 @@ class _RemoteGrid extends StatelessWidget {
         crossAxisSpacing: 6,
       ),
       itemBuilder: (context, index) {
-        return _RemoteTile(client: client, entry: items[index]);
+        return RepaintBoundary(
+          child: _RemoteTile(client: client, entry: items[index]),
+        );
       },
     );
   }

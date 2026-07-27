@@ -2,7 +2,6 @@ part of 'main_shell_page.dart';
 
 class _ServerInfoPage extends StatelessWidget {
   const _ServerInfoPage({
-    super.key,
     required this.iconVariant,
     required this.dashboard,
     required this.unraidClient,
@@ -22,7 +21,8 @@ class _ServerInfoPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
+    final body = SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 86),
       child: FadeSlide(
         child: Column(
@@ -92,6 +92,14 @@ class _ServerInfoPage extends StatelessWidget {
           ],
         ),
       ),
+    );
+
+    if (onRefresh == null) {
+      return body;
+    }
+    return RefreshIndicator(
+      onRefresh: () async => onRefresh!(),
+      child: body,
     );
   }
 }

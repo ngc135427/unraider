@@ -51,10 +51,23 @@ class _MusicPageState extends State<MusicPage> {
   String _rootPath = '/mnt/user/music';
   List<UnraidFileEntry> _tracks = const <UnraidFileEntry>[];
   bool _loading = true;
+  bool _loadingTracks = false;
+  int _loadGeneration = 0;
   String? _error;
   String _query = '';
   Timer? _searchDebounce;
   UnraidFileEntry? _currentTrack;
+
+  // Memoized derived stats so rebuilds from search typing do not rescan the
+  // full library for album / lossless counts.
+  List<UnraidFileEntry>? _statsTracksRef;
+  String? _statsRootRef;
+  int _albumCountCached = 0;
+  int _losslessCountCached = 0;
+  String _filterQueryRef = '';
+  List<UnraidFileEntry>? _filterTracksRef;
+  String? _filterRootRef;
+  List<UnraidFileEntry> _filteredTracksCached = const <UnraidFileEntry>[];
 
   String get _cacheKey {
     final client = _client;
@@ -64,37 +77,61 @@ class _MusicPageState extends State<MusicPage> {
     return '${client.baseUrl}|$_rootPath';
   }
 
+  void _ensureTrackStats() {
+    if (identical(_statsTracksRef, _tracks) && _statsRootRef == _rootPath) {
+      return;
+    }
+    _statsTracksRef = _tracks;
+    _statsRootRef = _rootPath;
+    final albums = <String>{};
+    var lossless = 0;
+    for (final track in _tracks) {
+      albums.add(_albumName(track.path, _rootPath));
+      final lower = track.name.toLowerCase();
+      if (lower.endsWith('.flac') ||
+          lower.endsWith('.wav') ||
+          lower.endsWith('.aiff') ||
+          lower.endsWith('.alac') ||
+          lower.endsWith('.ape')) {
+        lossless += 1;
+      }
+    }
+    _albumCountCached = albums.length;
+    _losslessCountCached = lossless;
+  }
+
   List<UnraidFileEntry> get _filteredTracks {
     final query = _query.trim().toLowerCase();
-    if (query.isEmpty) {
-      return _tracks;
+    if (identical(_filterTracksRef, _tracks) &&
+        _filterRootRef == _rootPath &&
+        _filterQueryRef == query) {
+      return _filteredTracksCached;
     }
-    return _tracks
+    _filterTracksRef = _tracks;
+    _filterRootRef = _rootPath;
+    _filterQueryRef = query;
+    if (query.isEmpty) {
+      _filteredTracksCached = _tracks;
+      return _filteredTracksCached;
+    }
+    _filteredTracksCached = _tracks
         .where((track) {
           final album = _albumName(track.path, _rootPath).toLowerCase();
           return track.name.toLowerCase().contains(query) ||
               album.contains(query);
         })
         .toList(growable: false);
+    return _filteredTracksCached;
   }
 
   int get _albumCount {
-    final albums = <String>{};
-    for (final track in _tracks) {
-      albums.add(_albumName(track.path, _rootPath));
-    }
-    return albums.length;
+    _ensureTrackStats();
+    return _albumCountCached;
   }
 
   int get _losslessCount {
-    return _tracks.where((track) {
-      final lower = track.name.toLowerCase();
-      return lower.endsWith('.flac') ||
-          lower.endsWith('.wav') ||
-          lower.endsWith('.aiff') ||
-          lower.endsWith('.alac') ||
-          lower.endsWith('.ape');
-    }).length;
+    _ensureTrackStats();
+    return _losslessCountCached;
   }
 
   @override
@@ -144,8 +181,13 @@ class _MusicPageState extends State<MusicPage> {
         });
         return;
       }
+      if (_loadingTracks) {
+        return;
+      }
     }
 
+    final generation = ++_loadGeneration;
+    _loadingTracks = true;
     setState(() {
       _loading = true;
       _error = null;
@@ -170,6 +212,9 @@ class _MusicPageState extends State<MusicPage> {
           // reuse the short media-scan cache.
           forceRefresh: force && i == 0,
         );
+        if (!mounted || generation != _loadGeneration) {
+          return;
+        }
         if (found.isNotEmpty) {
           tracks = found;
           usedRoot = root;
@@ -180,7 +225,7 @@ class _MusicPageState extends State<MusicPage> {
         }
       }
 
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
 
@@ -201,7 +246,7 @@ class _MusicPageState extends State<MusicPage> {
         _error = null;
       });
     } on UnraidClientException catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -209,13 +254,17 @@ class _MusicPageState extends State<MusicPage> {
         _error = error.message;
       });
     } on Object catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
         _loading = false;
         _error = '加载音乐库失败：$error';
       });
+    } finally {
+      if (generation == _loadGeneration) {
+        _loadingTracks = false;
+      }
     }
   }
 
@@ -334,11 +383,14 @@ class _MusicPageState extends State<MusicPage> {
             )
           else ...[
             for (final track in tracks.take(20))
-              _TrackTile(
-                track: track,
-                album: _albumName(track.path, _rootPath),
-                selected: current?.path == track.path,
-                onTap: () => _openPlayer(track),
+              RepaintBoundary(
+                key: ValueKey<String>(track.path),
+                child: _TrackTile(
+                  track: track,
+                  album: _albumName(track.path, _rootPath),
+                  selected: current?.path == track.path,
+                  onTap: () => _openPlayer(track),
+                ),
               ),
             if (tracks.length > 20) ...[
               const SizedBox(height: 8),
@@ -379,19 +431,33 @@ class MusicTracksPage extends StatefulWidget {
 class _MusicTracksPageState extends State<MusicTracksPage> {
   String _query = '';
   Timer? _searchDebounce;
+  String _filterQueryRef = '';
+  List<UnraidFileEntry>? _filterTracksRef;
+  String? _filterRootRef;
+  List<UnraidFileEntry> _filteredCached = const <UnraidFileEntry>[];
 
   List<UnraidFileEntry> get _filtered {
     final query = _query.trim().toLowerCase();
-    if (query.isEmpty) {
-      return widget.tracks;
+    if (identical(_filterTracksRef, widget.tracks) &&
+        _filterRootRef == widget.rootPath &&
+        _filterQueryRef == query) {
+      return _filteredCached;
     }
-    return widget.tracks
+    _filterTracksRef = widget.tracks;
+    _filterRootRef = widget.rootPath;
+    _filterQueryRef = query;
+    if (query.isEmpty) {
+      _filteredCached = widget.tracks;
+      return _filteredCached;
+    }
+    _filteredCached = widget.tracks
         .where((track) {
           final album = _albumName(track.path, widget.rootPath).toLowerCase();
           return track.name.toLowerCase().contains(query) ||
               album.contains(query);
         })
         .toList(growable: false);
+    return _filteredCached;
   }
 
   @override
@@ -457,12 +523,15 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
                       itemCount: tracks.length,
                       itemBuilder: (context, index) {
                         final track = tracks[index];
-                        return _TrackTile(
-                          track: track,
-                          album: _albumName(track.path, widget.rootPath),
-                          selected:
-                              widget.currentTrack?.path == track.path,
-                          onTap: () => widget.onSelect(track),
+                        return RepaintBoundary(
+                          key: ValueKey<String>(track.path),
+                          child: _TrackTile(
+                            track: track,
+                            album: _albumName(track.path, widget.rootPath),
+                            selected:
+                                widget.currentTrack?.path == track.path,
+                            onTap: () => widget.onSelect(track),
+                          ),
                         );
                       },
                     ),

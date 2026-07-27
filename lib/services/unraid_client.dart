@@ -34,6 +34,16 @@ class _DirectoryCacheEntry {
   final DateTime fetchedAt;
 }
 
+class _FileBytesCacheEntry {
+  const _FileBytesCacheEntry({
+    required this.bytes,
+    required this.fetchedAt,
+  });
+
+  final Uint8List bytes;
+  final DateTime fetchedAt;
+}
+
 class _DashboardSegmentCache {
   const _DashboardSegmentCache({
     required this.dashboard,
@@ -85,6 +95,11 @@ class UnraidWebGuiClient {
   /// Idle SSH keep-alive so long album/share sessions do not drop mid-use.
   static const sshKeepAliveInterval = Duration(seconds: 30);
 
+  /// Short TTL for small remote file reads (thumbnails / text previews).
+  static const _fileBytesCacheTtl = Duration(seconds: 60);
+  static const _maxFileBytesCacheEntries = 24;
+  static const _maxCachedFileBytes = 4 * 1024 * 1024;
+
   final String baseUrl;
   final String username;
   final String _password;
@@ -100,14 +115,22 @@ class UnraidWebGuiClient {
       <String, _DirectoryCacheEntry>{};
   final Map<String, Future<List<UnraidFileEntry>>> _mediaScanInflight =
       <String, Future<List<UnraidFileEntry>>>{};
+  final Map<String, _FileBytesCacheEntry> _fileBytesCache =
+      <String, _FileBytesCacheEntry>{};
+  final Map<String, Future<Uint8List>> _fileBytesInflight =
+      <String, Future<Uint8List>>{};
   String? _csrfToken;
+  Future<void>? _csrfTokenFuture;
   SSHClient? _sshClient;
   SftpClient? _sftpClient;
   Future<int>? _sshPortFuture;
   Future<SSHClient>? _sshConnectFuture;
   Future<SftpClient>? _sftpConnectFuture;
   Future<void> _sftpTransferQueue = Future<void>.value();
+  Future<void> _sshCommandQueue = Future<void>.value();
   _DashboardSegmentCache? _dashboardSegmentCache;
+  Future<UnraidDashboard>? _dashboardInflight;
+  bool _dashboardInflightForced = false;
 
   Future<void> checkConnection() async {
     try {
@@ -162,6 +185,43 @@ class UnraidWebGuiClient {
       return cache.dashboard;
     }
 
+    // Coalesce concurrent pulls (pull-to-refresh + tab switch, double taps).
+    // A forced refresh supersedes a soft in-flight fetch.
+    final inflight = _dashboardInflight;
+    if (inflight != null && (!forceRefresh || _dashboardInflightForced)) {
+      return inflight;
+    }
+
+    final future = _fetchDashboardSegments(
+      forceRefresh: forceRefresh,
+      needOverview: needOverview,
+      needDocker: needDocker,
+      needVm: needVm,
+      needShare: needShare,
+      cache: cache,
+      now: now,
+    );
+    _dashboardInflight = future;
+    _dashboardInflightForced = forceRefresh;
+    try {
+      return await future;
+    } finally {
+      if (identical(_dashboardInflight, future)) {
+        _dashboardInflight = null;
+        _dashboardInflightForced = false;
+      }
+    }
+  }
+
+  Future<UnraidDashboard> _fetchDashboardSegments({
+    required bool forceRefresh,
+    required bool needOverview,
+    required bool needDocker,
+    required bool needVm,
+    required bool needShare,
+    required _DashboardSegmentCache? cache,
+    required DateTime now,
+  }) async {
     await _ensureCsrfToken();
 
     final futures = <Future<Object>>[];
@@ -412,12 +472,49 @@ class UnraidWebGuiClient {
     _invalidateDirectoryCache(_parentPath(normalized));
   }
 
-  Future<Uint8List> fetchFileBytes(String path) async {
+  Future<Uint8List> fetchFileBytes(
+    String path, {
+    bool forceRefresh = false,
+  }) async {
     if (kIsWeb) {
       throw const UnraidClientException('Web 端暂不支持直接读取 Unraid 文件');
     }
 
     final normalized = _normalizeUnraidPath(path);
+    if (!forceRefresh) {
+      final cached = _fileBytesCache[normalized];
+      if (cached != null &&
+          DateTime.now().difference(cached.fetchedAt) < _fileBytesCacheTtl) {
+        return cached.bytes;
+      }
+      final inflight = _fileBytesInflight[normalized];
+      if (inflight != null) {
+        return inflight;
+      }
+    }
+
+    final future = _loadFileBytes(normalized);
+    _fileBytesInflight[normalized] = future;
+    try {
+      final bytes = await future;
+      if (bytes.length <= _maxCachedFileBytes) {
+        if (_fileBytesCache.length >= _maxFileBytesCacheEntries) {
+          _fileBytesCache.remove(_fileBytesCache.keys.first);
+        }
+        _fileBytesCache[normalized] = _FileBytesCacheEntry(
+          bytes: bytes,
+          fetchedAt: DateTime.now(),
+        );
+      }
+      return bytes;
+    } finally {
+      if (identical(_fileBytesInflight[normalized], future)) {
+        _fileBytesInflight.remove(normalized);
+      }
+    }
+  }
+
+  Future<Uint8List> _loadFileBytes(String normalized) async {
     final stopwatch = Stopwatch()..start();
     final smbPath = smbSharePathFromUnraidPath(normalized);
     if (defaultTargetPlatform == TargetPlatform.android && smbPath != null) {
@@ -741,6 +838,12 @@ class UnraidWebGuiClient {
 
     _mediaScanCache.removeWhere((key, _) => mediaKeyAffected(key));
     _mediaScanInflight.removeWhere((key, _) => mediaKeyAffected(key));
+    _fileBytesCache.removeWhere(
+      (key, _) => key == normalized || key.startsWith(prefix),
+    );
+    _fileBytesInflight.removeWhere(
+      (key, _) => key == normalized || key.startsWith(prefix),
+    );
   }
 
   @visibleForTesting
@@ -895,7 +998,12 @@ class UnraidWebGuiClient {
     _directoryInflight.clear();
     _mediaScanCache.clear();
     _mediaScanInflight.clear();
+    _fileBytesCache.clear();
+    _fileBytesInflight.clear();
     _dashboardSegmentCache = null;
+    _dashboardInflight = null;
+    _dashboardInflightForced = false;
+    _csrfTokenFuture = null;
     _sshConnectFuture = null;
     _sftpConnectFuture = null;
     _sftpClient?.close();
@@ -1108,45 +1216,65 @@ query UnraiderSshConfig {
     String action,
     String command, {
     Duration timeout = httpTimeout,
-  }) async {
-    final client = await _ensureSshClient();
-    try {
-      final result = await client
-          .runWithResult(command, stdout: true, stderr: true)
-          .timeout(timeout);
-      if (result.exitCode != 0) {
-        final error = utf8
-            .decode(
-              result.stderr.isNotEmpty ? result.stderr : result.stdout,
-              allowMalformed: true,
-            )
-            .trim();
-        throw UnraidClientException(
-          error.isEmpty
-              ? '$action失败：退出码 ${result.exitCode}'
-              : '$action失败：$error',
-        );
+  }) {
+    // Serialize interactive SSH execs so concurrent directory/media scans do
+    // not interleave on one session.
+    return _runSshSerialized(() async {
+      final client = await _ensureSshClient();
+      try {
+        final result = await client
+            .runWithResult(command, stdout: true, stderr: true)
+            .timeout(timeout);
+        if (result.exitCode != 0) {
+          final error = utf8
+              .decode(
+                result.stderr.isNotEmpty ? result.stderr : result.stdout,
+                allowMalformed: true,
+              )
+              .trim();
+          throw UnraidClientException(
+            error.isEmpty
+                ? '$action失败：退出码 ${result.exitCode}'
+                : '$action失败：$error',
+          );
+        }
+        return utf8.decode(result.stdout, allowMalformed: true);
+      } on TimeoutException {
+        throw UnraidClientException('$action超时');
+      } on UnraidClientException {
+        rethrow;
+      } on Object catch (error) {
+        throw UnraidClientException('$action失败：$error');
       }
-      return utf8.decode(result.stdout, allowMalformed: true);
-    } on TimeoutException {
-      throw UnraidClientException('$action超时');
-    } on UnraidClientException {
-      rethrow;
-    } on Object catch (error) {
-      throw UnraidClientException('$action失败：$error');
+    });
+  }
+
+  Future<T> _runSshSerialized<T>(Future<T> Function() action) async {
+    final previous = _sshCommandQueue;
+    final done = Completer<void>();
+    _sshCommandQueue = done.future;
+    try {
+      await previous.catchError((Object _) {});
+      return await action();
+    } finally {
+      if (!done.isCompleted) {
+        done.complete();
+      }
     }
   }
 
-  Future<bool> _sshDirectoryExists(String path) async {
-    try {
-      final client = await _ensureSshClient();
-      final result = await client
-          .runWithResult('test -d ${shellQuote(_normalizeUnraidPath(path))}')
-          .timeout(probeTimeout);
-      return result.exitCode == 0;
-    } on Object {
-      return false;
-    }
+  Future<bool> _sshDirectoryExists(String path) {
+    return _runSshSerialized(() async {
+      try {
+        final client = await _ensureSshClient();
+        final result = await client
+            .runWithResult('test -d ${shellQuote(_normalizeUnraidPath(path))}')
+            .timeout(probeTimeout);
+        return result.exitCode == 0;
+      } on Object {
+        return false;
+      }
+    });
   }
 
   Future<void> _login() async {
@@ -1183,6 +1311,23 @@ query UnraiderSshConfig {
     if (_csrfToken != null) {
       return;
     }
+    // Coalesce concurrent first-token fetches (login + warmSsh + dashboard).
+    final inflight = _csrfTokenFuture;
+    if (inflight != null) {
+      return inflight;
+    }
+    final future = _loadCsrfToken();
+    _csrfTokenFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_csrfTokenFuture, future)) {
+        _csrfTokenFuture = null;
+      }
+    }
+  }
+
+  Future<void> _loadCsrfToken() async {
     final response = await _send('GET', '/Main');
     final html = utf8.decode(response.bodyBytes, allowMalformed: true);
     _extractCsrf(html);

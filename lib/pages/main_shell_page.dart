@@ -25,6 +25,16 @@ const _maxImagePreviewBytes = 32 * 1024 * 1024;
 const _maxImagePreviewDecodeExtent = 2400;
 const _maxTextPreviewBytes = 1024 * 1024;
 
+/// Process-local cache for share browser image previews (path -> bytes).
+final Map<String, Future<Uint8List>> _sharePreviewBytesCache =
+    <String, Future<Uint8List>>{};
+const _maxSharePreviewCacheEntries = 16;
+
+/// Process-local cache for share browser text previews (path -> decoded text).
+final Map<String, Future<String>> _sharePreviewTextCache =
+    <String, Future<String>>{};
+const _maxSharePreviewTextCacheEntries = 12;
+
 class MainShellPage extends StatefulWidget {
   const MainShellPage({super.key});
 
@@ -38,12 +48,24 @@ class _MainShellPageState extends State<MainShellPage> {
   static const _dashboardMinRefreshInterval = Duration(seconds: 8);
 
   int _currentIndex = 0;
+  /// Only build bottom-nav pages after first visit so Docker/VM/share lists
+  /// are not constructed while the user stays on Home.
+  final Set<int> _visitedTabs = <int>{0};
   ServerIconVariant _serverIcon = ServerIconVariant.defaultIcon;
   UnraidClient? _unraidClient;
   Future<UnraidDashboard>? _dashboardFuture;
   UnraidDashboard? _lastDashboard;
   DateTime? _lastDashboardFetchAt;
   bool _dashboardRefreshing = false;
+
+  // Memoized ManagementData projections keyed by the source list identity so
+  // tab rebuilds after soft dashboard refreshes avoid remapping every item.
+  List<UnraidManagementItem>? _dockerSourceRef;
+  List<UnraidManagementItem>? _vmSourceRef;
+  List<UnraidManagementItem>? _shareSourceRef;
+  List<ManagementData> _mappedDocker = const <ManagementData>[];
+  List<ManagementData> _mappedVm = const <ManagementData>[];
+  List<ManagementData> _mappedShare = const <ManagementData>[];
 
   static const _navItems = [
     BottomNavItem(icon: Icons.home, label: '主页'),
@@ -67,7 +89,8 @@ class _MainShellPageState extends State<MainShellPage> {
     final args = ModalRoute.of(context)?.settings.arguments;
     if (args is UnraidClient) {
       _unraidClient = args;
-      // Keep SSH warm in the background after login for faster file ops.
+      // Join any login-time prewarm (SSH + dashboard) instead of starting
+      // cold; force still coalesces with an in-flight forced fetch.
       unawaited(args.warmSsh());
       _dashboardFuture = _loadDashboard(force: true);
     }
@@ -90,10 +113,10 @@ class _MainShellPageState extends State<MainShellPage> {
                         top: Radius.circular(25),
                       ),
                     ),
-                    child: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 250),
-                      child: _buildContent(),
-                    ),
+                    // Avoid AnimatedSwitcher here: dashboard refresh rebuilds
+                    // the FutureBuilder frequently and a 250ms cross-fade on
+                    // every pull is wasted work once tabs are IndexedStacked.
+                    child: _buildContent(),
                   ),
                 ),
                 Positioned(
@@ -103,7 +126,7 @@ class _MainShellPageState extends State<MainShellPage> {
                   child: AppBottomNav(
                     items: _navItems,
                     currentIndex: _currentIndex,
-                    onChanged: (value) => setState(() => _currentIndex = value),
+                    onChanged: _selectTab,
                   ),
                 ),
               ],
@@ -112,6 +135,16 @@ class _MainShellPageState extends State<MainShellPage> {
         ],
       ),
     );
+  }
+
+  void _selectTab(int index) {
+    if (_currentIndex == index && _visitedTabs.contains(index)) {
+      return;
+    }
+    setState(() {
+      _currentIndex = index;
+      _visitedTabs.add(index);
+    });
   }
 
   Widget _buildContent() {
@@ -134,62 +167,18 @@ class _MainShellPageState extends State<MainShellPage> {
               snapshot.connectionState != ConnectionState.done;
           return Stack(
             children: [
-              // Keep tab subtrees alive so search text / scroll offsets survive
-              // bottom-nav switches without rebuilding management pages.
+              // Lazy + sticky tabs: first visit builds the page; later switches
+              // keep search text / scroll without building unused tabs on boot.
               IndexedStack(
                 index: _currentIndex,
                 children: [
-                  _ServerInfoPage(
-                    key: const ValueKey('server'),
-                    iconVariant: _serverIcon,
-                    dashboard: dashboard,
-                    unraidClient: _unraidClient,
-                    onEditIcon: _showIconPicker,
-                    onPowerAction: _showPowerDialog,
-                    onOpenDetails: () => _openDashboardDetails(dashboard),
-                    onRefresh: () => _refreshDashboard(force: true),
-                  ),
-                  _ManagementPage(
-                    key: const ValueKey('docker'),
-                    type: 'Docker',
-                    dashboard: dashboard,
-                    items: dashboard.dockerItems
-                        .map(
-                          (item) =>
-                              ManagementData.fromClient(item, Icons.layers),
-                        )
-                        .toList(growable: false),
-                    unraidClient: _unraidClient,
-                    onRefresh: () => _refreshDashboard(force: true),
-                  ),
-                  _ManagementPage(
-                    key: const ValueKey('vm'),
-                    type: '虚拟机',
-                    dashboard: dashboard,
-                    items: dashboard.vmItems
-                        .map(
-                          (item) =>
-                              ManagementData.fromClient(item, Icons.computer),
-                        )
-                        .toList(growable: false),
-                    unraidClient: _unraidClient,
-                    onRefresh: () => _refreshDashboard(force: true),
-                  ),
-                  _ManagementPage(
-                    key: const ValueKey('share'),
-                    type: '共享',
-                    dashboard: dashboard,
-                    items: dashboard.shareItems
-                        .map(
-                          (item) => ManagementData.fromClient(
-                            item,
-                            Icons.folder_shared,
-                          ),
-                        )
-                        .toList(growable: false),
-                    unraidClient: _unraidClient,
-                    onRefresh: () => _refreshDashboard(force: true),
-                  ),
+                  for (var i = 0; i < _navItems.length; i++)
+                    _visitedTabs.contains(i)
+                        ? KeyedSubtree(
+                            key: ValueKey<String>('shell-tab-$i'),
+                            child: _buildTabPage(i, dashboard),
+                          )
+                        : const SizedBox.shrink(),
                 ],
               ),
               if (isRefreshing)
@@ -234,6 +223,69 @@ class _MainShellPageState extends State<MainShellPage> {
         );
       },
     );
+  }
+
+  void _ensureMappedManagementItems(UnraidDashboard dashboard) {
+    if (!identical(_dockerSourceRef, dashboard.dockerItems)) {
+      _dockerSourceRef = dashboard.dockerItems;
+      _mappedDocker = dashboard.dockerItems
+          .map((item) => ManagementData.fromClient(item, Icons.layers))
+          .toList(growable: false);
+    }
+    if (!identical(_vmSourceRef, dashboard.vmItems)) {
+      _vmSourceRef = dashboard.vmItems;
+      _mappedVm = dashboard.vmItems
+          .map((item) => ManagementData.fromClient(item, Icons.computer))
+          .toList(growable: false);
+    }
+    if (!identical(_shareSourceRef, dashboard.shareItems)) {
+      _shareSourceRef = dashboard.shareItems;
+      _mappedShare = dashboard.shareItems
+          .map(
+            (item) => ManagementData.fromClient(item, Icons.folder_shared),
+          )
+          .toList(growable: false);
+    }
+  }
+
+  Widget _buildTabPage(int index, UnraidDashboard dashboard) {
+    _ensureMappedManagementItems(dashboard);
+    switch (index) {
+      case 1:
+        return _ManagementPage(
+          type: 'Docker',
+          dashboard: dashboard,
+          items: _mappedDocker,
+          unraidClient: _unraidClient,
+          onRefresh: () => _refreshDashboard(force: true),
+        );
+      case 2:
+        return _ManagementPage(
+          type: '虚拟机',
+          dashboard: dashboard,
+          items: _mappedVm,
+          unraidClient: _unraidClient,
+          onRefresh: () => _refreshDashboard(force: true),
+        );
+      case 3:
+        return _ManagementPage(
+          type: '共享',
+          dashboard: dashboard,
+          items: _mappedShare,
+          unraidClient: _unraidClient,
+          onRefresh: () => _refreshDashboard(force: true),
+        );
+      default:
+        return _ServerInfoPage(
+          iconVariant: _serverIcon,
+          dashboard: dashboard,
+          unraidClient: _unraidClient,
+          onEditIcon: _showIconPicker,
+          onPowerAction: _showPowerDialog,
+          onOpenDetails: () => _openDashboardDetails(dashboard),
+          onRefresh: () => _refreshDashboard(force: true),
+        );
+    }
   }
 
   Future<UnraidDashboard> _loadDashboard({bool force = false}) async {

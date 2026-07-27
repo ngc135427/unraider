@@ -12,12 +12,22 @@ class ManagementDetailPage extends StatefulWidget {
 class _ManagementDetailPageState extends State<ManagementDetailPage> {
   bool _isSubmitting = false;
   bool _shareBrowserReady = false;
+  bool _shareLoading = false;
   String? _sharePath;
   Future<List<UnraidFileEntry>>? _shareFuture;
+  List<UnraidFileEntry> _shareEntries = const <UnraidFileEntry>[];
+  Object? _shareError;
   final TextEditingController _shareSearchController = TextEditingController();
   Timer? _shareSearchDebounce;
   String _shareQuery = '';
   int _shareLoadGeneration = 0;
+
+  // Memoized projections for search filter + image gallery source.
+  List<UnraidFileEntry>? _shareFilterEntriesRef;
+  String _shareFilterQueryRef = '';
+  List<UnraidFileEntry> _shareFilteredCached = const <UnraidFileEntry>[];
+  List<UnraidFileEntry>? _shareImageEntriesRef;
+  List<UnraidFileEntry> _shareImageEntriesCached = const <UnraidFileEntry>[];
 
   @override
   void dispose() {
@@ -347,102 +357,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
               ),
             ),
             Expanded(
-              child: FutureBuilder<List<UnraidFileEntry>>(
-                future: _shareFuture,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const _StateMessage(
-                      icon: Icons.folder_open,
-                      title: '正在读取目录',
-                      message: '正在加载共享文件...',
-                    );
-                  }
-
-                  if (snapshot.hasError) {
-                    return _StateMessage(
-                      icon: Icons.error_outline,
-                      title: '读取失败',
-                      message: snapshot.error.toString(),
-                      actionLabel: '重试',
-                      onAction: () => _openSharePath(currentPath),
-                    );
-                  }
-
-                  final allEntries =
-                      snapshot.data ?? const <UnraidFileEntry>[];
-                  final imageEntries = allEntries
-                      .where((entry) => entry.isImage)
-                      .toList(growable: false);
-                  if (allEntries.isEmpty) {
-                    return const _StateMessage(
-                      icon: Icons.inbox_outlined,
-                      title: '目录为空',
-                      message: '这里还没有可浏览的文件。',
-                    );
-                  }
-
-                  final entries = _shareQuery.isEmpty
-                      ? allEntries
-                      : allEntries
-                          .where(
-                            (entry) => entry.name
-                                .toLowerCase()
-                                .contains(_shareQuery),
-                          )
-                          .toList(growable: false);
-                  if (entries.isEmpty) {
-                    return const _StateMessage(
-                      icon: Icons.search_off,
-                      title: '没有匹配项',
-                      message: '换一个关键词试试。',
-                    );
-                  }
-
-                  final canGoUp = _canGoUp(args);
-                  // Virtualized list keeps large share folders scrollable without
-                  // building thousands of tiles up front.
-                  return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
-                    itemCount: entries.length + (canGoUp ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (canGoUp && index == 0) {
-                        return _FileEntryTile(
-                          icon: Icons.drive_folder_upload,
-                          title: '上一级',
-                          subtitle: _parentPath(currentPath),
-                          onTap: () =>
-                              _openSharePath(_parentPath(currentPath)),
-                        );
-                      }
-                      final entry = entries[index - (canGoUp ? 1 : 0)];
-                      return _FileEntryTile(
-                        icon: entry.isDirectory
-                            ? Icons.folder
-                            : entry.isImage
-                                ? Icons.image
-                                : _isTextPreviewFile(entry.name)
-                                    ? Icons.description_outlined
-                                    : Icons.insert_drive_file,
-                        title: entry.name,
-                        subtitle: entry.isDirectory
-                            ? '文件夹'
-                            : _fileSubtitle(entry),
-                        onTap: () {
-                          if (entry.isDirectory) {
-                            _openSharePath(entry.path);
-                          } else if (entry.isImage) {
-                            _previewImage(args, entry, imageEntries);
-                          } else if (_isTextPreviewFile(entry.name)) {
-                            _previewText(args, entry);
-                          } else {
-                            _showMessage('暂不支持预览该文件类型');
-                          }
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
+              child: _buildShareEntriesBody(args, currentPath),
             ),
           ],
         ),
@@ -490,6 +405,155 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     );
   }
 
+  List<UnraidFileEntry> get _shareImageEntries {
+    if (identical(_shareImageEntriesRef, _shareEntries)) {
+      return _shareImageEntriesCached;
+    }
+    _shareImageEntriesRef = _shareEntries;
+    _shareImageEntriesCached = _shareEntries
+        .where((entry) => entry.isImage)
+        .toList(growable: false);
+    return _shareImageEntriesCached;
+  }
+
+  List<UnraidFileEntry> get _shareFilteredEntries {
+    if (identical(_shareFilterEntriesRef, _shareEntries) &&
+        _shareFilterQueryRef == _shareQuery) {
+      return _shareFilteredCached;
+    }
+    _shareFilterEntriesRef = _shareEntries;
+    _shareFilterQueryRef = _shareQuery;
+    if (_shareQuery.isEmpty) {
+      _shareFilteredCached = _shareEntries;
+      return _shareFilteredCached;
+    }
+    _shareFilteredCached = _shareEntries
+        .where((entry) => entry.name.toLowerCase().contains(_shareQuery))
+        .toList(growable: false);
+    return _shareFilteredCached;
+  }
+
+  Widget _buildShareEntriesBody(
+    ManagementDetailArgs args,
+    String currentPath,
+  ) {
+    if (_shareLoading && _shareEntries.isEmpty && _shareError == null) {
+      return const _StateMessage(
+        icon: Icons.folder_open,
+        title: '正在读取目录',
+        message: '正在加载共享文件...',
+      );
+    }
+
+    if (_shareError != null && _shareEntries.isEmpty) {
+      return _StateMessage(
+        icon: Icons.error_outline,
+        title: '读取失败',
+        message: _shareError.toString(),
+        actionLabel: '重试',
+        onAction: () => _openSharePath(currentPath, forceRefresh: true),
+      );
+    }
+
+    final allEntries = _shareEntries;
+    final imageEntries = _shareImageEntries;
+    if (!_shareLoading && allEntries.isEmpty && _shareError == null) {
+      return RefreshIndicator(
+        onRefresh: () async {
+          _openSharePath(currentPath, forceRefresh: true);
+          await _shareFuture;
+        },
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 120),
+            _StateMessage(
+              icon: Icons.inbox_outlined,
+              title: '目录为空',
+              message: '这里还没有可浏览的文件。',
+            ),
+          ],
+        ),
+      );
+    }
+
+    final entries = _shareFilteredEntries;
+    if (entries.isEmpty && !_shareLoading) {
+      return const _StateMessage(
+        icon: Icons.search_off,
+        title: '没有匹配项',
+        message: '换一个关键词试试。',
+      );
+    }
+
+    final canGoUp = _canGoUp(args);
+    return Stack(
+      children: [
+        RefreshIndicator(
+          onRefresh: () async {
+            _openSharePath(currentPath, forceRefresh: true);
+            await _shareFuture;
+          },
+          child: ListView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
+            itemCount: entries.length + (canGoUp ? 1 : 0),
+            itemBuilder: (context, index) {
+              if (canGoUp && index == 0) {
+                return _FileEntryTile(
+                  icon: Icons.drive_folder_upload,
+                  title: '上一级',
+                  subtitle: _parentPath(currentPath),
+                  onTap: () => _openSharePath(_parentPath(currentPath)),
+                );
+              }
+              final entry = entries[index - (canGoUp ? 1 : 0)];
+              return RepaintBoundary(
+                key: ValueKey<String>(entry.path),
+                child: _FileEntryTile(
+                  icon: entry.isDirectory
+                      ? Icons.folder
+                      : entry.isImage
+                          ? Icons.image
+                          : _isTextPreviewFile(entry.name)
+                              ? Icons.description_outlined
+                              : Icons.insert_drive_file,
+                  title: entry.name,
+                  subtitle:
+                      entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
+                  onTap: () {
+                    if (entry.isDirectory) {
+                      _openSharePath(entry.path);
+                    } else if (entry.isImage) {
+                      _previewImage(args, entry, imageEntries);
+                    } else if (_isTextPreviewFile(entry.name)) {
+                      _previewText(args, entry);
+                    } else {
+                      _showMessage('暂不支持预览该文件类型');
+                    }
+                  },
+                ),
+              );
+            },
+          ),
+        ),
+        if (_shareLoading && _shareEntries.isNotEmpty)
+          const Positioned(
+            top: 8,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   void _ensureShareBrowser(ManagementDetailArgs args) {
     if (_sharePath != null && _shareFuture != null) {
       return;
@@ -509,17 +573,36 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   }) {
     final generation = ++_shareLoadGeneration;
     if (client == null) {
+      _shareError = '缺少服务器连接';
+      _shareLoading = false;
       return Future<List<UnraidFileEntry>>.error('缺少服务器连接');
     }
-    return client
-        .fetchDirectory(path, forceRefresh: forceRefresh)
-        .then((entries) {
-      if (generation != _shareLoadGeneration) {
-        // A newer navigation superseded this load; keep the newer Future's
-        // result authoritative by returning the entries without side effects.
+
+    _shareLoading = true;
+    _shareError = null;
+    return () async {
+      try {
+        final entries =
+            await client.fetchDirectory(path, forceRefresh: forceRefresh);
+        if (!mounted || generation != _shareLoadGeneration) {
+          return entries;
+        }
+        setState(() {
+          _shareEntries = entries;
+          _shareError = null;
+          _shareLoading = false;
+        });
+        return entries;
+      } on Object catch (error) {
+        if (mounted && generation == _shareLoadGeneration) {
+          setState(() {
+            _shareError = error;
+            _shareLoading = false;
+          });
+        }
+        rethrow;
       }
-      return entries;
-    });
+    }();
   }
 
   void _openSharePath(String path, {bool forceRefresh = false}) {
@@ -535,6 +618,10 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       if (pathChanged) {
         _shareSearchController.clear();
         _shareQuery = '';
+        // Drop stale entries when navigating to a different folder so we do
+        // not flash the previous directory's contents.
+        _shareEntries = const <UnraidFileEntry>[];
+        _shareError = null;
       }
       _shareFuture = _loadShareDirectory(
         client: client,

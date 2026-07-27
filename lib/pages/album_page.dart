@@ -124,6 +124,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
   List<LocalMediaBucket> _buckets = const <LocalMediaBucket>[];
+  /// Only build tab bodies after first visit so remote thumbnails are not
+  /// downloaded while the user is still on the local tab.
+  late final Set<_PhoAlbumTab> _visitedTabs = <_PhoAlbumTab>{widget.initialTab};
   bool _loadingLocal = true;
   bool _loadingRemote = true;
   bool _syncing = false;
@@ -135,6 +138,21 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   String? _remoteError;
   String? _syncMessage;
 
+  // Memoized visible-media projection for stats + tab bodies.
+  List<LocalMediaAsset>? _visibleSourceRef;
+  List<String>? _visibleSourceIdsRef;
+  bool? _visibleVideosOnlyRef;
+  List<LocalMediaAsset> _visibleLocalCached = const <LocalMediaAsset>[];
+  int _visiblePhotoCount = 0;
+  int _visibleVideoCount = 0;
+
+  // Memoized pending-upload projection for stats + sync batch selection.
+  List<LocalMediaAsset>? _pendingLocalRef;
+  List<UnraidFileEntry>? _pendingRemoteRef;
+  String? _pendingTargetRef;
+  List<String>? _pendingSourceIdsRef;
+  List<LocalMediaAsset> _pendingUploadsCached = const <LocalMediaAsset>[];
+
   AlbumPageArgs? get _args {
     final args = ModalRoute.of(context)?.settings.arguments;
     return args is AlbumPageArgs ? args : null;
@@ -143,16 +161,53 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   UnraidClient? get _client => _args?.unraidClient;
 
   List<LocalMediaAsset> get _visibleLocalMedia {
+    _ensureVisibleLocalMedia();
+    return _visibleLocalCached;
+  }
+
+  void _ensureVisibleLocalMedia() {
     final sourceIds = _preferences.selectedSourceIds;
+    if (identical(_visibleSourceRef, _localMedia) &&
+        _listEquals(_visibleSourceIdsRef, sourceIds) &&
+        _visibleVideosOnlyRef == widget.videosOnly) {
+      return;
+    }
+    _visibleSourceRef = _localMedia;
+    _visibleSourceIdsRef = List<String>.from(sourceIds);
+    _visibleVideosOnlyRef = widget.videosOnly;
+
     final filtered = sourceIds.isEmpty
         ? _localMedia
         : _localMedia
             .where((asset) => sourceIds.contains(asset.bucketId))
             .toList(growable: false);
-    if (!widget.videosOnly) {
-      return filtered;
+    final visible = widget.videosOnly
+        ? filtered.where((asset) => asset.isVideo).toList(growable: false)
+        : filtered;
+    _visibleLocalCached = visible;
+    var photos = 0;
+    var videos = 0;
+    for (final asset in visible) {
+      if (asset.isVideo) {
+        videos += 1;
+      } else {
+        photos += 1;
+      }
     }
-    return filtered.where((asset) => asset.isVideo).toList(growable: false);
+    _visiblePhotoCount = photos;
+    _visibleVideoCount = videos;
+  }
+
+  bool _listEquals(List<String>? a, List<String> b) {
+    if (a == null || a.length != b.length) {
+      return false;
+    }
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   @override
@@ -345,14 +400,28 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     });
   }
 
-  int _countPendingUploads() {
-    return _findPendingUploads(
+  List<LocalMediaAsset> get _pendingUploads {
+    final sourceIds = _preferences.selectedSourceIds;
+    if (identical(_pendingLocalRef, _localMedia) &&
+        identical(_pendingRemoteRef, _remoteMedia) &&
+        _pendingTargetRef == _preferences.targetDir &&
+        _listEquals(_pendingSourceIdsRef, sourceIds)) {
+      return _pendingUploadsCached;
+    }
+    _pendingLocalRef = _localMedia;
+    _pendingRemoteRef = _remoteMedia;
+    _pendingTargetRef = _preferences.targetDir;
+    _pendingSourceIdsRef = List<String>.from(sourceIds);
+    _pendingUploadsCached = _findPendingUploads(
       local: _localMedia,
       remote: _remoteMedia,
       targetDir: _preferences.targetDir,
-      sourceIds: _preferences.selectedSourceIds,
-    ).length;
+      sourceIds: sourceIds,
+    );
+    return _pendingUploadsCached;
   }
+
+  int _countPendingUploads() => _pendingUploads.length;
 
   Future<void> _syncPending() async {
     final client = _client;
@@ -360,12 +429,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       return;
     }
 
-    final allPending = _findPendingUploads(
-      local: _localMedia,
-      remote: _remoteMedia,
-      targetDir: _preferences.targetDir,
-      sourceIds: _preferences.selectedSourceIds,
-    );
+    final allPending = _pendingUploads;
     if (allPending.isEmpty) {
       setState(() {
         _pendingCount = 0;
@@ -517,8 +581,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   @override
   Widget build(BuildContext context) {
     final local = _visibleLocalMedia;
-    final localPhotos = local.where((asset) => !asset.isVideo).length;
-    final localVideos = local.where((asset) => asset.isVideo).length;
+    final localPhotos = _visiblePhotoCount;
+    final localVideos = _visibleVideoCount;
 
     return PhoneFrame(
       maxContentWidth: 900,
@@ -539,33 +603,44 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                 ),
               ),
               child: FadeSlide(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+                child: Column(
                   children: [
-                    _AlbumStats(
-                      localPhotos: localPhotos,
-                      localVideos: localVideos,
-                      remoteCount: _remoteMedia.length,
-                      pendingCount: _pendingCount,
-                      syncing: _syncing,
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                      child: Column(
+                        children: [
+                          _AlbumStats(
+                            localPhotos: localPhotos,
+                            localVideos: localVideos,
+                            remoteCount: _remoteMedia.length,
+                            pendingCount: _pendingCount,
+                            syncing: _syncing,
+                          ),
+                          const SizedBox(height: 16),
+                          _AlbumTabs(
+                            current: _tab,
+                            videosOnly: widget.videosOnly,
+                            onChanged: _selectTab,
+                          ),
+                          const SizedBox(height: 18),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 16),
-                    _AlbumTabs(
-                      current: _tab,
-                      videosOnly: widget.videosOnly,
-                      onChanged: (tab) => setState(() => _tab = tab),
+                    Expanded(
+                      // Lazy + sticky tab bodies: first visit builds the page,
+                      // later switches keep scroll / decoded thumbs without
+                      // preloading every remote tile on open.
+                      child: IndexedStack(
+                        index: _tab.index,
+                        sizing: StackFit.expand,
+                        children: [
+                          for (final tab in _PhoAlbumTab.values)
+                            _visitedTabs.contains(tab)
+                                ? _buildTabBody(tab, local)
+                                : const SizedBox.shrink(),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 18),
-                    if (_error != null && _tab == _PhoAlbumTab.local)
-                      _InlineState(
-                        icon: Icons.error_outline,
-                        title: '本机相册读取失败',
-                        detail: _error!,
-                        actionLabel: '重试',
-                        onAction: () => _loadAll(runAutoSync: false),
-                      )
-                    else
-                      _buildTab(local),
                   ],
                 ),
               ),
@@ -576,36 +651,84 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     );
   }
 
-  Widget _buildTab(List<LocalMediaAsset> local) {
-    return switch (_tab) {
-      _PhoAlbumTab.local => _LocalTimeline(
-          loading: _loadingLocal,
-          media: local,
-          videosOnly: widget.videosOnly,
+  void _selectTab(_PhoAlbumTab tab) {
+    if (_tab == tab && _visitedTabs.contains(tab)) {
+      return;
+    }
+    setState(() {
+      _tab = tab;
+      _visitedTabs.add(tab);
+    });
+  }
+
+  Widget _buildTabBody(_PhoAlbumTab tab, List<LocalMediaAsset> local) {
+    final padding = const EdgeInsets.fromLTRB(20, 0, 20, 28);
+    return switch (tab) {
+      _PhoAlbumTab.local => RefreshIndicator(
+          onRefresh: () => _loadAll(runAutoSync: false),
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: padding,
+            children: [
+              if (_error != null)
+                _InlineState(
+                  icon: Icons.error_outline,
+                  title: '本机相册读取失败',
+                  detail: _error!,
+                  actionLabel: '重试',
+                  onAction: () => _loadAll(runAutoSync: false),
+                )
+              else
+                _LocalTimeline(
+                  loading: _loadingLocal,
+                  media: local,
+                  videosOnly: widget.videosOnly,
+                ),
+            ],
+          ),
         ),
-      _PhoAlbumTab.remote => _RemoteTimeline(
-          loading: _loadingRemote,
-          error: _remoteError,
-          client: _client,
-          entries: _remoteMedia,
-          onRetry: _reloadRemote,
+      _PhoAlbumTab.remote => RefreshIndicator(
+          onRefresh: _reloadRemote,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: padding,
+            children: [
+              _RemoteTimeline(
+                loading: _loadingRemote,
+                error: _remoteError,
+                client: _client,
+                entries: _remoteMedia,
+                onRetry: _reloadRemote,
+              ),
+            ],
+          ),
         ),
-      _PhoAlbumTab.sync => _SyncPanel(
-          preferences: _preferences,
-          localCount: _visibleLocalMedia.length,
-          remoteCount: _remoteMedia.length,
-          pendingCount: _pendingCount,
-          uploadedCount: _uploadedCount,
-          syncing: _syncing,
-          message: _syncMessage,
-          onSync: _syncPending,
-          onSettings: () => setState(() => _tab = _PhoAlbumTab.settings),
+      _PhoAlbumTab.sync => ListView(
+          padding: padding,
+          children: [
+            _SyncPanel(
+              preferences: _preferences,
+              localCount: local.length,
+              remoteCount: _remoteMedia.length,
+              pendingCount: _pendingCount,
+              uploadedCount: _uploadedCount,
+              syncing: _syncing,
+              message: _syncMessage,
+              onSync: _syncPending,
+              onSettings: () => _selectTab(_PhoAlbumTab.settings),
+            ),
+          ],
         ),
-      _PhoAlbumTab.settings => _SettingsPanel(
-          preferences: _preferences,
-          buckets: _buckets,
-          onSave: _savePreferences,
-          onChooseSource: _chooseSource,
+      _PhoAlbumTab.settings => ListView(
+          padding: padding,
+          children: [
+            _SettingsPanel(
+              preferences: _preferences,
+              buckets: _buckets,
+              onSave: _savePreferences,
+              onChooseSource: _chooseSource,
+            ),
+          ],
         ),
     };
   }

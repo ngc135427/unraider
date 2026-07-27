@@ -40,7 +40,6 @@ class ManagementData {
 
 class _ManagementPage extends StatefulWidget {
   const _ManagementPage({
-    super.key,
     required this.type,
     required this.dashboard,
     required this.items,
@@ -63,6 +62,9 @@ class _ManagementPageState extends State<_ManagementPage> {
   final Set<String> _submittingIds = {};
   Timer? _searchDebounce;
   String _query = '';
+  List<ManagementData>? _filterItemsRef;
+  String _filterQueryRef = '';
+  List<ManagementData> _filteredItemsCached = const <ManagementData>[];
 
   @override
   void dispose() {
@@ -81,12 +83,18 @@ class _ManagementPageState extends State<_ManagementPage> {
     });
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final filteredItems = widget.items.where((item) {
-      if (_query.isEmpty) {
-        return true;
-      }
+  List<ManagementData> get _filteredItems {
+    if (identical(_filterItemsRef, widget.items) &&
+        _filterQueryRef == _query) {
+      return _filteredItemsCached;
+    }
+    _filterItemsRef = widget.items;
+    _filterQueryRef = _query;
+    if (_query.isEmpty) {
+      _filteredItemsCached = widget.items;
+      return _filteredItemsCached;
+    }
+    _filteredItemsCached = widget.items.where((item) {
       return [
         item.title,
         item.status,
@@ -94,97 +102,129 @@ class _ManagementPageState extends State<_ManagementPage> {
         ...item.tags,
       ].join(' ').toLowerCase().contains(_query);
     }).toList(growable: false);
+    return _filteredItemsCached;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filteredItems = _filteredItems;
 
     // Virtualized list: large Docker/share fleets must not build every card
     // inside a SingleChildScrollView.
-    return FadeSlide(
-      child: CustomScrollView(
-        slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
-            sliver: SliverToBoxAdapter(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _ManagementStats(
-                    type: widget.type,
-                    dashboard: widget.dashboard,
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _searchController,
-                          onChanged: _onSearchChanged,
-                          decoration: InputDecoration(
-                            hintText: '搜索${widget.type}项目',
-                            prefixIcon: const Icon(Icons.search),
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 12),
-                          ),
+    final scrollView = CustomScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _ManagementStats(
+                  type: widget.type,
+                  dashboard: widget.dashboard,
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: _onSearchChanged,
+                        decoration: InputDecoration(
+                          hintText: '搜索${widget.type}项目',
+                          prefixIcon: const Icon(Icons.search),
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 12),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      _CompactActionButton(
-                        icon: Icons.sync,
-                        label: '刷新',
-                        onPressed: widget.onRefresh ??
-                            () => _showMessage('${widget.type}刷新已提交'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                ],
-              ),
+                    ),
+                    const SizedBox(width: 8),
+                    _CompactActionButton(
+                      icon: Icons.sync,
+                      label: '刷新',
+                      onPressed: widget.onRefresh ??
+                          () => _showMessage('${widget.type}刷新已提交'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+              ],
             ),
           ),
-          if (widget.items.isEmpty)
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
-                child: _StateMessage(
-                  icon: Icons.inbox_outlined,
-                  title: '${widget.type}为空',
-                  message: '服务器当前没有返回${widget.type}项目。',
-                ),
-              ),
-            )
-          else if (filteredItems.isEmpty)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 20, 86),
-                child: _StateMessage(
-                  icon: Icons.search_off,
-                  title: '没有匹配项',
-                  message: '换一个关键词试试。',
-                ),
-              ),
-            )
-          else
-            SliverPadding(
+        ),
+        if (widget.items.isEmpty)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
-              sliver: SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
-                    final item = filteredItems[index];
-                    return _ManagementCard(
+              child: _StateMessage(
+                icon: Icons.inbox_outlined,
+                title: '${widget.type}为空',
+                message: '服务器当前没有返回${widget.type}项目。',
+              ),
+            ),
+          )
+        else if (filteredItems.isEmpty)
+          const SliverFillRemaining(
+            hasScrollBody: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 86),
+              child: _StateMessage(
+                icon: Icons.search_off,
+                title: '没有匹配项',
+                message: '换一个关键词试试。',
+              ),
+            ),
+          )
+        else
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final item = filteredItems[index];
+                  return RepaintBoundary(
+                    key: ValueKey<String>(item.id),
+                    child: _ManagementCard(
                       item: item,
                       isSubmitting: _submittingIds.contains(item.id),
                       onTap: () => _openDetail(item),
                       onAction: item.type == ManagementItemType.share
                           ? null
                           : (action) => _runAction(item, action),
-                    );
-                  },
-                  childCount: filteredItems.length,
-                ),
+                    ),
+                  );
+                },
+                childCount: filteredItems.length,
+                // Cards are fixed-ish height; avoid keep-alive overhead for
+                // long Docker/share fleets.
+                addAutomaticKeepAlives: false,
+                findChildIndexCallback: (Key key) {
+                  if (key is! ValueKey<String>) {
+                    return null;
+                  }
+                  final id = key.value;
+                  for (var i = 0; i < filteredItems.length; i++) {
+                    if (filteredItems[i].id == id) {
+                      return i;
+                    }
+                  }
+                  return null;
+                },
               ),
             ),
-        ],
-      ),
+          ),
+      ],
+    );
+
+    return FadeSlide(
+      child: widget.onRefresh == null
+          ? scrollView
+          : RefreshIndicator(
+              onRefresh: () async => widget.onRefresh!(),
+              child: scrollView,
+            ),
     );
   }
 
