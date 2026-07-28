@@ -26,6 +26,15 @@ class _MusicLibraryCacheEntry {
 final Map<String, _MusicLibraryCacheEntry> _musicLibraryCache =
     <String, _MusicLibraryCacheEntry>{};
 const _musicLibraryCacheTtl = Duration(minutes: 3);
+const _maxMusicLibraryCacheEntries = 8;
+
+void _storeMusicLibraryCache(String key, _MusicLibraryCacheEntry entry) {
+  if (_musicLibraryCache.length >= _maxMusicLibraryCacheEntries &&
+      !_musicLibraryCache.containsKey(key)) {
+    _musicLibraryCache.remove(_musicLibraryCache.keys.first);
+  }
+  _musicLibraryCache[key] = entry;
+}
 
 class MusicPageArgs {
   const MusicPageArgs({
@@ -68,6 +77,10 @@ class _MusicPageState extends State<MusicPage> {
   List<UnraidFileEntry>? _filterTracksRef;
   String? _filterRootRef;
   List<UnraidFileEntry> _filteredTracksCached = const <UnraidFileEntry>[];
+  /// Pre-lowercased name+album haystacks so typing does not re-walk paths.
+  List<UnraidFileEntry>? _haystackTracksRef;
+  String? _haystackRootRef;
+  List<String> _searchHaystacks = const <String>[];
 
   String get _cacheKey {
     final client = _client;
@@ -100,6 +113,19 @@ class _MusicPageState extends State<MusicPage> {
     _losslessCountCached = lossless;
   }
 
+  void _ensureSearchHaystacks() {
+    if (identical(_haystackTracksRef, _tracks) &&
+        _haystackRootRef == _rootPath) {
+      return;
+    }
+    _haystackTracksRef = _tracks;
+    _haystackRootRef = _rootPath;
+    _searchHaystacks = [
+      for (final track in _tracks)
+        '${track.name.toLowerCase()} ${_albumName(track.path, _rootPath).toLowerCase()}',
+    ];
+  }
+
   List<UnraidFileEntry> get _filteredTracks {
     final query = _query.trim().toLowerCase();
     if (identical(_filterTracksRef, _tracks) &&
@@ -114,13 +140,14 @@ class _MusicPageState extends State<MusicPage> {
       _filteredTracksCached = _tracks;
       return _filteredTracksCached;
     }
-    _filteredTracksCached = _tracks
-        .where((track) {
-          final album = _albumName(track.path, _rootPath).toLowerCase();
-          return track.name.toLowerCase().contains(query) ||
-              album.contains(query);
-        })
-        .toList(growable: false);
+    _ensureSearchHaystacks();
+    final filtered = <UnraidFileEntry>[];
+    for (var i = 0; i < _tracks.length; i++) {
+      if (_searchHaystacks[i].contains(query)) {
+        filtered.add(_tracks[i]);
+      }
+    }
+    _filteredTracksCached = filtered;
     return _filteredTracksCached;
   }
 
@@ -230,13 +257,16 @@ class _MusicPageState extends State<MusicPage> {
       }
 
       final cacheKey = '${client.baseUrl}|$usedRoot';
-      _musicLibraryCache[cacheKey] = _MusicLibraryCacheEntry(
+      final entry = _MusicLibraryCacheEntry(
         rootPath: usedRoot,
         tracks: tracks,
         fetchedAt: DateTime.now(),
       );
+      _storeMusicLibraryCache(cacheKey, entry);
       // Also key by the original requested root so first open hits cache.
-      _musicLibraryCache[_cacheKey] = _musicLibraryCache[cacheKey]!;
+      if (cacheKey != _cacheKey) {
+        _storeMusicLibraryCache(_cacheKey, entry);
+      }
 
       setState(() {
         _rootPath = usedRoot;
@@ -435,6 +465,22 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
   List<UnraidFileEntry>? _filterTracksRef;
   String? _filterRootRef;
   List<UnraidFileEntry> _filteredCached = const <UnraidFileEntry>[];
+  List<UnraidFileEntry>? _haystackTracksRef;
+  String? _haystackRootRef;
+  List<String> _searchHaystacks = const <String>[];
+
+  void _ensureSearchHaystacks() {
+    if (identical(_haystackTracksRef, widget.tracks) &&
+        _haystackRootRef == widget.rootPath) {
+      return;
+    }
+    _haystackTracksRef = widget.tracks;
+    _haystackRootRef = widget.rootPath;
+    _searchHaystacks = [
+      for (final track in widget.tracks)
+        '${track.name.toLowerCase()} ${_albumName(track.path, widget.rootPath).toLowerCase()}',
+    ];
+  }
 
   List<UnraidFileEntry> get _filtered {
     final query = _query.trim().toLowerCase();
@@ -450,13 +496,14 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
       _filteredCached = widget.tracks;
       return _filteredCached;
     }
-    _filteredCached = widget.tracks
-        .where((track) {
-          final album = _albumName(track.path, widget.rootPath).toLowerCase();
-          return track.name.toLowerCase().contains(query) ||
-              album.contains(query);
-        })
-        .toList(growable: false);
+    _ensureSearchHaystacks();
+    final filtered = <UnraidFileEntry>[];
+    for (var i = 0; i < widget.tracks.length; i++) {
+      if (_searchHaystacks[i].contains(query)) {
+        filtered.add(widget.tracks[i]);
+      }
+    }
+    _filteredCached = filtered;
     return _filteredCached;
   }
 

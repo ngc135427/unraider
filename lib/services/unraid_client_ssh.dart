@@ -32,12 +32,24 @@ String _buildSshMediaScanCommand(String normalizedPath, {required int maxDepth})
       "-printf '%p\\0%y\\0%s\\0%T@\\0%f\\0'";
 }
 
+/// Rows large enough that splitting/sorting on the UI isolate is noticeable.
+const _sshListingIsolateThresholdBytes = 24 * 1024;
+
 @visibleForTesting
 List<UnraidFileEntry> parseSshDirectoryListing(
   String output,
   String parentPath,
 ) {
-  final entries = <UnraidFileEntry>[];
+  return _entriesFromListingRows(_parseSshDirectoryListingRows(output, parentPath));
+}
+
+/// Background-safe listing parse: returns primitive rows so [Isolate.run] can
+/// transfer them without custom class sendability issues.
+List<List<Object?>> _parseSshDirectoryListingRows(
+  String output,
+  String parentPath,
+) {
+  final rows = <List<Object?>>[];
   final fields = output.split('\u0000');
   for (var i = 0; i + 4 < fields.length; i += 5) {
     final rawPath = fields[i];
@@ -52,32 +64,133 @@ List<UnraidFileEntry> parseSshDirectoryListing(
     final isDirectory = type == 'd';
     final size = int.tryParse(rawSize) ?? 0;
     final modifiedSeconds = double.tryParse(rawModified)?.floor() ?? 0;
-    final modifiedDate = modifiedSeconds > 0
-        ? DateTime.fromMillisecondsSinceEpoch(modifiedSeconds * 1000)
-        : DateTime.fromMillisecondsSinceEpoch(0);
+    final modifiedMs = modifiedSeconds > 0 ? modifiedSeconds * 1000 : 0;
     final path =
         rawPath.startsWith('/') ? rawPath : _joinPath(parentPath, rawPath);
-    entries.add(
+    rows.add(<Object?>[
+      rawName,
+      path,
+      isDirectory,
+      isDirectory ? 0 : size,
+      isDirectory
+          ? ''
+          : _formatSize(size),
+      modifiedMs > 0
+          ? _formatDate(DateTime.fromMillisecondsSinceEpoch(modifiedMs))
+          : _formatDate(DateTime.fromMillisecondsSinceEpoch(0)),
+      modifiedMs,
+    ]);
+  }
+
+  rows.sort((a, b) {
+    final aDir = a[2] as bool;
+    final bDir = b[2] as bool;
+    if (aDir != bDir) {
+      return aDir ? -1 : 1;
+    }
+    return (a[0] as String).toLowerCase().compareTo((b[0] as String).toLowerCase());
+  });
+  return rows;
+}
+
+List<UnraidFileEntry> _entriesFromListingRows(List<List<Object?>> rows) {
+  return [
+    for (final row in rows)
       UnraidFileEntry(
-        name: rawName,
-        path: path,
-        isDirectory: isDirectory,
-        sizeBytes: isDirectory ? 0 : size,
-        size: isDirectory ? '' : _formatSize(size),
-        modified: _formatDate(modifiedDate),
-        modifiedDate: modifiedDate,
+        name: row[0] as String,
+        path: row[1] as String,
+        isDirectory: row[2] as bool,
+        sizeBytes: row[3] as int,
+        size: row[4] as String,
+        modified: row[5] as String,
+        modifiedDate: DateTime.fromMillisecondsSinceEpoch(row[6] as int),
       ),
+  ];
+}
+
+/// Parse (and optionally media-filter) SSH find output off the UI isolate when
+/// the payload is large enough to risk jank.
+Future<List<UnraidFileEntry>> parseSshDirectoryListingAsync(
+  String output,
+  String parentPath, {
+  bool mediaOnly = false,
+  bool includeImages = true,
+  bool includeVideos = true,
+  bool includeAudio = false,
+}) async {
+  if (output.length < _sshListingIsolateThresholdBytes) {
+    final entries = parseSshDirectoryListing(output, parentPath);
+    if (!mediaOnly) {
+      return entries;
+    }
+    return _filterMediaEntries(
+      entries,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      includeAudio: includeAudio,
     );
   }
 
-  entries.sort((a, b) {
-    if (a.isDirectory != b.isDirectory) {
-      return a.isDirectory ? -1 : 1;
+  final rows = await Isolate.run(() {
+    final parsed = _parseSshDirectoryListingRows(output, parentPath);
+    if (!mediaOnly) {
+      return parsed;
     }
-    return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    final entries = _entriesFromListingRows(parsed);
+    final filtered = _filterMediaEntries(
+      entries,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      includeAudio: includeAudio,
+    );
+    return [
+      for (final entry in filtered)
+        <Object?>[
+          entry.name,
+          entry.path,
+          entry.isDirectory,
+          entry.sizeBytes,
+          entry.size,
+          entry.modified,
+          entry.modifiedDate?.millisecondsSinceEpoch ?? 0,
+        ],
+    ];
   });
-  return entries;
+  return _entriesFromListingRows(rows);
 }
+
+List<UnraidFileEntry> _filterMediaEntries(
+  List<UnraidFileEntry> entries, {
+  required bool includeImages,
+  required bool includeVideos,
+  required bool includeAudio,
+}) {
+  final results = entries.where((entry) {
+    if (entry.isDirectory) {
+      return false;
+    }
+    if (includeImages && entry.isImage) {
+      return true;
+    }
+    if (includeVideos && entry.isVideo) {
+      return true;
+    }
+    if (includeAudio && entry.isAudio) {
+      return true;
+    }
+    return false;
+  }).toList(growable: false)
+    ..sort(
+      (a, b) => (b.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0))
+          .compareTo(
+        a.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0),
+      ),
+    );
+  return results;
+}
+
+/// Large Dashboard HTML is cheaper to scrape off the UI isolate.
+const _dashboardParseIsolateThresholdBytes = 32 * 1024;
 
 _DashboardSnapshot _parseDashboardSnapshot(String html) {
   final cpuSummary = _normalizeText(_extractSectionTextAfterHeader(
@@ -145,6 +258,32 @@ _DashboardSnapshot _parseDashboardSnapshot(String html) {
     arrayUsage: arrayUsage.isEmpty ? '等待实时数据' : arrayUsage,
     arrayPercent: arrayPercent,
   );
+}
+
+/// Row: serverName, version, cpuSummary, memoryUsage, arrayState, arrayUsage,
+/// arrayPercent.
+List<Object?> _parseDashboardOverviewRows(String html) {
+  final snapshot = _parseDashboardSnapshot(html);
+  return <Object?>[
+    _serverNameFromHtml(html),
+    _firstMatch(
+          html,
+          RegExp(r'Unraid(?: OS)?\s+([0-9][^<\s"]*)', caseSensitive: false),
+        ) ??
+        'WebGUI',
+    snapshot.cpuSummary,
+    snapshot.memoryUsage,
+    snapshot.arrayState,
+    snapshot.arrayUsage,
+    snapshot.arrayPercent,
+  ];
+}
+
+Future<List<Object?>> parseDashboardOverviewAsync(String html) async {
+  if (html.length < _dashboardParseIsolateThresholdBytes) {
+    return _parseDashboardOverviewRows(html);
+  }
+  return Isolate.run(() => _parseDashboardOverviewRows(html));
 }
 
 String _normalizeBaseUrl(String baseUrl) {

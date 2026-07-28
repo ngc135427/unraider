@@ -243,11 +243,13 @@ class _LocalTimeline extends StatefulWidget {
     required this.loading,
     required this.media,
     required this.videosOnly,
+    required this.padding,
   });
 
   final bool loading;
   final List<LocalMediaAsset> media;
   final bool videosOnly;
+  final EdgeInsets padding;
 
   @override
   State<_LocalTimeline> createState() => _LocalTimelineState();
@@ -269,45 +271,72 @@ class _LocalTimelineState extends State<_LocalTimeline> {
   @override
   Widget build(BuildContext context) {
     if (widget.loading) {
-      return const _LoadingState(label: '正在读取本机相册');
+      return SliverPadding(
+        padding: widget.padding,
+        sliver: const SliverToBoxAdapter(
+          child: _LoadingState(label: '正在读取本机相册'),
+        ),
+      );
     }
     if (widget.media.isEmpty) {
-      return _InlineState(
-        icon: widget.videosOnly
-            ? Icons.video_library_outlined
-            : Icons.photo_outlined,
-        title: widget.videosOnly ? '没有视频' : '没有照片或视频',
-        detail: '请检查系统媒体权限',
+      return SliverPadding(
+        padding: widget.padding,
+        sliver: SliverToBoxAdapter(
+          child: _InlineState(
+            icon: widget.videosOnly
+                ? Icons.video_library_outlined
+                : Icons.photo_outlined,
+            title: widget.videosOnly ? '没有视频' : '没有照片或视频',
+            detail: '请检查系统媒体权限',
+          ),
+        ),
       );
     }
 
     final sections = _groupedSections;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final section in sections) ...[
-          _SectionTitle(title: section.title, count: section.items.length),
-          const SizedBox(height: 10),
-          _LocalGrid(
-            items: section.items.length <= _maxAlbumSectionTiles
+    // One sliver per day: off-screen day grids are not built until scrolled.
+    return SliverPadding(
+      padding: widget.padding,
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final section = sections[index];
+            final visible = section.items.length <= _maxAlbumSectionTiles
                 ? section.items
-                : section.items.take(_maxAlbumSectionTiles).toList(
-                      growable: false,
-                    ),
-          ),
-          if (section.items.length > _maxAlbumSectionTiles) ...[
-            const SizedBox(height: 8),
-            Text(
-              '该日共 ${section.items.length} 项，仅显示前 $_maxAlbumSectionTiles 项',
-              style: const TextStyle(
-                color: AppTheme.textLight,
-                fontSize: 12,
+                : section.items
+                    .take(_maxAlbumSectionTiles)
+                    .toList(growable: false);
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: index == sections.length - 1 ? 0 : 22,
               ),
-            ),
-          ],
-          const SizedBox(height: 22),
-        ],
-      ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SectionTitle(
+                    title: section.title,
+                    count: section.items.length,
+                  ),
+                  const SizedBox(height: 10),
+                  _LocalGrid(items: visible),
+                  if (section.items.length > _maxAlbumSectionTiles) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '该日共 ${section.items.length} 项，仅显示前 $_maxAlbumSectionTiles 项',
+                      style: const TextStyle(
+                        color: AppTheme.textLight,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+          childCount: sections.length,
+          addAutomaticKeepAlives: false,
+        ),
+      ),
     );
   }
 }
@@ -317,6 +346,7 @@ class _RemoteTimeline extends StatefulWidget {
     required this.loading,
     required this.entries,
     required this.client,
+    required this.padding,
     this.error,
     this.onRetry,
   });
@@ -326,6 +356,7 @@ class _RemoteTimeline extends StatefulWidget {
   final UnraidClient? client;
   final List<UnraidFileEntry> entries;
   final VoidCallback? onRetry;
+  final EdgeInsets padding;
 
   @override
   State<_RemoteTimeline> createState() => _RemoteTimelineState();
@@ -347,53 +378,83 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
   @override
   Widget build(BuildContext context) {
     if (widget.loading) {
-      return const _LoadingState(label: '正在读取 Unraid 相册');
+      return SliverPadding(
+        padding: widget.padding,
+        sliver: const SliverToBoxAdapter(
+          child: _LoadingState(label: '正在读取 Unraid 相册'),
+        ),
+      );
     }
     if (widget.error != null) {
-      return _InlineState(
-        icon: Icons.cloud_off_outlined,
-        title: '云端读取失败',
-        detail: widget.error!,
-        actionLabel: '重试',
-        onAction: widget.onRetry,
+      return SliverPadding(
+        padding: widget.padding,
+        sliver: SliverToBoxAdapter(
+          child: _InlineState(
+            icon: Icons.cloud_off_outlined,
+            title: '云端读取失败',
+            detail: widget.error!,
+            actionLabel: '重试',
+            onAction: widget.onRetry,
+          ),
+        ),
       );
     }
     if (widget.entries.isEmpty) {
-      return const _InlineState(
-        icon: Icons.cloud_queue,
-        title: '云端暂无媒体',
-        detail: '同步后会出现在这里',
+      return SliverPadding(
+        padding: widget.padding,
+        sliver: const SliverToBoxAdapter(
+          child: _InlineState(
+            icon: Icons.cloud_queue,
+            title: '云端暂无媒体',
+            detail: '同步后会出现在这里',
+          ),
+        ),
       );
     }
 
     final sections = _groupedSections;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final section in sections) ...[
-          _SectionTitle(title: section.title, count: section.items.length),
-          const SizedBox(height: 10),
-          _RemoteGrid(
-            client: widget.client,
-            items: section.items.length <= _maxAlbumSectionTiles
+    return SliverPadding(
+      padding: widget.padding,
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final section = sections[index];
+            final visible = section.items.length <= _maxAlbumSectionTiles
                 ? section.items
-                : section.items.take(_maxAlbumSectionTiles).toList(
-                      growable: false,
-                    ),
-          ),
-          if (section.items.length > _maxAlbumSectionTiles) ...[
-            const SizedBox(height: 8),
-            Text(
-              '该日共 ${section.items.length} 项，仅显示前 $_maxAlbumSectionTiles 项',
-              style: const TextStyle(
-                color: AppTheme.textLight,
-                fontSize: 12,
+                : section.items
+                    .take(_maxAlbumSectionTiles)
+                    .toList(growable: false);
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: index == sections.length - 1 ? 0 : 22,
               ),
-            ),
-          ],
-          const SizedBox(height: 22),
-        ],
-      ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _SectionTitle(
+                    title: section.title,
+                    count: section.items.length,
+                  ),
+                  const SizedBox(height: 10),
+                  _RemoteGrid(client: widget.client, items: visible),
+                  if (section.items.length > _maxAlbumSectionTiles) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '该日共 ${section.items.length} 项，仅显示前 $_maxAlbumSectionTiles 项',
+                      style: const TextStyle(
+                        color: AppTheme.textLight,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+          childCount: sections.length,
+          addAutomaticKeepAlives: false,
+        ),
+      ),
     );
   }
 }

@@ -44,8 +44,12 @@ class MainShellPage extends StatefulWidget {
   State<MainShellPage> createState() => _MainShellPageState();
 }
 
-class _MainShellPageState extends State<MainShellPage> {
+class _MainShellPageState extends State<MainShellPage>
+    with WidgetsBindingObserver {
   static const _dashboardMinRefreshInterval = Duration(seconds: 8);
+  /// Soft re-fetch after returning from background so CPU/array stats feel live
+  /// without hammering WebGUI on every brief app switch.
+  static const _resumeSoftRefreshMinInterval = Duration(seconds: 20);
 
   int _currentIndex = 0;
   /// Only build bottom-nav pages after first visit so Docker/VM/share lists
@@ -53,10 +57,15 @@ class _MainShellPageState extends State<MainShellPage> {
   final Set<int> _visitedTabs = <int>{0};
   ServerIconVariant _serverIcon = ServerIconVariant.defaultIcon;
   UnraidClient? _unraidClient;
-  Future<UnraidDashboard>? _dashboardFuture;
   UnraidDashboard? _lastDashboard;
   DateTime? _lastDashboardFetchAt;
-  bool _dashboardRefreshing = false;
+  Object? _dashboardError;
+  /// Published dashboard data — soft refreshes that return the same instance
+  /// do not rebuild tab trees.
+  final ValueNotifier<UnraidDashboard?> _dashboard =
+      ValueNotifier<UnraidDashboard?>(null);
+  /// Spinner-only notifier so soft refresh flags do not rebuild every tab page.
+  final ValueNotifier<bool> _dashboardRefreshing = ValueNotifier<bool>(false);
 
   // Memoized ManagementData projections keyed by the source list identity so
   // tab rebuilds after soft dashboard refreshes avoid remapping every item.
@@ -75,9 +84,35 @@ class _MainShellPageState extends State<MainShellPage> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _dashboard.dispose();
+    _dashboardRefreshing.dispose();
     _unraidClient?.close();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+    if (_unraidClient == null || _lastDashboard == null) {
+      return;
+    }
+    final lastFetch = _lastDashboardFetchAt;
+    if (lastFetch != null &&
+        DateTime.now().difference(lastFetch) < _resumeSoftRefreshMinInterval) {
+      return;
+    }
+    // Soft refresh reuses segment TTLs — only stale overview/lists hit network.
+    _refreshDashboard(force: false);
   }
 
   @override
@@ -92,7 +127,7 @@ class _MainShellPageState extends State<MainShellPage> {
       // Join any login-time prewarm (SSH + dashboard) instead of starting
       // cold; force still coalesces with an in-flight forced fetch.
       unawaited(args.warmSsh());
-      _dashboardFuture = _loadDashboard(force: true);
+      unawaited(_loadDashboard(force: true));
     }
   }
 
@@ -148,8 +183,7 @@ class _MainShellPageState extends State<MainShellPage> {
   }
 
   Widget _buildContent() {
-    final dashboardFuture = _dashboardFuture;
-    if (_unraidClient == null || dashboardFuture == null) {
+    if (_unraidClient == null) {
       return const _StateMessage(
         icon: Icons.link_off,
         title: '未连接服务器',
@@ -157,14 +191,13 @@ class _MainShellPageState extends State<MainShellPage> {
       );
     }
 
-    return FutureBuilder<UnraidDashboard>(
-      future: dashboardFuture,
-      builder: (context, snapshot) {
-        // Keep the previous dashboard visible while a background refresh runs.
-        final dashboard = snapshot.data ?? _lastDashboard;
-        if (dashboard != null) {
-          final isRefreshing = _dashboardRefreshing ||
-              snapshot.connectionState != ConnectionState.done;
+    // ValueNotifier keeps tab bodies stable across soft refreshes that return
+    // the same dashboard instance (segment TTL hits).
+    return ValueListenableBuilder<UnraidDashboard?>(
+      valueListenable: _dashboard,
+      builder: (context, dashboard, _) {
+        final resolved = dashboard ?? _lastDashboard;
+        if (resolved != null) {
           return Stack(
             children: [
               // Lazy + sticky tabs: first visit builds the page; later switches
@@ -176,50 +209,50 @@ class _MainShellPageState extends State<MainShellPage> {
                     _visitedTabs.contains(i)
                         ? KeyedSubtree(
                             key: ValueKey<String>('shell-tab-$i'),
-                            child: _buildTabPage(i, dashboard),
+                            child: _buildTabPage(i, resolved),
                           )
                         : const SizedBox.shrink(),
                 ],
               ),
-              if (isRefreshing)
-                const Positioned(
-                  top: 10,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
+              // Isolate spinner rebuilds from tab content rebuilds.
+              Positioned(
+                top: 10,
+                left: 0,
+                right: 0,
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: _dashboardRefreshing,
+                  builder: (context, refreshing, _) {
+                    if (!refreshing) {
+                      return const SizedBox.shrink();
+                    }
+                    return const Center(
+                      child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    );
+                  },
                 ),
+              ),
             ],
           );
         }
 
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const _StateMessage(
-            icon: Icons.cloud_sync,
-            title: '正在读取服务器',
-            message: '正在读取 Unraid WebGUI...',
-          );
-        }
-
-        if (snapshot.hasError) {
+        if (_dashboardError != null) {
           return _StateMessage(
             icon: Icons.error_outline,
             title: '读取失败',
-            message: snapshot.error.toString(),
+            message: _dashboardError.toString(),
             actionLabel: '重试',
             onAction: () => _refreshDashboard(force: true),
           );
         }
 
         return const _StateMessage(
-          icon: Icons.inbox_outlined,
-          title: '暂无数据',
-          message: '服务器没有返回可显示的数据。',
+          icon: Icons.cloud_sync,
+          title: '正在读取服务器',
+          message: '正在读取 Unraid WebGUI...',
         );
       },
     );
@@ -302,22 +335,29 @@ class _MainShellPageState extends State<MainShellPage> {
       return _lastDashboard!;
     }
 
-    if (mounted) {
-      setState(() => _dashboardRefreshing = true);
-    } else {
-      _dashboardRefreshing = true;
-    }
+    _dashboardRefreshing.value = true;
     try {
       final dashboard = await client.fetchDashboard(forceRefresh: force);
       _lastDashboard = dashboard;
       _lastDashboardFetchAt = DateTime.now();
-      return dashboard;
-    } finally {
-      if (mounted) {
-        setState(() => _dashboardRefreshing = false);
-      } else {
-        _dashboardRefreshing = false;
+      _dashboardError = null;
+      // Skip notification when segment TTL returns the same cached instance.
+      if (!identical(_dashboard.value, dashboard)) {
+        _dashboard.value = dashboard;
+      } else if (_dashboard.value == null) {
+        _dashboard.value = dashboard;
       }
+      return dashboard;
+    } on Object catch (error) {
+      if (_lastDashboard == null) {
+        _dashboardError = error;
+        if (mounted) {
+          setState(() {});
+        }
+      }
+      rethrow;
+    } finally {
+      _dashboardRefreshing.value = false;
     }
   }
 
@@ -326,12 +366,11 @@ class _MainShellPageState extends State<MainShellPage> {
     if (client == null) {
       return;
     }
-    if (_dashboardRefreshing && !force) {
+    if (_dashboardRefreshing.value && !force) {
       return;
     }
-    setState(() {
-      _dashboardFuture = _loadDashboard(force: force);
-    });
+    // No setState: spinner + dashboard notifiers drive rebuilds.
+    unawaited(_loadDashboard(force: force));
   }
 
   Future<void> _showIconPicker() async {

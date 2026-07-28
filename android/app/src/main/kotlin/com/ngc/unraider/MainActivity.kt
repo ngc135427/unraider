@@ -261,7 +261,7 @@ class MainActivity : FlutterActivity() {
 
     private fun appendLogLines(lines: List<String>) {
         val filtered = lines.filter { it.isNotBlank() }
-        if (filtered.isEmpty) return
+        if (filtered.isEmpty()) return
         for (line in filtered) {
             Log.i(LOG_TAG, line)
         }

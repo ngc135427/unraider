@@ -26,6 +26,9 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   List<UnraidFileEntry>? _shareFilterEntriesRef;
   String _shareFilterQueryRef = '';
   List<UnraidFileEntry> _shareFilteredCached = const <UnraidFileEntry>[];
+  Map<String, int> _shareFilteredIndexByPath = const <String, int>{};
+  List<UnraidFileEntry>? _shareHaystackEntriesRef;
+  List<String> _shareSearchHaystacks = const <String>[];
   List<UnraidFileEntry>? _shareImageEntriesRef;
   List<UnraidFileEntry> _shareImageEntriesCached = const <UnraidFileEntry>[];
 
@@ -416,6 +419,16 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     return _shareImageEntriesCached;
   }
 
+  void _ensureShareSearchHaystacks() {
+    if (identical(_shareHaystackEntriesRef, _shareEntries)) {
+      return;
+    }
+    _shareHaystackEntriesRef = _shareEntries;
+    _shareSearchHaystacks = [
+      for (final entry in _shareEntries) entry.name.toLowerCase(),
+    ];
+  }
+
   List<UnraidFileEntry> get _shareFilteredEntries {
     if (identical(_shareFilterEntriesRef, _shareEntries) &&
         _shareFilterQueryRef == _shareQuery) {
@@ -425,11 +438,24 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     _shareFilterQueryRef = _shareQuery;
     if (_shareQuery.isEmpty) {
       _shareFilteredCached = _shareEntries;
+      _shareFilteredIndexByPath = {
+        for (var i = 0; i < _shareEntries.length; i++)
+          _shareEntries[i].path: i,
+      };
       return _shareFilteredCached;
     }
-    _shareFilteredCached = _shareEntries
-        .where((entry) => entry.name.toLowerCase().contains(_shareQuery))
-        .toList(growable: false);
+    _ensureShareSearchHaystacks();
+    final filtered = <UnraidFileEntry>[];
+    final indexByPath = <String, int>{};
+    for (var i = 0; i < _shareEntries.length; i++) {
+      if (_shareSearchHaystacks[i].contains(_shareQuery)) {
+        final entry = _shareEntries[i];
+        indexByPath[entry.path] = filtered.length;
+        filtered.add(entry);
+      }
+    }
+    _shareFilteredCached = filtered;
+    _shareFilteredIndexByPath = indexByPath;
     return _shareFilteredCached;
   }
 
@@ -498,6 +524,16 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
             itemCount: entries.length + (canGoUp ? 1 : 0),
+            findChildIndexCallback: (Key key) {
+              if (key is! ValueKey<String>) {
+                return null;
+              }
+              final pathIndex = _shareFilteredIndexByPath[key.value];
+              if (pathIndex == null) {
+                return null;
+              }
+              return pathIndex + (canGoUp ? 1 : 0);
+            },
             itemBuilder: (context, index) {
               if (canGoUp && index == 0) {
                 return _FileEntryTile(

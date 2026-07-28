@@ -17,7 +17,18 @@ List<String> _candidateMusicRoots(String preferred) {
       .toList(growable: false);
 }
 
+/// Process-local album-name cache: large libraries call [_albumName] from
+/// filters, stats, and tile builds on every keystroke otherwise.
+final Map<String, String> _albumNameCache = <String, String>{};
+const _maxAlbumNameCacheEntries = 2048;
+
 String _albumName(String path, String rootPath) {
+  final cacheKey = '$rootPath\u0000$path';
+  final cached = _albumNameCache[cacheKey];
+  if (cached != null) {
+    return cached;
+  }
+
   final normalized = path.replaceAll(r'\', '/');
   final root = rootPath.replaceAll(r'\', '/').replaceAll(RegExp(r'/+$'), '');
   var relative = normalized;
@@ -25,13 +36,21 @@ String _albumName(String path, String rootPath) {
     relative = normalized.substring(root.length + 1);
   }
   final parts = relative.split('/').where((part) => part.isNotEmpty).toList();
+  late final String album;
   if (parts.length >= 2) {
-    return parts[parts.length - 2];
+    album = parts[parts.length - 2];
+  } else if (parts.isNotEmpty) {
+    final rootName = root.split('/').last;
+    album = rootName.isEmpty ? '音乐库' : rootName;
+  } else {
+    album = '音乐库';
   }
-  if (parts.isNotEmpty) {
-    return root.split('/').last.isEmpty ? '音乐库' : root.split('/').last;
+
+  if (_albumNameCache.length >= _maxAlbumNameCacheEntries) {
+    _albumNameCache.remove(_albumNameCache.keys.first);
   }
-  return '音乐库';
+  _albumNameCache[cacheKey] = album;
+  return album;
 }
 
 String _displayTitle(String fileName) {

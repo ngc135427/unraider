@@ -105,16 +105,22 @@ class UnraidWebGuiClient {
   final String _password;
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
+  /// Cached Cookie header so every HTTP request does not re-join the map.
+  String? _cookieHeaderCache;
   final Map<String, _DirectoryCacheEntry> _directoryCache =
       <String, _DirectoryCacheEntry>{};
   /// In-flight directory reads keyed by normalized path, so concurrent
   /// callers (share list + dashboard shares, double-taps) share one SSH call.
   final Map<String, Future<List<UnraidFileEntry>>> _directoryInflight =
       <String, Future<List<UnraidFileEntry>>>{};
+  /// Monotonic generation so a slower soft fetch cannot overwrite a newer
+  /// force-refresh result in the directory cache.
+  final Map<String, int> _directoryLoadGeneration = <String, int>{};
   final Map<String, _DirectoryCacheEntry> _mediaScanCache =
       <String, _DirectoryCacheEntry>{};
   final Map<String, Future<List<UnraidFileEntry>>> _mediaScanInflight =
       <String, Future<List<UnraidFileEntry>>>{};
+  final Map<String, int> _mediaScanLoadGeneration = <String, int>{};
   final Map<String, _FileBytesCacheEntry> _fileBytesCache =
       <String, _FileBytesCacheEntry>{};
   final Map<String, Future<Uint8List>> _fileBytesInflight =
@@ -273,23 +279,18 @@ class UnraidWebGuiClient {
     var arrayPercent = previous?.arrayPercent ?? 0.0;
 
     if (overviewResponse != null) {
-      final dashboardHtml = utf8.decode(
-        overviewResponse.bodyBytes,
-        allowMalformed: true,
-      );
+      // Reuse the single decode already done in [_sendUri] for CSRF/login checks.
+      final dashboardHtml = _responseBody(overviewResponse);
       _extractCsrf(dashboardHtml);
-      final snapshot = _parseDashboardSnapshot(dashboardHtml);
-      serverName = _serverNameFromHtml(dashboardHtml);
-      version = _firstMatch(
-            dashboardHtml,
-            RegExp(r'Unraid(?: OS)?\s+([0-9][^<\s"]*)', caseSensitive: false),
-          ) ??
-          'WebGUI';
-      cpuSummary = snapshot.cpuSummary;
-      memoryUsage = snapshot.memoryUsage;
-      arrayState = snapshot.arrayState;
-      arrayUsage = snapshot.arrayUsage;
-      arrayPercent = snapshot.arrayPercent;
+      // Heavy HTML scraping runs off the UI isolate for large payloads.
+      final overview = await parseDashboardOverviewAsync(dashboardHtml);
+      serverName = overview[0] as String;
+      version = overview[1] as String;
+      cpuSummary = overview[2] as String;
+      memoryUsage = overview[3] as String;
+      arrayState = overview[4] as String;
+      arrayUsage = overview[5] as String;
+      arrayPercent = overview[6] as double;
     }
 
     final resolvedDocker = dockerItems ?? previous?.dockerItems ?? const [];
@@ -396,6 +397,12 @@ class UnraidWebGuiClient {
       if (inflight != null) {
         return inflight;
       }
+    } else {
+      // Concurrent pull-to-refresh on the same path still shares one SSH call.
+      final inflight = _directoryInflight[normalized];
+      if (inflight != null) {
+        return inflight;
+      }
     }
 
     final future = _loadDirectory(normalized);
@@ -410,14 +417,19 @@ class UnraidWebGuiClient {
   }
 
   Future<List<UnraidFileEntry>> _loadDirectory(String normalized) async {
+    final generation = (_directoryLoadGeneration[normalized] ?? 0) + 1;
+    _directoryLoadGeneration[normalized] = generation;
     try {
       final output = await _runSshCommand(
         '读取目录',
         _buildSshDirectoryListCommand(normalized),
         timeout: httpTimeout,
       );
-      final entries = parseSshDirectoryListing(output, normalized);
-      _storeDirectoryCache(normalized, entries);
+      final entries = await parseSshDirectoryListingAsync(output, normalized);
+      // Only the newest generation may publish into the shared TTL cache.
+      if (_directoryLoadGeneration[normalized] == generation) {
+        _storeDirectoryCache(normalized, entries);
+      }
       return entries;
     } on TimeoutException {
       throw const UnraidClientException('读取目录超时');
@@ -487,10 +499,15 @@ class UnraidWebGuiClient {
           DateTime.now().difference(cached.fetchedAt) < _fileBytesCacheTtl) {
         return cached.bytes;
       }
-      final inflight = _fileBytesInflight[normalized];
-      if (inflight != null) {
-        return inflight;
-      }
+    } else {
+      // Drop stale bytes so a force-refresh cannot re-serve the old TTL hit
+      // after the new transfer finishes publishing.
+      _fileBytesCache.remove(normalized);
+    }
+    // Soft and forced reads still share one in-flight transfer per path.
+    final inflight = _fileBytesInflight[normalized];
+    if (inflight != null) {
+      return inflight;
     }
 
     final future = _loadFileBytes(normalized);
@@ -821,12 +838,16 @@ class UnraidWebGuiClient {
     final normalized = _normalizeUnraidPath(path);
     _directoryCache.remove(normalized);
     _directoryInflight.remove(normalized);
+    _directoryLoadGeneration.remove(normalized);
     // Drop nested cache keys under this path so tree mutations stay consistent.
     final prefix = normalized == '/' ? '/' : '$normalized/';
     _directoryCache.removeWhere(
       (key, _) => key == normalized || key.startsWith(prefix),
     );
     _directoryInflight.removeWhere(
+      (key, _) => key == normalized || key.startsWith(prefix),
+    );
+    _directoryLoadGeneration.removeWhere(
       (key, _) => key == normalized || key.startsWith(prefix),
     );
     // Media scan keys look like "/mnt/user/photos|6|img=...". Drop any scan
@@ -838,6 +859,7 @@ class UnraidWebGuiClient {
 
     _mediaScanCache.removeWhere((key, _) => mediaKeyAffected(key));
     _mediaScanInflight.removeWhere((key, _) => mediaKeyAffected(key));
+    _mediaScanLoadGeneration.removeWhere((key, _) => mediaKeyAffected(key));
     _fileBytesCache.removeWhere(
       (key, _) => key == normalized || key.startsWith(prefix),
     );
@@ -850,6 +872,7 @@ class UnraidWebGuiClient {
   void clearMediaScanCacheForTest() {
     _mediaScanCache.clear();
     _mediaScanInflight.clear();
+    _mediaScanLoadGeneration.clear();
   }
 
   Future<List<UnraidFileEntry>> fetchMediaFiles(
@@ -879,9 +902,15 @@ class UnraidWebGuiClient {
       if (inflight != null) {
         return inflight;
       }
+    } else {
+      final inflight = _mediaScanInflight[cacheKey];
+      if (inflight != null) {
+        return inflight;
+      }
     }
 
     final future = _scanMediaFiles(
+      cacheKey: cacheKey,
       normalized: normalized,
       depth: depth,
       includeImages: includeImages,
@@ -890,15 +919,7 @@ class UnraidWebGuiClient {
     );
     _mediaScanInflight[cacheKey] = future;
     try {
-      final results = await future;
-      if (_mediaScanCache.length >= _maxMediaScanCacheEntries) {
-        _mediaScanCache.remove(_mediaScanCache.keys.first);
-      }
-      _mediaScanCache[cacheKey] = _DirectoryCacheEntry(
-        entries: List<UnraidFileEntry>.unmodifiable(results),
-        fetchedAt: DateTime.now(),
-      );
-      return results;
+      return await future;
     } finally {
       if (identical(_mediaScanInflight[cacheKey], future)) {
         _mediaScanInflight.remove(cacheKey);
@@ -907,12 +928,15 @@ class UnraidWebGuiClient {
   }
 
   Future<List<UnraidFileEntry>> _scanMediaFiles({
+    required String cacheKey,
     required String normalized,
     required int depth,
     required bool includeImages,
     required bool includeVideos,
     required bool includeAudio,
   }) async {
+    final generation = (_mediaScanLoadGeneration[cacheKey] ?? 0) + 1;
+    _mediaScanLoadGeneration[cacheKey] = generation;
     try {
       // Single remote find avoids N recursive directory round-trips.
       final output = await _runSshCommand(
@@ -920,28 +944,23 @@ class UnraidWebGuiClient {
         _buildSshMediaScanCommand(normalized, maxDepth: depth),
         timeout: fileTransferTimeout,
       );
-      final entries = parseSshDirectoryListing(output, normalized);
-      final results = entries.where((entry) {
-        if (entry.isDirectory) {
-          return false;
+      final results = await parseSshDirectoryListingAsync(
+        output,
+        normalized,
+        mediaOnly: true,
+        includeImages: includeImages,
+        includeVideos: includeVideos,
+        includeAudio: includeAudio,
+      );
+      if (_mediaScanLoadGeneration[cacheKey] == generation) {
+        if (_mediaScanCache.length >= _maxMediaScanCacheEntries) {
+          _mediaScanCache.remove(_mediaScanCache.keys.first);
         }
-        if (includeImages && entry.isImage) {
-          return true;
-        }
-        if (includeVideos && entry.isVideo) {
-          return true;
-        }
-        if (includeAudio && entry.isAudio) {
-          return true;
-        }
-        return false;
-      }).toList(growable: false)
-        ..sort(
-          (a, b) => (b.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0))
-              .compareTo(
-            a.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0),
-          ),
+        _mediaScanCache[cacheKey] = _DirectoryCacheEntry(
+          entries: List<UnraidFileEntry>.unmodifiable(results),
+          fetchedAt: DateTime.now(),
         );
+      }
       return results;
     } on TimeoutException {
       throw const UnraidClientException('扫描媒体文件超时');
@@ -996,10 +1015,14 @@ class UnraidWebGuiClient {
   void close() {
     _directoryCache.clear();
     _directoryInflight.clear();
+    _directoryLoadGeneration.clear();
     _mediaScanCache.clear();
     _mediaScanInflight.clear();
+    _mediaScanLoadGeneration.clear();
     _fileBytesCache.clear();
     _fileBytesInflight.clear();
+    _cookies.clear();
+    _cookieHeaderCache = null;
     _dashboardSegmentCache = null;
     _dashboardInflight = null;
     _dashboardInflightForced = false;
@@ -1165,9 +1188,7 @@ query UnraiderSshConfig {
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
         }
-        final payload = jsonDecode(
-          utf8.decode(response.bodyBytes, allowMalformed: true),
-        );
+        final payload = jsonDecode(_responseBody(response));
         final vars = _findNestedMap(payload, const <String>[
           'data',
           'config',
@@ -1199,7 +1220,7 @@ query UnraiderSshConfig {
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
         }
-        final html = utf8.decode(response.bodyBytes, allowMalformed: true);
+        final html = _responseBody(response);
         final port = _parsePort(_htmlInputValue(html, 'portssh'));
         final useSsh = _parseSettingsBool(html, 'useSsh');
         if (port != null || useSsh != null) {
@@ -1329,7 +1350,7 @@ query UnraiderSshConfig {
 
   Future<void> _loadCsrfToken() async {
     final response = await _send('GET', '/Main');
-    final html = utf8.decode(response.bodyBytes, allowMalformed: true);
+    final html = _responseBody(response);
     _extractCsrf(html);
     if (_csrfToken == null) {
       throw const UnraidClientException('无法从 Unraid WebGUI 获取 csrf_token');
@@ -1407,8 +1428,7 @@ query UnraiderSshConfig {
         'GET',
         '/plugins/dynamix.docker.manager/include/DockerContainers.php',
       );
-      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
-      return _parseDockerItems(body);
+      return _parseDockerItemsAsync(_responseBody(response));
     } on UnraidClientException {
       rethrow;
     } on Object catch (error) {
@@ -1421,8 +1441,7 @@ query UnraiderSshConfig {
       final uri = _uri('/plugins/dynamix.vm.manager/include/VMMachines.php')
           .replace(queryParameters: <String, String>{'show': ''});
       final response = await _sendUri('GET', uri);
-      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
-      return _parseVmItems(body);
+      return _parseVmItemsAsync(_responseBody(response));
     } on UnraidClientException {
       rethrow;
     } on Object catch (error) {
@@ -1541,7 +1560,8 @@ query UnraiderSshConfig {
         );
       }
 
-      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+      // Decode once per response; callers reuse via [_responseBody].
+      final body = _responseBody(response);
       _extractCsrf(body);
 
       if (!allowLoginRedirect && _looksLikeLoginPage(body)) {
@@ -1589,7 +1609,7 @@ query UnraiderSshConfig {
           throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
         }
       }
-      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+      final body = _responseBody(response);
       _extractCsrf(body);
       if (!_isRedirect(response.statusCode) && _looksLikeLoginPage(body)) {
         throw const UnraidClientException('WebGUI 会话已失效，请重新登录');
@@ -1607,8 +1627,31 @@ query UnraiderSshConfig {
 
   Uri _uri(String path) => Uri.parse(baseUrl).resolve(path);
 
-  String get _cookieHeader =>
-      _cookies.entries.map((entry) => '${entry.key}=${entry.value}').join('; ');
+  String get _cookieHeader {
+    final cached = _cookieHeaderCache;
+    if (cached != null) {
+      return cached;
+    }
+    final header = _cookies.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .join('; ');
+    _cookieHeaderCache = header;
+    return header;
+  }
+
+  /// Process-local decoded body cache so CSRF checks and payload parsers share
+  /// one utf8 decode per [http.Response] instance.
+  static final Expando<String> _decodedResponseBodies = Expando<String>();
+
+  String _responseBody(http.Response response) {
+    final cached = _decodedResponseBodies[response];
+    if (cached != null) {
+      return cached;
+    }
+    final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+    _decodedResponseBodies[response] = body;
+    return body;
+  }
 
   void _storeCookies(http.Response response) {
     final setCookie = response.headers['set-cookie'];
@@ -1616,6 +1659,7 @@ query UnraiderSshConfig {
       return;
     }
 
+    var changed = false;
     for (final rawCookie in _splitSetCookie(setCookie)) {
       final pair = rawCookie.split(';').first;
       final separator = pair.indexOf('=');
@@ -1625,10 +1669,16 @@ query UnraiderSshConfig {
       final name = pair.substring(0, separator).trim();
       final value = pair.substring(separator + 1).trim();
       if (value.isEmpty || value.toLowerCase() == 'deleted') {
-        _cookies.remove(name);
-      } else {
+        if (_cookies.remove(name) != null) {
+          changed = true;
+        }
+      } else if (_cookies[name] != value) {
         _cookies[name] = value;
+        changed = true;
       }
+    }
+    if (changed) {
+      _cookieHeaderCache = null;
     }
   }
 
@@ -1651,7 +1701,7 @@ query UnraiderSshConfig {
       throw UnraidClientException('$prefix：HTTP ${response.statusCode}');
     }
 
-    final body = utf8.decode(response.bodyBytes, allowMalformed: true).trim();
+    final body = _responseBody(response).trim();
     if (body.isEmpty) {
       return;
     }

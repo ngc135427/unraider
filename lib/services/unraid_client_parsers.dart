@@ -1,9 +1,50 @@
 part of 'unraid_client.dart';
 
+/// Large Docker/VM HTML payloads are cheaper to regex off the UI isolate.
+const _managementParseIsolateThresholdBytes = 16 * 1024;
+
+@visibleForTesting
+List<UnraidManagementItem> parseDockerItems(String body) {
+  return _parseDockerItems(body);
+}
+
+@visibleForTesting
+List<UnraidManagementItem> parseVmItems(String body) {
+  return _parseVmItems(body);
+}
+
 List<UnraidManagementItem> _parseDockerItems(String body) {
-  final items = <UnraidManagementItem>[];
-  final script =
-      body.split('\u0000').length > 1 ? body.split('\u0000')[1] : body;
+  return _managementItemsFromRows(_parseDockerItemRows(body));
+}
+
+List<UnraidManagementItem> _parseVmItems(String body) {
+  return _managementItemsFromRows(_parseVmItemRows(body));
+}
+
+Future<List<UnraidManagementItem>> _parseDockerItemsAsync(String body) {
+  return _parseManagementItemsAsync(body, _parseDockerItemRows);
+}
+
+Future<List<UnraidManagementItem>> _parseVmItemsAsync(String body) {
+  return _parseManagementItemsAsync(body, _parseVmItemRows);
+}
+
+Future<List<UnraidManagementItem>> _parseManagementItemsAsync(
+  String body,
+  List<List<Object?>> Function(String body) parseRows,
+) async {
+  if (body.length < _managementParseIsolateThresholdBytes) {
+    return _managementItemsFromRows(parseRows(body));
+  }
+  final rows = await Isolate.run(() => parseRows(body));
+  return _managementItemsFromRows(rows);
+}
+
+/// Row layout: id, title, status, description, typeIndex, detail, tags.
+List<List<Object?>> _parseDockerItemRows(String body) {
+  final rows = <List<Object?>>[];
+  final nul = body.indexOf('\u0000');
+  final script = nul >= 0 ? body.substring(nul + 1) : body;
   final regex = RegExp(
     r'''docker\.push\(\{name:'((?:\\'|[^'])*)',id:'([^']*)',state:(\d+),pause:(\d+),update:(\d+)''',
   );
@@ -19,24 +60,20 @@ List<UnraidManagementItem> _parseDockerItems(String body) {
         : isRunning
             ? '运行中'
             : '已停止';
-    items.add(
-      UnraidManagementItem(
-        id: id,
-        title: name,
-        status: status,
-        description: 'Docker 容器',
-        type: ManagementItemType.docker,
-        detail: id,
-        tags: <String>[
-          if (hasUpdate) '有更新',
-        ],
-      ),
-    );
+    rows.add(<Object?>[
+      id,
+      name,
+      status,
+      'Docker 容器',
+      ManagementItemType.docker.index,
+      id,
+      <String>[if (hasUpdate) '有更新'],
+    ]);
   }
-  return items;
+  return rows;
 }
 
-List<UnraidManagementItem> _parseVmItems(String body) {
+List<List<Object?>> _parseVmItemRows(String body) {
   final parts = body.split('\u0000');
   final html = parts.isNotEmpty ? parts.first : body;
   final script = parts.length > 1 ? parts.last : body;
@@ -47,39 +84,55 @@ List<UnraidManagementItem> _parseVmItems(String body) {
     states[match.group(1) ?? ''] = match.group(2) ?? '';
   }
 
-  final items = <UnraidManagementItem>[];
+  final rows = <List<Object?>>[];
+  final seen = <String>{};
   final nameRegex = RegExp(r"addVMContext\('((?:\\'|[^'])*)','([^']*)'");
   for (final match in nameRegex.allMatches(html)) {
     final name = _decodeJsString(match.group(1) ?? '');
     final uuid = match.group(2) ?? name;
+    seen.add(uuid);
     final state = states[uuid] ?? '';
-    items.add(
-      UnraidManagementItem(
-        id: uuid,
-        title: name,
-        status: _vmStatus(state),
-        description: '虚拟机',
-        type: ManagementItemType.vm,
-        detail: uuid,
-      ),
-    );
+    rows.add(<Object?>[
+      uuid,
+      name,
+      _vmStatus(state),
+      '虚拟机',
+      ManagementItemType.vm.index,
+      uuid,
+      const <String>[],
+    ]);
   }
 
   for (final entry in states.entries) {
-    if (items.any((item) => item.id == entry.key)) {
+    if (seen.contains(entry.key)) {
       continue;
     }
-    items.add(
-      UnraidManagementItem(
-        id: entry.key,
-        title: entry.key,
-        status: _vmStatus(entry.value),
-        description: '虚拟机',
-        type: ManagementItemType.vm,
-        detail: entry.key,
-      ),
-    );
+    rows.add(<Object?>[
+      entry.key,
+      entry.key,
+      _vmStatus(entry.value),
+      '虚拟机',
+      ManagementItemType.vm.index,
+      entry.key,
+      const <String>[],
+    ]);
   }
-  return items;
+  return rows;
+}
+
+List<UnraidManagementItem> _managementItemsFromRows(List<List<Object?>> rows) {
+  final types = ManagementItemType.values;
+  return [
+    for (final row in rows)
+      UnraidManagementItem(
+        id: row[0] as String,
+        title: row[1] as String,
+        status: row[2] as String,
+        description: row[3] as String,
+        type: types[row[4] as int],
+        detail: row[5] as String,
+        tags: (row[6] as List<dynamic>).cast<String>(),
+      ),
+  ];
 }
 

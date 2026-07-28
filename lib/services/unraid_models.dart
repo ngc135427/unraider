@@ -241,7 +241,7 @@ class UnraidNotification {
 }
 
 class UnraidFileEntry {
-  const UnraidFileEntry({
+  UnraidFileEntry({
     required this.name,
     required this.path,
     required this.isDirectory,
@@ -249,7 +249,9 @@ class UnraidFileEntry {
     required this.size,
     required this.modified,
     required this.modifiedDate,
-  });
+  })  : isImage = !isDirectory && _nameHasExtension(name, _imageExtensions),
+        isVideo = !isDirectory && _nameHasExtension(name, _videoExtensions),
+        isAudio = !isDirectory && _nameHasExtension(name, _audioExtensions);
 
   final String name;
   final String path;
@@ -259,18 +261,23 @@ class UnraidFileEntry {
   final String modified;
   final DateTime? modifiedDate;
 
-  bool get isMedia {
-    final lower = name.toLowerCase();
-    return _imageExtensions.any(lower.endsWith) ||
-        _videoExtensions.any(lower.endsWith) ||
-        _audioExtensions.any(lower.endsWith);
+  /// Media kind flags are computed once at construction so list filters,
+  /// share browsers, and album tiles do not re-lower/scan extensions.
+  final bool isImage;
+  final bool isVideo;
+  final bool isAudio;
+
+  bool get isMedia => isImage || isVideo || isAudio;
+}
+
+bool _nameHasExtension(String name, List<String> extensions) {
+  final lower = name.toLowerCase();
+  for (final extension in extensions) {
+    if (lower.endsWith(extension)) {
+      return true;
+    }
   }
-
-  bool get isImage => _imageExtensions.any(name.toLowerCase().endsWith);
-
-  bool get isVideo => _videoExtensions.any(name.toLowerCase().endsWith);
-
-  bool get isAudio => _audioExtensions.any(name.toLowerCase().endsWith);
+  return false;
 }
 
 const _imageExtensions = <String>[

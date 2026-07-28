@@ -59,17 +59,24 @@ class _ManagementPage extends StatefulWidget {
 
 class _ManagementPageState extends State<_ManagementPage> {
   final _searchController = TextEditingController();
-  final Set<String> _submittingIds = {};
+  /// Submitting ids drive only card busy state via [ValueNotifier].
+  final ValueNotifier<Set<String>> _submittingIds =
+      ValueNotifier<Set<String>>(const <String>{});
   Timer? _searchDebounce;
   String _query = '';
   List<ManagementData>? _filterItemsRef;
   String _filterQueryRef = '';
   List<ManagementData> _filteredItemsCached = const <ManagementData>[];
+  Map<String, int> _filteredIndexById = const <String, int>{};
+  /// Pre-lowercased haystacks so typing does not re-join tags every keystroke.
+  List<ManagementData>? _haystackItemsRef;
+  List<String> _searchHaystacks = const <String>[];
 
   @override
   void dispose() {
     _searchDebounce?.cancel();
     _searchController.dispose();
+    _submittingIds.dispose();
     super.dispose();
   }
 
@@ -83,6 +90,22 @@ class _ManagementPageState extends State<_ManagementPage> {
     });
   }
 
+  void _ensureSearchHaystacks() {
+    if (identical(_haystackItemsRef, widget.items)) {
+      return;
+    }
+    _haystackItemsRef = widget.items;
+    _searchHaystacks = [
+      for (final item in widget.items)
+        [
+          item.title,
+          item.status,
+          item.description,
+          ...item.tags,
+        ].join(' ').toLowerCase(),
+    ];
+  }
+
   List<ManagementData> get _filteredItems {
     if (identical(_filterItemsRef, widget.items) &&
         _filterQueryRef == _query) {
@@ -92,16 +115,23 @@ class _ManagementPageState extends State<_ManagementPage> {
     _filterQueryRef = _query;
     if (_query.isEmpty) {
       _filteredItemsCached = widget.items;
+      _filteredIndexById = {
+        for (var i = 0; i < widget.items.length; i++) widget.items[i].id: i,
+      };
       return _filteredItemsCached;
     }
-    _filteredItemsCached = widget.items.where((item) {
-      return [
-        item.title,
-        item.status,
-        item.description,
-        ...item.tags,
-      ].join(' ').toLowerCase().contains(_query);
-    }).toList(growable: false);
+    _ensureSearchHaystacks();
+    final filtered = <ManagementData>[];
+    final indexById = <String, int>{};
+    for (var i = 0; i < widget.items.length; i++) {
+      if (_searchHaystacks[i].contains(_query)) {
+        final item = widget.items[i];
+        indexById[item.id] = filtered.length;
+        filtered.add(item);
+      }
+    }
+    _filteredItemsCached = filtered;
+    _filteredIndexById = indexById;
     return _filteredItemsCached;
   }
 
@@ -186,13 +216,18 @@ class _ManagementPageState extends State<_ManagementPage> {
                   final item = filteredItems[index];
                   return RepaintBoundary(
                     key: ValueKey<String>(item.id),
-                    child: _ManagementCard(
-                      item: item,
-                      isSubmitting: _submittingIds.contains(item.id),
-                      onTap: () => _openDetail(item),
-                      onAction: item.type == ManagementItemType.share
-                          ? null
-                          : (action) => _runAction(item, action),
+                    child: ValueListenableBuilder<Set<String>>(
+                      valueListenable: _submittingIds,
+                      builder: (context, submitting, _) {
+                        return _ManagementCard(
+                          item: item,
+                          isSubmitting: submitting.contains(item.id),
+                          onTap: () => _openDetail(item),
+                          onAction: item.type == ManagementItemType.share
+                              ? null
+                              : (action) => _runAction(item, action),
+                        );
+                      },
                     ),
                   );
                 },
@@ -204,13 +239,7 @@ class _ManagementPageState extends State<_ManagementPage> {
                   if (key is! ValueKey<String>) {
                     return null;
                   }
-                  final id = key.value;
-                  for (var i = 0; i < filteredItems.length; i++) {
-                    if (filteredItems[i].id == id) {
-                      return i;
-                    }
-                  }
-                  return null;
+                  return _filteredIndexById[key.value];
                 },
               ),
             ),
@@ -249,7 +278,7 @@ class _ManagementPageState extends State<_ManagementPage> {
       return;
     }
 
-    setState(() => _submittingIds.add(item.id));
+    _submittingIds.value = {..._submittingIds.value, item.id};
     try {
       await client.runManagementAction(
         type: item.type,
@@ -269,7 +298,8 @@ class _ManagementPageState extends State<_ManagementPage> {
       _showMessage(error.message);
     } finally {
       if (mounted) {
-        setState(() => _submittingIds.remove(item.id));
+        final next = Set<String>.from(_submittingIds.value)..remove(item.id);
+        _submittingIds.value = next;
       }
     }
   }
@@ -293,7 +323,7 @@ class ManagementDetailArgs {
   final UnraidClient? unraidClient;
 }
 
-class _ManagementStats extends StatelessWidget {
+class _ManagementStats extends StatefulWidget {
   const _ManagementStats({
     required this.type,
     required this.dashboard,
@@ -303,24 +333,52 @@ class _ManagementStats extends StatelessWidget {
   final UnraidDashboard dashboard;
 
   @override
+  State<_ManagementStats> createState() => _ManagementStatsState();
+}
+
+class _ManagementStatsState extends State<_ManagementStats> {
+  List<UnraidManagementItem>? _itemsRef;
+  String? _typeRef;
+  int _runningCached = 0;
+  int _totalCached = 0;
+
+  void _ensureRunningStats() {
+    final items = switch (widget.type) {
+      'Docker' => widget.dashboard.dockerItems,
+      '虚拟机' => widget.dashboard.vmItems,
+      _ => widget.dashboard.shareItems,
+    };
+    if (identical(_itemsRef, items) && _typeRef == widget.type) {
+      return;
+    }
+    _itemsRef = items;
+    _typeRef = widget.type;
+    _totalCached = items.length;
+    var running = 0;
+    for (final item in items) {
+      if (_isRunningStatus(item.status)) {
+        running += 1;
+      }
+    }
+    _runningCached = running;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final items = switch (type) {
-      'Docker' => dashboard.dockerItems,
-      '虚拟机' => dashboard.vmItems,
-      _ => dashboard.shareItems,
+    _ensureRunningStats();
+    final running = _runningCached;
+    final total = _totalCached;
+    final secondary = switch (widget.type) {
+      'Docker' => widget.dashboard.dockerNetworkSummary,
+      '虚拟机' => '$running 运行中 · ${total - running} 未运行',
+      _ => '阵列 ${widget.dashboard.arrayUsage}',
     };
-    final running = items.where((item) => _isRunningStatus(item.status)).length;
-    final secondary = switch (type) {
-      'Docker' => dashboard.dockerNetworkSummary,
-      '虚拟机' => '$running 运行中 · ${items.length - running} 未运行',
-      _ => '阵列 ${dashboard.arrayUsage}',
-    };
-    final icon = switch (type) {
+    final icon = switch (widget.type) {
       'Docker' => Icons.layers,
       '虚拟机' => Icons.computer,
       _ => Icons.folder_shared,
     };
-    final secondIcon = switch (type) {
+    final secondIcon = switch (widget.type) {
       'Docker' => Icons.hub,
       '虚拟机' => Icons.memory,
       _ => Icons.move_down,
@@ -335,20 +393,20 @@ class _ManagementStats extends StatelessWidget {
       children: [
         _StatCard(
           icon: icon,
-          label: type,
-          value: items.length.toString(),
+          label: widget.type,
+          value: total.toString(),
           subtitle: '$running 运行中',
-          progress: items.isEmpty ? 0 : running / items.length,
-          severity: running == 0 && items.isNotEmpty
+          progress: total == 0 ? 0 : running / total,
+          severity: running == 0 && total > 0
               ? InfoSeverity.warning
               : InfoSeverity.normal,
         ),
         _StatCard(
           icon: secondIcon,
-          label: type == '共享' ? 'Mover' : '概览',
-          value: type == '共享' ? '02:00' : running.toString(),
+          label: widget.type == '共享' ? 'Mover' : '概览',
+          value: widget.type == '共享' ? '02:00' : running.toString(),
           subtitle: secondary,
-          progress: dashboard.arrayPercent,
+          progress: widget.dashboard.arrayPercent,
         ),
       ],
     );
@@ -520,11 +578,13 @@ class _ManagementCard extends StatelessWidget {
 }
 
 bool _isRunningStatus(String value) {
-  return value.contains('运行') ||
-      value.contains('在线') ||
-      value.toLowerCase().contains('running') ||
-      value.toLowerCase().contains('online') ||
-      value.toLowerCase().contains('started');
+  if (value.contains('运行') || value.contains('在线')) {
+    return true;
+  }
+  final lower = value.toLowerCase();
+  return lower.contains('running') ||
+      lower.contains('online') ||
+      lower.contains('started');
 }
 
 String _actionLabel(ManagementAction action) {

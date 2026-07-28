@@ -227,12 +227,12 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       return;
     }
 
-    // Collapse overlapping refresh taps so concurrent loads do not race
-    // setState with stale results.
-    final generation = ++_loadGeneration;
+    // Auto-sync re-entry should not cancel an in-flight full load by bumping
+    // generation and then bailing — only start a new generation when we work.
     if (_loadingAll && runAutoSync) {
       return;
     }
+    final generation = ++_loadGeneration;
     _loadingAll = true;
 
     setState(() {
@@ -258,10 +258,11 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       // Load local and remote independently so one side failing does not blank
       // the entire album page.
       await Future.wait<void>([
-        _loadLocalMedia(),
+        _loadLocalMedia(generation: generation),
         _loadRemoteMedia(
           client: args.unraidClient,
           targetDir: preferences.targetDir,
+          generation: generation,
           forceRefresh: forceRefresh,
         ),
       ]);
@@ -283,11 +284,11 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     }
   }
 
-  Future<void> _loadLocalMedia() async {
+  Future<void> _loadLocalMedia({required int generation}) async {
     try {
       final permissionsGranted = await _requestMediaAccess();
       if (!permissionsGranted) {
-        if (!mounted) {
+        if (!mounted || generation != _loadGeneration) {
           return;
         }
         setState(() {
@@ -303,7 +304,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         LocalMediaStore.listMedia(),
         LocalMediaStore.listBuckets(),
       ]);
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -313,7 +314,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _loadingLocal = false;
       });
     } on LocalMediaException catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -323,7 +324,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _loadingLocal = false;
       });
     } on Object catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -338,6 +339,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   Future<void> _loadRemoteMedia({
     required UnraidClient client,
     required String targetDir,
+    required int generation,
     bool forceRefresh = false,
   }) async {
     try {
@@ -349,7 +351,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         includeAudio: false,
         forceRefresh: forceRefresh,
       );
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -358,7 +360,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _loadingRemote = false;
       });
     } on UnraidClientException catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -367,7 +369,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _loadingRemote = false;
       });
     } on Object catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
@@ -383,6 +385,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     if (client == null) {
       return;
     }
+    final generation = ++_loadGeneration;
     setState(() {
       _loadingRemote = true;
       _remoteError = null;
@@ -390,9 +393,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     await _loadRemoteMedia(
       client: client,
       targetDir: _preferences.targetDir,
+      generation: generation,
       forceRefresh: true,
     );
-    if (!mounted) {
+    if (!mounted || generation != _loadGeneration) {
       return;
     }
     setState(() {
@@ -664,41 +668,48 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   Widget _buildTabBody(_PhoAlbumTab tab, List<LocalMediaAsset> local) {
     final padding = const EdgeInsets.fromLTRB(20, 0, 20, 28);
     return switch (tab) {
+      // Local/remote use CustomScrollView so day sections are virtualized
+      // instead of expanding every grid inside one unbounded ListView.
       _PhoAlbumTab.local => RefreshIndicator(
           onRefresh: () => _loadAll(runAutoSync: false),
-          child: ListView(
+          child: CustomScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: padding,
-            children: [
+            slivers: [
               if (_error != null)
-                _InlineState(
-                  icon: Icons.error_outline,
-                  title: '本机相册读取失败',
-                  detail: _error!,
-                  actionLabel: '重试',
-                  onAction: () => _loadAll(runAutoSync: false),
+                SliverPadding(
+                  padding: padding,
+                  sliver: SliverToBoxAdapter(
+                    child: _InlineState(
+                      icon: Icons.error_outline,
+                      title: '本机相册读取失败',
+                      detail: _error!,
+                      actionLabel: '重试',
+                      onAction: () => _loadAll(runAutoSync: false),
+                    ),
+                  ),
                 )
               else
                 _LocalTimeline(
                   loading: _loadingLocal,
                   media: local,
                   videosOnly: widget.videosOnly,
+                  padding: padding,
                 ),
             ],
           ),
         ),
       _PhoAlbumTab.remote => RefreshIndicator(
           onRefresh: _reloadRemote,
-          child: ListView(
+          child: CustomScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: padding,
-            children: [
+            slivers: [
               _RemoteTimeline(
                 loading: _loadingRemote,
                 error: _remoteError,
                 client: _client,
                 entries: _remoteMedia,
                 onRetry: _reloadRemote,
+                padding: padding,
               ),
             ],
           ),

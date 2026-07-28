@@ -66,7 +66,10 @@ class LocalMediaStore {
   static final Map<String, _LocalListCacheEntry<List<LocalMediaAsset>>>
       _mediaListCache =
       <String, _LocalListCacheEntry<List<LocalMediaAsset>>>{};
+  static final Map<String, Future<List<LocalMediaAsset>>> _mediaListInflight =
+      <String, Future<List<LocalMediaAsset>>>{};
   static _LocalListCacheEntry<List<LocalMediaBucket>>? _bucketCache;
+  static Future<List<LocalMediaBucket>>? _bucketInflight;
   static final Map<String, Future<Uint8List?>> _thumbnailCache =
       <String, Future<Uint8List?>>{};
 
@@ -80,21 +83,41 @@ class LocalMediaStore {
         DateTime.now().difference(cached.fetchedAt) < _listCacheTtl) {
       return cached.value;
     }
+    // Coalesce concurrent album/open taps so native MediaStore is hit once.
+    final inflight = _mediaListInflight[key];
+    if (inflight != null) {
+      return inflight;
+    }
 
+    final future = _listMediaUncached(limit: limit, bucketId: bucketId);
+    _mediaListInflight[key] = future;
     try {
-      final result = await _channel.invokeMethod<List<dynamic>>('listMedia', {
-        'limit': limit,
-        if (bucketId != null && bucketId.isNotEmpty) 'bucketId': bucketId,
-      });
-      final media = (result ?? const <dynamic>[])
-          .whereType<Map<dynamic, dynamic>>()
-          .map(LocalMediaAsset.fromMap)
-          .toList(growable: false);
+      final media = await future;
       _mediaListCache[key] = _LocalListCacheEntry(
         value: media,
         fetchedAt: DateTime.now(),
       );
       return media;
+    } finally {
+      if (identical(_mediaListInflight[key], future)) {
+        _mediaListInflight.remove(key);
+      }
+    }
+  }
+
+  static Future<List<LocalMediaAsset>> _listMediaUncached({
+    required int limit,
+    String? bucketId,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>('listMedia', {
+        'limit': limit,
+        if (bucketId != null && bucketId.isNotEmpty) 'bucketId': bucketId,
+      });
+      return (result ?? const <dynamic>[])
+          .whereType<Map<dynamic, dynamic>>()
+          .map(LocalMediaAsset.fromMap)
+          .toList(growable: false);
     } on MissingPluginException {
       return const <LocalMediaAsset>[];
     } on PlatformException catch (error) {
@@ -115,18 +138,34 @@ class LocalMediaStore {
         DateTime.now().difference(cached.fetchedAt) < _listCacheTtl) {
       return cached.value;
     }
+    final inflight = _bucketInflight;
+    if (inflight != null) {
+      return inflight;
+    }
 
+    final future = _listBucketsUncached();
+    _bucketInflight = future;
     try {
-      final result = await _channel.invokeMethod<List<dynamic>>('listBuckets');
-      final buckets = (result ?? const <dynamic>[])
-          .whereType<Map<dynamic, dynamic>>()
-          .map(LocalMediaBucket.fromMap)
-          .toList(growable: false);
+      final buckets = await future;
       _bucketCache = _LocalListCacheEntry(
         value: buckets,
         fetchedAt: DateTime.now(),
       );
       return buckets;
+    } finally {
+      if (identical(_bucketInflight, future)) {
+        _bucketInflight = null;
+      }
+    }
+  }
+
+  static Future<List<LocalMediaBucket>> _listBucketsUncached() async {
+    try {
+      final result = await _channel.invokeMethod<List<dynamic>>('listBuckets');
+      return (result ?? const <dynamic>[])
+          .whereType<Map<dynamic, dynamic>>()
+          .map(LocalMediaBucket.fromMap)
+          .toList(growable: false);
     } on MissingPluginException {
       return const <LocalMediaBucket>[];
     } on PlatformException catch (error) {
@@ -167,7 +206,9 @@ class LocalMediaStore {
   /// Drop process-local caches after uploads/sync so the next open is fresh.
   static void invalidateCaches() {
     _mediaListCache.clear();
+    _mediaListInflight.clear();
     _bucketCache = null;
+    _bucketInflight = null;
     // Keep thumbnail cache — bytes are still valid for the same URI.
   }
 

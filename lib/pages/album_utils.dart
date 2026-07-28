@@ -45,21 +45,23 @@ List<LocalMediaAsset> _findPendingUploads({
   required String targetDir,
   required List<String> sourceIds,
 }) {
-  final remotePaths = remote
-      .map((entry) => _relativePath(targetDir, entry.path).toLowerCase())
-      .toSet();
-  final sourceFilter = sourceIds.toSet();
-  return local
-      .where(
-        (asset) =>
-            sourceFilter.isEmpty || sourceFilter.contains(asset.bucketId),
-      )
-      .where((asset) {
-        final relative =
-            _relativePath(targetDir, _targetPathFor(targetDir, asset));
-        return !remotePaths.contains(relative.toLowerCase());
-      })
-      .toList(growable: false);
+  final remotePaths = <String>{
+    for (final entry in remote)
+      _relativePath(targetDir, entry.path).toLowerCase(),
+  };
+  final sourceFilter = sourceIds.isEmpty ? null : sourceIds.toSet();
+  final pending = <LocalMediaAsset>[];
+  for (final asset in local) {
+    if (sourceFilter != null && !sourceFilter.contains(asset.bucketId)) {
+      continue;
+    }
+    final relative =
+        _relativePath(targetDir, _targetPathFor(targetDir, asset)).toLowerCase();
+    if (!remotePaths.contains(relative)) {
+      pending.add(asset);
+    }
+  }
+  return pending;
 }
 
 List<_LocalSection> _groupLocalByDate(List<LocalMediaAsset> media) {

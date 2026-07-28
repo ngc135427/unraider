@@ -626,23 +626,28 @@ class _TextPreviewState extends State<_TextPreview> {
   }
 }
 
+const _textPreviewExtensions = <String>{
+  '.txt',
+  '.log',
+  '.md',
+  '.json',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.csv',
+  '.ini',
+  '.conf',
+  '.cfg',
+  '.sh',
+  '.dart',
+};
+
 bool _isTextPreviewFile(String name) {
-  final lower = name.toLowerCase();
-  return const <String>[
-    '.txt',
-    '.log',
-    '.md',
-    '.json',
-    '.xml',
-    '.yaml',
-    '.yml',
-    '.csv',
-    '.ini',
-    '.conf',
-    '.cfg',
-    '.sh',
-    '.dart',
-  ].any(lower.endsWith);
+  final dot = name.lastIndexOf('.');
+  if (dot < 0 || dot == name.length - 1) {
+    return false;
+  }
+  return _textPreviewExtensions.contains(name.substring(dot).toLowerCase());
 }
 
 class _StateMessage extends StatelessWidget {

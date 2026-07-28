@@ -83,6 +83,134 @@ void main() {
     expect(command, contains(r"-printf '%p\0%y\0%s\0%T@\0%f\0'"));
   });
 
+  test('async listing parse matches sync for small payloads', () async {
+    final output = [
+      '/mnt/user/media/Zeta.mp4',
+      'f',
+      '1572864',
+      '1700000000.0',
+      'Zeta.mp4',
+      '/mnt/user/media/Alpha',
+      'd',
+      '4096',
+      '1700000060.0',
+      'Alpha',
+      '/mnt/user/media/photo.jpg',
+      'f',
+      '1024',
+      '1700000120.0',
+      'photo.jpg',
+      '',
+    ].join('\u0000');
+
+    final sync = parseSshDirectoryListing(output, '/mnt/user/media');
+    final async = await parseSshDirectoryListingAsync(output, '/mnt/user/media');
+    expect(async.map((e) => e.name).toList(), sync.map((e) => e.name).toList());
+    expect(async.map((e) => e.path).toList(), sync.map((e) => e.path).toList());
+  });
+
+  test('dashboard overview parse returns stable row layout', () async {
+    const html = '''
+<div class="icon-cpu"></div><div class="tile-header-main">Intel Core</div>
+<title>Tower | Unraid</title>
+Unraid OS 7.0.0
+<tbody id="array_list"><h3 class="tile-header-main">Started</h3><span>10 GB / 20 GB 50%</span></tbody>
+''';
+    final row = await parseDashboardOverviewAsync(html);
+    expect(row.length, 7);
+    expect(row[0], isA<String>());
+    expect(row[1], contains('7.0.0'));
+    expect(row[2], isA<String>());
+    expect(row[6], isA<double>());
+  });
+
+  test('file entry media flags are fixed at construction', () {
+    final photo = UnraidFileEntry(
+      name: 'IMG.JPG',
+      path: '/mnt/user/a/IMG.JPG',
+      isDirectory: false,
+      sizeBytes: 10,
+      size: '10 B',
+      modified: '',
+      modifiedDate: null,
+    );
+    final song = UnraidFileEntry(
+      name: 'track.flac',
+      path: '/mnt/user/a/track.flac',
+      isDirectory: false,
+      sizeBytes: 10,
+      size: '10 B',
+      modified: '',
+      modifiedDate: null,
+    );
+    expect(photo.isImage, isTrue);
+    expect(photo.isVideo, isFalse);
+    expect(photo.isAudio, isFalse);
+    expect(song.isAudio, isTrue);
+    expect(song.isMedia, isTrue);
+  });
+
+  test('docker parser extracts containers from push script', () {
+    final body = "prefix\u0000"
+        "docker.push({name:'Plex',id:'abc123',state:1,pause:0,update:1});"
+        "docker.push({name:'Stopped',id:'def',state:0,pause:0,update:0});";
+    final items = parseDockerItems(body);
+    expect(items.length, 2);
+    expect(items.first.title, 'Plex');
+    expect(items.first.status, '运行中');
+    expect(items.first.tags, contains('有更新'));
+    expect(items.last.status, '已停止');
+  });
+
+  test('vm parser maps names and states without O(n^2) scan', () {
+    final body = "addVMContext('Home','uuid-1');\u0000"
+        "kvm.push({id:'uuid-1',state:'running'});"
+        "kvm.push({id:'uuid-2',state:'shutoff'});";
+    final items = parseVmItems(body);
+    expect(items.map((item) => item.id).toList(), ['uuid-1', 'uuid-2']);
+    expect(items.first.title, 'Home');
+    expect(items.first.status, isNotEmpty);
+    expect(items.last.title, 'uuid-2');
+  });
+
+  test('async media filter keeps images and videos only', () async {
+    final output = [
+      '/mnt/user/media/song.mp3',
+      'f',
+      '100',
+      '1700000000.0',
+      'song.mp3',
+      '/mnt/user/media/photo.jpg',
+      'f',
+      '1024',
+      '1700000120.0',
+      'photo.jpg',
+      '/mnt/user/media/clip.mp4',
+      'f',
+      '2048',
+      '1700000060.0',
+      'clip.mp4',
+      '/mnt/user/media/notes.txt',
+      'f',
+      '10',
+      '1700000030.0',
+      'notes.txt',
+      '',
+    ].join('\u0000');
+
+    final media = await parseSshDirectoryListingAsync(
+      output,
+      '/mnt/user/media',
+      mediaOnly: true,
+      includeImages: true,
+      includeVideos: true,
+      includeAudio: false,
+    );
+
+    expect(media.map((e) => e.name).toList(), ['photo.jpg', 'clip.mp4']);
+    expect(media.every((e) => e.isImage || e.isVideo), isTrue);
+  });
+
   test('builds file stream URI under the WebGUI base URL', () {
     final client = UnraidWebGuiClient(
       baseUrl: 'http://tower.local',
