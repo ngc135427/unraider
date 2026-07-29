@@ -12,14 +12,16 @@ class ManagementDetailPage extends StatefulWidget {
 class _ManagementDetailPageState extends State<ManagementDetailPage> {
   bool _isSubmitting = false;
   bool _shareBrowserReady = false;
-  bool _shareLoading = false;
+  /// Spinner-only flag so soft directory refresh does not rebuild the file list.
+  final ValueNotifier<bool> _shareLoading = ValueNotifier<bool>(false);
   String? _sharePath;
   Future<List<UnraidFileEntry>>? _shareFuture;
   List<UnraidFileEntry> _shareEntries = const <UnraidFileEntry>[];
   Object? _shareError;
   final TextEditingController _shareSearchController = TextEditingController();
   Timer? _shareSearchDebounce;
-  String _shareQuery = '';
+  /// Search query is isolated so typing does not rebuild the share header chrome.
+  final ValueNotifier<String> _shareQuery = ValueNotifier<String>('');
   int _shareLoadGeneration = 0;
 
   // Memoized projections for search filter + image gallery source.
@@ -36,6 +38,8 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   void dispose() {
     _shareSearchDebounce?.cancel();
     _shareSearchController.dispose();
+    _shareLoading.dispose();
+    _shareQuery.dispose();
     super.dispose();
   }
 
@@ -65,7 +69,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       if (!mounted) {
         return;
       }
-      setState(() => _shareQuery = value.trim().toLowerCase());
+      _shareQuery.value = value.trim().toLowerCase();
     });
   }
 
@@ -86,6 +90,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
         progress: 0,
         tags: const [],
         details: const [],
+        isRunning: false,
       ),
       unraidClient: null,
     );
@@ -110,6 +115,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(30, 8, 30, 30),
           child: FadeSlide(
+            animate: false,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -336,31 +342,41 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  TextField(
-                    controller: _shareSearchController,
-                    onChanged: _onShareSearchChanged,
-                    decoration: InputDecoration(
-                      hintText: '搜索当前目录',
-                      prefixIcon: const Icon(Icons.search),
-                      suffixIcon: _shareQuery.isEmpty
-                          ? null
-                          : IconButton(
-                              tooltip: '清除',
-                              onPressed: () {
-                                _shareSearchController.clear();
-                                setState(() => _shareQuery = '');
-                              },
-                              icon: const Icon(Icons.clear),
-                            ),
-                      contentPadding:
-                          const EdgeInsets.symmetric(horizontal: 12),
-                    ),
+                  ValueListenableBuilder<String>(
+                    valueListenable: _shareQuery,
+                    builder: (context, query, _) {
+                      return TextField(
+                        controller: _shareSearchController,
+                        onChanged: _onShareSearchChanged,
+                        decoration: InputDecoration(
+                          hintText: '搜索当前目录',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: query.isEmpty
+                              ? null
+                              : IconButton(
+                                  tooltip: '清除',
+                                  onPressed: () {
+                                    _shareSearchController.clear();
+                                    _shareQuery.value = '';
+                                  },
+                                  icon: const Icon(Icons.clear),
+                                ),
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 12),
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
             ),
             Expanded(
-              child: _buildShareEntriesBody(args, currentPath),
+              child: ValueListenableBuilder<String>(
+                valueListenable: _shareQuery,
+                builder: (context, _, __) {
+                  return _buildShareEntriesBody(args, currentPath);
+                },
+              ),
             ),
           ],
         ),
@@ -425,18 +441,19 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     }
     _shareHaystackEntriesRef = _shareEntries;
     _shareSearchHaystacks = [
-      for (final entry in _shareEntries) entry.name.toLowerCase(),
+      for (final entry in _shareEntries) entry.nameLower,
     ];
   }
 
   List<UnraidFileEntry> get _shareFilteredEntries {
+    final query = _shareQuery.value;
     if (identical(_shareFilterEntriesRef, _shareEntries) &&
-        _shareFilterQueryRef == _shareQuery) {
+        _shareFilterQueryRef == query) {
       return _shareFilteredCached;
     }
     _shareFilterEntriesRef = _shareEntries;
-    _shareFilterQueryRef = _shareQuery;
-    if (_shareQuery.isEmpty) {
+    _shareFilterQueryRef = query;
+    if (query.isEmpty) {
       _shareFilteredCached = _shareEntries;
       _shareFilteredIndexByPath = {
         for (var i = 0; i < _shareEntries.length; i++)
@@ -448,7 +465,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     final filtered = <UnraidFileEntry>[];
     final indexByPath = <String, int>{};
     for (var i = 0; i < _shareEntries.length; i++) {
-      if (_shareSearchHaystacks[i].contains(_shareQuery)) {
+      if (_shareSearchHaystacks[i].contains(query)) {
         final entry = _shareEntries[i];
         indexByPath[entry.path] = filtered.length;
         filtered.add(entry);
@@ -463,7 +480,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     ManagementDetailArgs args,
     String currentPath,
   ) {
-    if (_shareLoading && _shareEntries.isEmpty && _shareError == null) {
+    if (_shareLoading.value && _shareEntries.isEmpty && _shareError == null) {
       return const _StateMessage(
         icon: Icons.folder_open,
         title: '正在读取目录',
@@ -483,7 +500,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
 
     final allEntries = _shareEntries;
     final imageEntries = _shareImageEntries;
-    if (!_shareLoading && allEntries.isEmpty && _shareError == null) {
+    if (!_shareLoading.value && allEntries.isEmpty && _shareError == null) {
       return RefreshIndicator(
         onRefresh: () async {
           _openSharePath(currentPath, forceRefresh: true);
@@ -504,7 +521,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     }
 
     final entries = _shareFilteredEntries;
-    if (entries.isEmpty && !_shareLoading) {
+    if (entries.isEmpty && !_shareLoading.value) {
       return const _StateMessage(
         icon: Icons.search_off,
         title: '没有匹配项',
@@ -551,7 +568,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                       ? Icons.folder
                       : entry.isImage
                           ? Icons.image
-                          : _isTextPreviewFile(entry.name)
+                          : _isTextPreviewEntry(entry)
                               ? Icons.description_outlined
                               : Icons.insert_drive_file,
                   title: entry.name,
@@ -562,7 +579,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                       _openSharePath(entry.path);
                     } else if (entry.isImage) {
                       _previewImage(args, entry, imageEntries);
-                    } else if (_isTextPreviewFile(entry.name)) {
+                    } else if (_isTextPreviewEntry(entry)) {
                       _previewText(args, entry);
                     } else {
                       _showMessage('暂不支持预览该文件类型');
@@ -573,19 +590,26 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
             },
           ),
         ),
-        if (_shareLoading && _shareEntries.isNotEmpty)
-          const Positioned(
-            top: 8,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            ),
+        Positioned(
+          top: 8,
+          left: 0,
+          right: 0,
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _shareLoading,
+            builder: (context, loading, _) {
+              if (!loading || _shareEntries.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              return const Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              );
+            },
           ),
+        ),
       ],
     );
   }
@@ -610,11 +634,11 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     final generation = ++_shareLoadGeneration;
     if (client == null) {
       _shareError = '缺少服务器连接';
-      _shareLoading = false;
+      _shareLoading.value = false;
       return Future<List<UnraidFileEntry>>.error('缺少服务器连接');
     }
 
-    _shareLoading = true;
+    _shareLoading.value = true;
     _shareError = null;
     return () async {
       try {
@@ -626,15 +650,15 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
         setState(() {
           _shareEntries = entries;
           _shareError = null;
-          _shareLoading = false;
         });
+        _shareLoading.value = false;
         return entries;
       } on Object catch (error) {
         if (mounted && generation == _shareLoadGeneration) {
           setState(() {
             _shareError = error;
-            _shareLoading = false;
           });
+          _shareLoading.value = false;
         }
         rethrow;
       }
@@ -653,7 +677,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       _sharePath = path;
       if (pathChanged) {
         _shareSearchController.clear();
-        _shareQuery = '';
+        _shareQuery.value = '';
         // Drop stale entries when navigating to a different folder so we do
         // not flash the previous directory's contents.
         _shareEntries = const <UnraidFileEntry>[];

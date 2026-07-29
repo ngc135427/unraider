@@ -805,8 +805,10 @@ class _RemoteTileState extends State<_RemoteTile> {
       return Future<Uint8List?>.value();
     }
 
-    final cached = _remoteThumbnailCache[entry.path];
+    final cached = _remoteThumbnailCache.remove(entry.path);
     if (cached != null) {
+      // LRU touch: reinsert so hot tiles outlive cold ones under the cap.
+      _remoteThumbnailCache[entry.path] = cached;
       return cached;
     }
 

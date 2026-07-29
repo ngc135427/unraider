@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unraider/services/app_logger.dart';
 import 'package:unraider/services/unraid_client.dart';
@@ -143,11 +146,49 @@ Unraid OS 7.0.0
       modified: '',
       modifiedDate: null,
     );
+    final mp3 = UnraidFileEntry(
+      name: 'pop.mp3',
+      path: '/mnt/user/a/pop.mp3',
+      isDirectory: false,
+      sizeBytes: 10,
+      size: '10 B',
+      modified: '',
+      modifiedDate: null,
+    );
     expect(photo.isImage, isTrue);
     expect(photo.isVideo, isFalse);
     expect(photo.isAudio, isFalse);
+    expect(photo.nameLower, 'img.jpg');
     expect(song.isAudio, isTrue);
+    expect(song.isLossless, isTrue);
     expect(song.isMedia, isTrue);
+    expect(mp3.isAudio, isTrue);
+    expect(mp3.isLossless, isFalse);
+    expect(mp3.nameLower, 'pop.mp3');
+  });
+
+  test('byte listing parse matches string parse for small payloads', () async {
+    final output = [
+      '/mnt/user/media/Zeta.mp4',
+      'f',
+      '1572864',
+      '1700000000.0',
+      'Zeta.mp4',
+      '/mnt/user/media/Alpha',
+      'd',
+      '4096',
+      '1700000060.0',
+      'Alpha',
+      '',
+    ].join('\u0000');
+    final bytes = Uint8List.fromList(utf8.encode(output));
+    final fromString = await parseSshDirectoryListingAsync(output, '/mnt/user/media');
+    final fromBytes =
+        await parseSshDirectoryListingBytesAsync(bytes, '/mnt/user/media');
+    expect(
+      fromBytes.map((e) => e.name).toList(),
+      fromString.map((e) => e.name).toList(),
+    );
   });
 
   test('docker parser extracts containers from push script', () {
@@ -244,6 +285,25 @@ Unraid OS 7.0.0
     expect(mapped?.relativePath, 'Mobile Backup/IMG.jpg');
     expect(smbSharePathFromUnraidPath('/mnt/user/photos'), isNull);
     expect(smbSharePathFromUnraidPath('/mnt/disk1/photos/IMG.jpg'), isNull);
+  });
+
+  test('login page detector avoids full-body lowercasing', () {
+    const login = '''
+<html><body>
+<form action="/login">
+<input name="username" />
+<input name="password" />
+</form>
+</body></html>
+''';
+    const dashboard = '''
+<html><body>
+<div id="dashboard">CPU</div>
+<input name="search" />
+</body></html>
+''';
+    expect(looksLikeLoginPage(login), isTrue);
+    expect(looksLikeLoginPage(dashboard), isFalse);
   });
 
   test('identifies unsafe destructive paths', () {

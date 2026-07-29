@@ -38,7 +38,9 @@ class AppBottomNav extends StatelessWidget {
             for (var index = 0; index < items.length; index++)
               Expanded(
                 child: InkWell(
-                  onTap: () => onChanged(index),
+                  onTap: index == currentIndex
+                      ? null
+                      : () => onChanged(index),
                   child: _NavTile(
                     item: items[index],
                     selected: index == currentIndex,

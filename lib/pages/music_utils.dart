@@ -26,6 +26,9 @@ String _albumName(String path, String rootPath) {
   final cacheKey = '$rootPath\u0000$path';
   final cached = _albumNameCache[cacheKey];
   if (cached != null) {
+    // LRU touch so hot library paths stay under the cap.
+    _albumNameCache.remove(cacheKey);
+    _albumNameCache[cacheKey] = cached;
     return cached;
   }
 
@@ -53,10 +56,22 @@ String _albumName(String path, String rootPath) {
   return album;
 }
 
+/// Process-local display-title cache for music tiles/player headers.
+final Map<String, String> _displayTitleCache = <String, String>{};
+const _maxDisplayTitleCacheEntries = 2048;
+
 String _displayTitle(String fileName) {
-  final dot = fileName.lastIndexOf('.');
-  if (dot <= 0) {
-    return fileName;
+  final cached = _displayTitleCache[fileName];
+  if (cached != null) {
+    _displayTitleCache.remove(fileName);
+    _displayTitleCache[fileName] = cached;
+    return cached;
   }
-  return fileName.substring(0, dot);
+  final dot = fileName.lastIndexOf('.');
+  final title = dot <= 0 ? fileName : fileName.substring(0, dot);
+  if (_displayTitleCache.length >= _maxDisplayTitleCacheEntries) {
+    _displayTitleCache.remove(_displayTitleCache.keys.first);
+  }
+  _displayTitleCache[fileName] = title;
+  return title;
 }

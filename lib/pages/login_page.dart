@@ -32,9 +32,11 @@ class _LoginPageState extends State<LoginPage> {
   bool _rememberMe = false;
   bool _useHttps = false;
   bool _loginSucceeded = false;
-  bool _hasInputFocus = false;
+  /// Header compact mode only — avoids rebuilding the whole login form on focus.
+  final ValueNotifier<bool> _hasInputFocus = ValueNotifier<bool>(false);
   bool _isSubmitting = false;
-  bool _showPassword = false;
+  /// Password visibility is isolated so toggles do not rebuild the full form.
+  final ValueNotifier<bool> _showPassword = ValueNotifier<bool>(false);
   bool _loadingPreferences = true;
   String? _statusMessage;
   String? _errorMessage;
@@ -61,6 +63,8 @@ class _LoginPageState extends State<LoginPage> {
     _domainController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _hasInputFocus.dispose();
+    _showPassword.dispose();
     super.dispose();
   }
 
@@ -68,10 +72,10 @@ class _LoginPageState extends State<LoginPage> {
     final hasFocus = _domainFocusNode.hasFocus ||
         _usernameFocusNode.hasFocus ||
         _passwordFocusNode.hasFocus;
-    if (_hasInputFocus == hasFocus) {
+    if (_hasInputFocus.value == hasFocus) {
       return;
     }
-    setState(() => _hasInputFocus = hasFocus);
+    _hasInputFocus.value = hasFocus;
   }
 
   void _clearErrorOnEdit() {
@@ -223,7 +227,10 @@ class _LoginPageState extends State<LoginPage> {
       maxContentWidth: 520,
       child: Column(
         children: [
-          _AuthHeader(compact: _hasInputFocus),
+          ValueListenableBuilder<bool>(
+            valueListenable: _hasInputFocus,
+            builder: (context, compact, _) => _AuthHeader(compact: compact),
+          ),
           Expanded(
             child: Container(
               width: double.infinity,
@@ -233,6 +240,8 @@ class _LoginPageState extends State<LoginPage> {
                 borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
               ),
               child: FadeSlide(
+                // Login rebuilds on submit/errors; skip re-entrance animation.
+                animate: false,
                 child: SingleChildScrollView(
                   child: Form(
                     key: _formKey,
@@ -292,38 +301,41 @@ class _LoginPageState extends State<LoginPage> {
                           },
                         ),
                         const SizedBox(height: 21),
-                        AppTextField(
-                          label: '密码',
-                          controller: _passwordController,
-                          focusNode: _passwordFocusNode,
-                          hint: '请输入 root 密码',
-                          obscureText: !_showPassword,
-                          enabled: !_isSubmitting && !_loginSucceeded,
-                          textInputAction: TextInputAction.done,
-                          autofillHints: const [AutofillHints.password],
-                          onChanged: (_) => _clearErrorOnEdit(),
-                          onFieldSubmitted: (_) => unawaited(_submit()),
-                          suffixIcon: IconButton(
-                            tooltip: _showPassword ? '隐藏密码' : '显示密码',
-                            onPressed: _isSubmitting || _loginSucceeded
-                                ? null
-                                : () {
-                                    setState(
-                                      () => _showPassword = !_showPassword,
-                                    );
-                                  },
-                            icon: Icon(
-                              _showPassword
-                                  ? Icons.visibility_off
-                                  : Icons.visibility,
-                              color: const Color(0xFFA0A8B9),
-                            ),
-                          ),
-                          validator: (value) {
-                            if ((value ?? '').isEmpty) {
-                              return '请输入密码';
-                            }
-                            return null;
+                        ValueListenableBuilder<bool>(
+                          valueListenable: _showPassword,
+                          builder: (context, showPassword, _) {
+                            return AppTextField(
+                              label: '密码',
+                              controller: _passwordController,
+                              focusNode: _passwordFocusNode,
+                              hint: '请输入 root 密码',
+                              obscureText: !showPassword,
+                              enabled: !_isSubmitting && !_loginSucceeded,
+                              textInputAction: TextInputAction.done,
+                              autofillHints: const [AutofillHints.password],
+                              onChanged: (_) => _clearErrorOnEdit(),
+                              onFieldSubmitted: (_) => unawaited(_submit()),
+                              suffixIcon: IconButton(
+                                tooltip: showPassword ? '隐藏密码' : '显示密码',
+                                onPressed: _isSubmitting || _loginSucceeded
+                                    ? null
+                                    : () {
+                                        _showPassword.value = !showPassword;
+                                      },
+                                icon: Icon(
+                                  showPassword
+                                      ? Icons.visibility_off
+                                      : Icons.visibility,
+                                  color: const Color(0xFFA0A8B9),
+                                ),
+                              ),
+                              validator: (value) {
+                                if ((value ?? '').isEmpty) {
+                                  return '请输入密码';
+                                }
+                                return null;
+                              },
+                            );
                           },
                         ),
                         const SizedBox(height: 18),

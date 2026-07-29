@@ -11,6 +11,7 @@ class ManagementData {
     required this.progress,
     required this.tags,
     required this.details,
+    required this.isRunning,
   });
 
   factory ManagementData.fromClient(UnraidManagementItem item, IconData icon) {
@@ -24,6 +25,8 @@ class ManagementData {
       progress: item.progress,
       tags: item.tags,
       details: item.details,
+      // Resolve once at map time so list cards/stats skip status string scans.
+      isRunning: _isRunningStatus(item.status),
     );
   }
 
@@ -36,6 +39,7 @@ class ManagementData {
   final double progress;
   final List<String> tags;
   final List<UnraidInfoItem> details;
+  final bool isRunning;
 }
 
 class _ManagementPage extends StatefulWidget {
@@ -63,7 +67,8 @@ class _ManagementPageState extends State<_ManagementPage> {
   final ValueNotifier<Set<String>> _submittingIds =
       ValueNotifier<Set<String>>(const <String>{});
   Timer? _searchDebounce;
-  String _query = '';
+  /// Search query is isolated so typing does not rebuild stats/header chrome.
+  final ValueNotifier<String> _query = ValueNotifier<String>('');
   List<ManagementData>? _filterItemsRef;
   String _filterQueryRef = '';
   List<ManagementData> _filteredItemsCached = const <ManagementData>[];
@@ -77,6 +82,7 @@ class _ManagementPageState extends State<_ManagementPage> {
     _searchDebounce?.cancel();
     _searchController.dispose();
     _submittingIds.dispose();
+    _query.dispose();
     super.dispose();
   }
 
@@ -86,7 +92,7 @@ class _ManagementPageState extends State<_ManagementPage> {
       if (!mounted) {
         return;
       }
-      setState(() => _query = value.trim().toLowerCase());
+      _query.value = value.trim().toLowerCase();
     });
   }
 
@@ -106,14 +112,14 @@ class _ManagementPageState extends State<_ManagementPage> {
     ];
   }
 
-  List<ManagementData> get _filteredItems {
+  List<ManagementData> _filteredItemsFor(String query) {
     if (identical(_filterItemsRef, widget.items) &&
-        _filterQueryRef == _query) {
+        _filterQueryRef == query) {
       return _filteredItemsCached;
     }
     _filterItemsRef = widget.items;
-    _filterQueryRef = _query;
-    if (_query.isEmpty) {
+    _filterQueryRef = query;
+    if (query.isEmpty) {
       _filteredItemsCached = widget.items;
       _filteredIndexById = {
         for (var i = 0; i < widget.items.length; i++) widget.items[i].id: i,
@@ -124,7 +130,7 @@ class _ManagementPageState extends State<_ManagementPage> {
     final filtered = <ManagementData>[];
     final indexById = <String, int>{};
     for (var i = 0; i < widget.items.length; i++) {
-      if (_searchHaystacks[i].contains(_query)) {
+      if (_searchHaystacks[i].contains(query)) {
         final item = widget.items[i];
         indexById[item.id] = filtered.length;
         filtered.add(item);
@@ -137,123 +143,140 @@ class _ManagementPageState extends State<_ManagementPage> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredItems = _filteredItems;
-
-    // Virtualized list: large Docker/share fleets must not build every card
-    // inside a SingleChildScrollView.
-    final scrollView = CustomScrollView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
-          sliver: SliverToBoxAdapter(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _ManagementStats(
-                  type: widget.type,
-                  dashboard: widget.dashboard,
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _searchController,
-                        onChanged: _onSearchChanged,
-                        decoration: InputDecoration(
-                          hintText: '搜索${widget.type}项目',
-                          prefixIcon: const Icon(Icons.search),
-                          contentPadding:
-                              const EdgeInsets.symmetric(horizontal: 12),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _CompactActionButton(
-                      icon: Icons.sync,
-                      label: '刷新',
-                      onPressed: widget.onRefresh ??
-                          () => _showMessage('${widget.type}刷新已提交'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-              ],
-            ),
+    // Stats + search field stay outside the query listener so typing only
+    // rebuilds the virtualized result list below.
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ManagementStats(
+            type: widget.type,
+            dashboard: widget.dashboard,
+            items: widget.items,
           ),
-        ),
-        if (widget.items.isEmpty)
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
-              child: _StateMessage(
-                icon: Icons.inbox_outlined,
-                title: '${widget.type}为空',
-                message: '服务器当前没有返回${widget.type}项目。',
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _onSearchChanged,
+                  decoration: InputDecoration(
+                    hintText: '搜索${widget.type}项目',
+                    prefixIcon: const Icon(Icons.search),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                  ),
+                ),
               ),
-            ),
-          )
-        else if (filteredItems.isEmpty)
-          const SliverFillRemaining(
-            hasScrollBody: false,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(20, 0, 20, 86),
-              child: _StateMessage(
-                icon: Icons.search_off,
-                title: '没有匹配项',
-                message: '换一个关键词试试。',
+              const SizedBox(width: 8),
+              _CompactActionButton(
+                icon: Icons.sync,
+                label: '刷新',
+                onPressed: widget.onRefresh ??
+                    () => _showMessage('${widget.type}刷新已提交'),
               ),
-            ),
-          )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
-            sliver: SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, index) {
-                  final item = filteredItems[index];
-                  return RepaintBoundary(
-                    key: ValueKey<String>(item.id),
-                    child: ValueListenableBuilder<Set<String>>(
-                      valueListenable: _submittingIds,
-                      builder: (context, submitting, _) {
-                        return _ManagementCard(
-                          item: item,
-                          isSubmitting: submitting.contains(item.id),
-                          onTap: () => _openDetail(item),
-                          onAction: item.type == ManagementItemType.share
-                              ? null
-                              : (action) => _runAction(item, action),
-                        );
-                      },
-                    ),
-                  );
-                },
-                childCount: filteredItems.length,
-                // Cards are fixed-ish height; avoid keep-alive overhead for
-                // long Docker/share fleets.
-                addAutomaticKeepAlives: false,
-                findChildIndexCallback: (Key key) {
-                  if (key is! ValueKey<String>) {
-                    return null;
-                  }
-                  return _filteredIndexById[key.value];
-                },
-              ),
-            ),
+            ],
           ),
-      ],
+          const SizedBox(height: 14),
+        ],
+      ),
     );
 
+    final results = ValueListenableBuilder<String>(
+      valueListenable: _query,
+      builder: (context, query, _) {
+        Widget body;
+        if (widget.items.isEmpty) {
+          body = CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
+                  child: _StateMessage(
+                    icon: Icons.inbox_outlined,
+                    title: '${widget.type}为空',
+                    message: '服务器当前没有返回${widget.type}项目。',
+                  ),
+                ),
+              ),
+            ],
+          );
+        } else {
+          final filteredItems = _filteredItemsFor(query);
+          if (filteredItems.isEmpty) {
+            body = CustomScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: const [
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(20, 0, 20, 86),
+                    child: _StateMessage(
+                      icon: Icons.search_off,
+                      title: '没有匹配项',
+                      message: '换一个关键词试试。',
+                    ),
+                  ),
+                ),
+              ],
+            );
+          } else {
+            body = ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 86),
+              itemCount: filteredItems.length,
+              findChildIndexCallback: (Key key) {
+                if (key is! ValueKey<String>) {
+                  return null;
+                }
+                return _filteredIndexById[key.value];
+              },
+              itemBuilder: (context, index) {
+                final item = filteredItems[index];
+                return RepaintBoundary(
+                  key: ValueKey<String>(item.id),
+                  child: ValueListenableBuilder<Set<String>>(
+                    valueListenable: _submittingIds,
+                    builder: (context, submitting, _) {
+                      return _ManagementCard(
+                        item: item,
+                        isSubmitting: submitting.contains(item.id),
+                        onTap: () => _openDetail(item),
+                        onAction: item.type == ManagementItemType.share
+                            ? null
+                            : (action) => _runAction(item, action),
+                      );
+                    },
+                  ),
+                );
+              },
+            );
+          }
+        }
+
+        if (widget.onRefresh == null) {
+          return body;
+        }
+        return RefreshIndicator(
+          onRefresh: () async => widget.onRefresh!(),
+          child: body,
+        );
+      },
+    );
+
+    // No entrance animation: management lists rebuild on search/refresh.
     return FadeSlide(
-      child: widget.onRefresh == null
-          ? scrollView
-          : RefreshIndicator(
-              onRefresh: () async => widget.onRefresh!(),
-              child: scrollView,
-            ),
+      animate: false,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          Expanded(child: results),
+        ],
+      ),
     );
   }
 
@@ -327,36 +350,31 @@ class _ManagementStats extends StatefulWidget {
   const _ManagementStats({
     required this.type,
     required this.dashboard,
+    required this.items,
   });
 
   final String type;
   final UnraidDashboard dashboard;
+  final List<ManagementData> items;
 
   @override
   State<_ManagementStats> createState() => _ManagementStatsState();
 }
 
 class _ManagementStatsState extends State<_ManagementStats> {
-  List<UnraidManagementItem>? _itemsRef;
-  String? _typeRef;
+  List<ManagementData>? _itemsRef;
   int _runningCached = 0;
   int _totalCached = 0;
 
   void _ensureRunningStats() {
-    final items = switch (widget.type) {
-      'Docker' => widget.dashboard.dockerItems,
-      '虚拟机' => widget.dashboard.vmItems,
-      _ => widget.dashboard.shareItems,
-    };
-    if (identical(_itemsRef, items) && _typeRef == widget.type) {
+    if (identical(_itemsRef, widget.items)) {
       return;
     }
-    _itemsRef = items;
-    _typeRef = widget.type;
-    _totalCached = items.length;
+    _itemsRef = widget.items;
+    _totalCached = widget.items.length;
     var running = 0;
-    for (final item in items) {
-      if (_isRunningStatus(item.status)) {
+    for (final item in widget.items) {
+      if (item.isRunning) {
         running += 1;
       }
     }
@@ -428,7 +446,7 @@ class _ManagementCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final running = _isRunningStatus(item.status);
+    final running = item.isRunning;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Material(

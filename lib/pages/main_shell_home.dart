@@ -24,7 +24,9 @@ class _ServerInfoPage extends StatelessWidget {
     final body = SingleChildScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 86),
+      // Home re-publishes on soft dashboard refresh; skip entrance animation.
       child: FadeSlide(
+        animate: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

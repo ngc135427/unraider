@@ -24,6 +24,8 @@ class _MusicScaffold extends StatelessWidget {
               : const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(30, 12, 30, 30),
           child: FadeSlide(
+            // Library summary rebuilds on search; skip re-entrance animation.
+            animate: false,
             child: child!,
           ),
         );
@@ -403,10 +405,7 @@ class _TrackTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final icon = track.name.toLowerCase().endsWith('.flac') ||
-            track.name.toLowerCase().endsWith('.wav')
-        ? Icons.high_quality
-        : Icons.music_note;
+    final icon = track.isLossless ? Icons.high_quality : Icons.music_note;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),

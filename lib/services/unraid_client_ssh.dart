@@ -67,6 +67,7 @@ List<List<Object?>> _parseSshDirectoryListingRows(
     final modifiedMs = modifiedSeconds > 0 ? modifiedSeconds * 1000 : 0;
     final path =
         rawPath.startsWith('/') ? rawPath : _joinPath(parentPath, rawPath);
+    final nameLower = rawName.toLowerCase();
     rows.add(<Object?>[
       rawName,
       path,
@@ -79,6 +80,8 @@ List<List<Object?>> _parseSshDirectoryListingRows(
           ? _formatDate(DateTime.fromMillisecondsSinceEpoch(modifiedMs))
           : _formatDate(DateTime.fromMillisecondsSinceEpoch(0)),
       modifiedMs,
+      // Precomputed sort key so n log n comparisons skip toLowerCase.
+      nameLower,
     ]);
   }
 
@@ -88,7 +91,7 @@ List<List<Object?>> _parseSshDirectoryListingRows(
     if (aDir != bDir) {
       return aDir ? -1 : 1;
     }
-    return (a[0] as String).toLowerCase().compareTo((b[0] as String).toLowerCase());
+    return (a[7] as String).compareTo(b[7] as String);
   });
   return rows;
 }
@@ -132,6 +135,57 @@ Future<List<UnraidFileEntry>> parseSshDirectoryListingAsync(
   }
 
   final rows = await Isolate.run(() {
+    final parsed = _parseSshDirectoryListingRows(output, parentPath);
+    if (!mediaOnly) {
+      return parsed;
+    }
+    final entries = _entriesFromListingRows(parsed);
+    final filtered = _filterMediaEntries(
+      entries,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      includeAudio: includeAudio,
+    );
+    return [
+      for (final entry in filtered)
+        <Object?>[
+          entry.name,
+          entry.path,
+          entry.isDirectory,
+          entry.sizeBytes,
+          entry.size,
+          entry.modified,
+          entry.modifiedDate?.millisecondsSinceEpoch ?? 0,
+        ],
+    ];
+  });
+  return _entriesFromListingRows(rows);
+}
+
+/// Decode raw SSH stdout and parse listing rows together on a background
+/// isolate for large payloads (avoids a main-isolate utf8 decode).
+Future<List<UnraidFileEntry>> parseSshDirectoryListingBytesAsync(
+  Uint8List outputBytes,
+  String parentPath, {
+  bool mediaOnly = false,
+  bool includeImages = true,
+  bool includeVideos = true,
+  bool includeAudio = false,
+}) async {
+  if (outputBytes.length < _sshListingIsolateThresholdBytes) {
+    final output = utf8.decode(outputBytes, allowMalformed: true);
+    return parseSshDirectoryListingAsync(
+      output,
+      parentPath,
+      mediaOnly: mediaOnly,
+      includeImages: includeImages,
+      includeVideos: includeVideos,
+      includeAudio: includeAudio,
+    );
+  }
+
+  final rows = await Isolate.run(() {
+    final output = utf8.decode(outputBytes, allowMalformed: true);
     final parsed = _parseSshDirectoryListingRows(output, parentPath);
     if (!mediaOnly) {
       return parsed;
@@ -384,6 +438,8 @@ bool _isValidRemoteName(String name) {
       !name.contains('\u0000');
 }
 
+final _multiSlashRegex = RegExp(r'/+');
+
 String _normalizeUnraidPath(String path) {
   var normalized = path.trim().replaceAll('\\', '/');
   if (normalized.isEmpty) {
@@ -392,7 +448,8 @@ String _normalizeUnraidPath(String path) {
   if (!normalized.startsWith('/')) {
     normalized = '/$normalized';
   }
-  normalized = normalized.replaceAll(RegExp(r'/+'), '/');
+  // Collapse repeated slashes with a shared compiled pattern.
+  normalized = normalized.replaceAll(_multiSlashRegex, '/');
   while (normalized.length > 1 && normalized.endsWith('/')) {
     normalized = normalized.substring(0, normalized.length - 1);
   }
@@ -608,11 +665,54 @@ Future<Uint8List> _readRemoteFileViaSsh({
   }
 }
 
+@visibleForTesting
+bool looksLikeLoginPage(String body) => _looksLikeLoginPage(body);
+
 bool _looksLikeLoginPage(String body) {
-  final lower = body.toLowerCase();
-  return lower.contains('name="username"') &&
-      lower.contains('name="password"') &&
-      (lower.contains('/login') || lower.contains('unraid_login'));
+  // Avoid lowercasing multi-hundred-KB HTML bodies on every WebGUI response.
+  // Attribute names and paths are ASCII in Unraid login pages.
+  final hasUsername = body.contains('name="username"') ||
+      body.contains("name='username'") ||
+      body.contains('NAME="username"') ||
+      body.contains("NAME='username'");
+  if (!hasUsername) {
+    return false;
+  }
+  final hasPassword = body.contains('name="password"') ||
+      body.contains("name='password'") ||
+      body.contains('NAME="password"') ||
+      body.contains("NAME='password'");
+  if (!hasPassword) {
+    return false;
+  }
+  // Path markers are short ASCII tokens; case-insensitive scan without full copy.
+  return _containsIgnoreCaseAscii(body, '/login') ||
+      _containsIgnoreCaseAscii(body, 'unraid_login');
+}
+
+bool _containsIgnoreCaseAscii(String haystack, String needle) {
+  if (needle.isEmpty || haystack.length < needle.length) {
+    return false;
+  }
+  final needleLower = needle.toLowerCase();
+  final limit = haystack.length - needle.length;
+  for (var i = 0; i <= limit; i++) {
+    var matched = true;
+    for (var j = 0; j < needle.length; j++) {
+      final hc = haystack.codeUnitAt(i + j);
+      final nc = needleLower.codeUnitAt(j);
+      // ASCII case fold: A-Z -> a-z
+      final folded = hc >= 65 && hc <= 90 ? hc + 32 : hc;
+      if (folded != nc) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Map<String, dynamic>? _findNestedMap(Object? value, List<String> path) {

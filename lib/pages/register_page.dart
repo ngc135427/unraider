@@ -67,6 +67,7 @@ class _RegisterPageState extends State<RegisterPage> {
                 borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
               ),
               child: FadeSlide(
+                animate: false,
                 child: Form(
                   key: _formKey,
                   child: Column(

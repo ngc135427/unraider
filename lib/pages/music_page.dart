@@ -29,11 +29,26 @@ const _musicLibraryCacheTtl = Duration(minutes: 3);
 const _maxMusicLibraryCacheEntries = 8;
 
 void _storeMusicLibraryCache(String key, _MusicLibraryCacheEntry entry) {
-  if (_musicLibraryCache.length >= _maxMusicLibraryCacheEntries &&
-      !_musicLibraryCache.containsKey(key)) {
+  _musicLibraryCache.remove(key);
+  if (_musicLibraryCache.length >= _maxMusicLibraryCacheEntries) {
     _musicLibraryCache.remove(_musicLibraryCache.keys.first);
   }
   _musicLibraryCache[key] = entry;
+}
+
+_MusicLibraryCacheEntry? _readMusicLibraryCache(String key) {
+  final cached = _musicLibraryCache[key];
+  if (cached == null) {
+    return null;
+  }
+  if (DateTime.now().difference(cached.fetchedAt) >= _musicLibraryCacheTtl) {
+    _musicLibraryCache.remove(key);
+    return null;
+  }
+  // LRU touch for frequently reopened libraries.
+  _musicLibraryCache.remove(key);
+  _musicLibraryCache[key] = cached;
+  return cached;
 }
 
 class MusicPageArgs {
@@ -63,7 +78,8 @@ class _MusicPageState extends State<MusicPage> {
   bool _loadingTracks = false;
   int _loadGeneration = 0;
   String? _error;
-  String _query = '';
+  /// Search query is isolated so typing does not rebuild summary/now-playing.
+  final ValueNotifier<String> _query = ValueNotifier<String>('');
   Timer? _searchDebounce;
   UnraidFileEntry? _currentTrack;
 
@@ -100,12 +116,7 @@ class _MusicPageState extends State<MusicPage> {
     var lossless = 0;
     for (final track in _tracks) {
       albums.add(_albumName(track.path, _rootPath));
-      final lower = track.name.toLowerCase();
-      if (lower.endsWith('.flac') ||
-          lower.endsWith('.wav') ||
-          lower.endsWith('.aiff') ||
-          lower.endsWith('.alac') ||
-          lower.endsWith('.ape')) {
+      if (track.isLossless) {
         lossless += 1;
       }
     }
@@ -122,12 +133,12 @@ class _MusicPageState extends State<MusicPage> {
     _haystackRootRef = _rootPath;
     _searchHaystacks = [
       for (final track in _tracks)
-        '${track.name.toLowerCase()} ${_albumName(track.path, _rootPath).toLowerCase()}',
+        '${track.nameLower} ${_albumName(track.path, _rootPath).toLowerCase()}',
     ];
   }
 
-  List<UnraidFileEntry> get _filteredTracks {
-    final query = _query.trim().toLowerCase();
+  List<UnraidFileEntry> _filteredTracksFor(String rawQuery) {
+    final query = rawQuery.trim().toLowerCase();
     if (identical(_filterTracksRef, _tracks) &&
         _filterRootRef == _rootPath &&
         _filterQueryRef == query) {
@@ -164,6 +175,7 @@ class _MusicPageState extends State<MusicPage> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _query.dispose();
     super.dispose();
   }
 
@@ -196,9 +208,8 @@ class _MusicPageState extends State<MusicPage> {
     }
 
     if (!force) {
-      final cached = _musicLibraryCache[_cacheKey];
-      if (cached != null &&
-          DateTime.now().difference(cached.fetchedAt) < _musicLibraryCacheTtl) {
+      final cached = _readMusicLibraryCache(_cacheKey);
+      if (cached != null) {
         setState(() {
           _rootPath = cached.rootPath;
           _tracks = cached.tracks;
@@ -304,7 +315,7 @@ class _MusicPageState extends State<MusicPage> {
       if (!mounted) {
         return;
       }
-      setState(() => _query = value);
+      _query.value = value;
     });
   }
 
@@ -352,7 +363,6 @@ class _MusicPageState extends State<MusicPage> {
 
   @override
   Widget build(BuildContext context) {
-    final tracks = _filteredTracks;
     final current = _currentTrack;
 
     return _MusicScaffold(
@@ -402,36 +412,49 @@ class _MusicPageState extends State<MusicPage> {
               actionLabel: '重试',
               onAction: () => _loadTracks(force: true),
             )
-          else if (tracks.isEmpty)
-            _MusicState(
-              icon: Icons.queue_music,
-              title: '暂无音频文件',
-              detail:
-                  '请在 $_rootPath 或其常见子目录中放入 mp3 / flac 等音频文件后刷新。',
-              actionLabel: '刷新',
-              onAction: () => _loadTracks(force: true),
-            )
-          else ...[
-            for (final track in tracks.take(20))
-              RepaintBoundary(
-                key: ValueKey<String>(track.path),
-                child: _TrackTile(
-                  track: track,
-                  album: _albumName(track.path, _rootPath),
-                  selected: current?.path == track.path,
-                  onTap: () => _openPlayer(track),
-                ),
-              ),
-            if (tracks.length > 20) ...[
-              const SizedBox(height: 8),
-              Center(
-                child: TextButton(
-                  onPressed: _openTracksPage,
-                  child: Text('查看全部 ${tracks.length} 首'),
-                ),
-              ),
-            ],
-          ],
+          else
+            ValueListenableBuilder<String>(
+              valueListenable: _query,
+              builder: (context, query, _) {
+                final tracks = _filteredTracksFor(query);
+                if (tracks.isEmpty) {
+                  return _MusicState(
+                    icon: Icons.queue_music,
+                    title: query.trim().isEmpty ? '暂无音频文件' : '没有匹配的歌曲',
+                    detail: query.trim().isEmpty
+                        ? '请在 $_rootPath 或其常见子目录中放入 mp3 / flac 等音频文件后刷新。'
+                        : '试试其他关键词',
+                    actionLabel: query.trim().isEmpty ? '刷新' : null,
+                    onAction: query.trim().isEmpty
+                        ? () => _loadTracks(force: true)
+                        : null,
+                  );
+                }
+                return Column(
+                  children: [
+                    for (final track in tracks.take(20))
+                      RepaintBoundary(
+                        key: ValueKey<String>(track.path),
+                        child: _TrackTile(
+                          track: track,
+                          album: _albumName(track.path, _rootPath),
+                          selected: current?.path == track.path,
+                          onTap: () => _openPlayer(track),
+                        ),
+                      ),
+                    if (tracks.length > 20) ...[
+                      const SizedBox(height: 8),
+                      Center(
+                        child: TextButton(
+                          onPressed: _openTracksPage,
+                          child: Text('查看全部 ${tracks.length} 首'),
+                        ),
+                      ),
+                    ],
+                  ],
+                );
+              },
+            ),
         ],
       ),
     );
@@ -459,7 +482,7 @@ class MusicTracksPage extends StatefulWidget {
 }
 
 class _MusicTracksPageState extends State<MusicTracksPage> {
-  String _query = '';
+  final ValueNotifier<String> _query = ValueNotifier<String>('');
   Timer? _searchDebounce;
   String _filterQueryRef = '';
   List<UnraidFileEntry>? _filterTracksRef;
@@ -478,12 +501,12 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
     _haystackRootRef = widget.rootPath;
     _searchHaystacks = [
       for (final track in widget.tracks)
-        '${track.name.toLowerCase()} ${_albumName(track.path, widget.rootPath).toLowerCase()}',
+        '${track.nameLower} ${_albumName(track.path, widget.rootPath).toLowerCase()}',
     ];
   }
 
-  List<UnraidFileEntry> get _filtered {
-    final query = _query.trim().toLowerCase();
+  List<UnraidFileEntry> _filteredFor(String rawQuery) {
+    final query = rawQuery.trim().toLowerCase();
     if (identical(_filterTracksRef, widget.tracks) &&
         _filterRootRef == widget.rootPath &&
         _filterQueryRef == query) {
@@ -510,6 +533,7 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _query.dispose();
     super.dispose();
   }
 
@@ -519,18 +543,18 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
       if (!mounted) {
         return;
       }
-      setState(() => _query = value);
+      _query.value = value;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final tracks = _filtered;
     return _MusicScaffold(
       title: '歌曲',
       // Virtualized body: large libraries must not expand inside a
       // SingleChildScrollView or every tile is built up front.
       body: FadeSlide(
+        animate: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -543,45 +567,57 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
                     onChanged: _onSearchChanged,
                   ),
                   const SizedBox(height: 18),
-                  Text(
-                    '全部歌曲 · ${tracks.length}',
-                    style: const TextStyle(
-                      color: AppTheme.textDark,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  ValueListenableBuilder<String>(
+                    valueListenable: _query,
+                    builder: (context, query, _) {
+                      final tracks = _filteredFor(query);
+                      return Text(
+                        '全部歌曲 · ${tracks.length}',
+                        style: const TextStyle(
+                          color: AppTheme.textDark,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 12),
                 ],
               ),
             ),
             Expanded(
-              child: tracks.isEmpty
-                  ? const Padding(
+              child: ValueListenableBuilder<String>(
+                valueListenable: _query,
+                builder: (context, query, _) {
+                  final tracks = _filteredFor(query);
+                  if (tracks.isEmpty) {
+                    return const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 30),
                       child: _MusicState(
                         icon: Icons.search_off,
                         title: '没有匹配的歌曲',
                         detail: '试试其他关键词',
                       ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
-                      itemCount: tracks.length,
-                      itemBuilder: (context, index) {
-                        final track = tracks[index];
-                        return RepaintBoundary(
-                          key: ValueKey<String>(track.path),
-                          child: _TrackTile(
-                            track: track,
-                            album: _albumName(track.path, widget.rootPath),
-                            selected:
-                                widget.currentTrack?.path == track.path,
-                            onTap: () => widget.onSelect(track),
-                          ),
-                        );
-                      },
-                    ),
+                    );
+                  }
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
+                    itemCount: tracks.length,
+                    itemBuilder: (context, index) {
+                      final track = tracks[index];
+                      return RepaintBoundary(
+                        key: ValueKey<String>(track.path),
+                        child: _TrackTile(
+                          track: track,
+                          album: _albumName(track.path, widget.rootPath),
+                          selected: widget.currentTrack?.path == track.path,
+                          onTap: () => widget.onSelect(track),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
           ],
         ),
@@ -633,6 +669,7 @@ class MusicPlayerPage extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(30, 20, 30, 34),
               child: FadeSlide(
+                animate: false,
                 child: Column(
                   children: [
                     Expanded(
@@ -689,7 +726,9 @@ class MusicPlayerPage extends StatelessWidget {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      track.size.isEmpty ? track.path : '${track.size} · ${track.path}',
+                      track.size.isEmpty
+                          ? track.path
+                          : '${track.size} · ${track.path}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,

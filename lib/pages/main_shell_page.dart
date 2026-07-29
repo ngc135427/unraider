@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -51,10 +52,13 @@ class _MainShellPageState extends State<MainShellPage>
   /// without hammering WebGUI on every brief app switch.
   static const _resumeSoftRefreshMinInterval = Duration(seconds: 20);
 
-  int _currentIndex = 0;
+  /// Bottom-nav index is isolated so tab switches do not rebuild PhoneFrame chrome.
+  final ValueNotifier<int> _currentIndex = ValueNotifier<int>(0);
   /// Only build bottom-nav pages after first visit so Docker/VM/share lists
   /// are not constructed while the user stays on Home.
   final Set<int> _visitedTabs = <int>{0};
+  /// Bumped when a lazy tab is first visited so IndexedStack children update.
+  final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
   ServerIconVariant _serverIcon = ServerIconVariant.defaultIcon;
   UnraidClient? _unraidClient;
   UnraidDashboard? _lastDashboard;
@@ -92,6 +96,8 @@ class _MainShellPageState extends State<MainShellPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _currentIndex.dispose();
+    _visitedTabsVersion.dispose();
     _dashboard.dispose();
     _dashboardRefreshing.dispose();
     _unraidClient?.close();
@@ -158,10 +164,15 @@ class _MainShellPageState extends State<MainShellPage>
                   left: 0,
                   right: 0,
                   bottom: 0,
-                  child: AppBottomNav(
-                    items: _navItems,
-                    currentIndex: _currentIndex,
-                    onChanged: _selectTab,
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: _currentIndex,
+                    builder: (context, index, _) {
+                      return AppBottomNav(
+                        items: _navItems,
+                        currentIndex: index,
+                        onChanged: _selectTab,
+                      );
+                    },
                   ),
                 ),
               ],
@@ -173,13 +184,15 @@ class _MainShellPageState extends State<MainShellPage>
   }
 
   void _selectTab(int index) {
-    if (_currentIndex == index && _visitedTabs.contains(index)) {
+    final alreadyVisited = _visitedTabs.contains(index);
+    if (_currentIndex.value == index && alreadyVisited) {
       return;
     }
-    setState(() {
-      _currentIndex = index;
-      _visitedTabs.add(index);
-    });
+    final isNewVisit = _visitedTabs.add(index);
+    _currentIndex.value = index;
+    if (isNewVisit) {
+      _visitedTabsVersion.value += 1;
+    }
   }
 
   Widget _buildContent() {
@@ -202,17 +215,28 @@ class _MainShellPageState extends State<MainShellPage>
             children: [
               // Lazy + sticky tabs: first visit builds the page; later switches
               // keep search text / scroll without building unused tabs on boot.
-              IndexedStack(
-                index: _currentIndex,
-                children: [
-                  for (var i = 0; i < _navItems.length; i++)
-                    _visitedTabs.contains(i)
-                        ? KeyedSubtree(
-                            key: ValueKey<String>('shell-tab-$i'),
-                            child: _buildTabPage(i, resolved),
-                          )
-                        : const SizedBox.shrink(),
-                ],
+              // Tab index / first-visit are notifiers so switches skip setState.
+              ValueListenableBuilder<int>(
+                valueListenable: _visitedTabsVersion,
+                builder: (context, _, __) {
+                  return ValueListenableBuilder<int>(
+                    valueListenable: _currentIndex,
+                    builder: (context, index, ___) {
+                      return IndexedStack(
+                        index: index,
+                        children: [
+                          for (var i = 0; i < _navItems.length; i++)
+                            _visitedTabs.contains(i)
+                                ? KeyedSubtree(
+                                    key: ValueKey<String>('shell-tab-$i'),
+                                    child: _buildTabPage(i, resolved),
+                                  )
+                                : const SizedBox.shrink(),
+                        ],
+                      );
+                    },
+                  );
+                },
               ),
               // Isolate spinner rebuilds from tab content rebuilds.
               Positioned(

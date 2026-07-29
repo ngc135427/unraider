@@ -40,16 +40,20 @@ Future<List<UnraidManagementItem>> _parseManagementItemsAsync(
   return _managementItemsFromRows(rows);
 }
 
+final _dockerPushRegex = RegExp(
+  r'''docker\.push\(\{name:'((?:\\'|[^'])*)',id:'([^']*)',state:(\d+),pause:(\d+),update:(\d+)''',
+);
+final _kvmStateRegex =
+    RegExp(r'''kvm\.push\(\{id:'([^']*)',state:'([^']*)'\}\);''');
+final _vmContextRegex = RegExp(r"addVMContext\('((?:\\'|[^'])*)','([^']*)'");
+
 /// Row layout: id, title, status, description, typeIndex, detail, tags.
 List<List<Object?>> _parseDockerItemRows(String body) {
   final rows = <List<Object?>>[];
   final nul = body.indexOf('\u0000');
   final script = nul >= 0 ? body.substring(nul + 1) : body;
-  final regex = RegExp(
-    r'''docker\.push\(\{name:'((?:\\'|[^'])*)',id:'([^']*)',state:(\d+),pause:(\d+),update:(\d+)''',
-  );
 
-  for (final match in regex.allMatches(script)) {
+  for (final match in _dockerPushRegex.allMatches(script)) {
     final name = _decodeJsString(match.group(1) ?? '');
     final id = match.group(2) ?? name;
     final isRunning = match.group(3) == '1';
@@ -78,16 +82,13 @@ List<List<Object?>> _parseVmItemRows(String body) {
   final html = parts.isNotEmpty ? parts.first : body;
   final script = parts.length > 1 ? parts.last : body;
   final states = <String, String>{};
-  final stateRegex =
-      RegExp(r'''kvm\.push\(\{id:'([^']*)',state:'([^']*)'\}\);''');
-  for (final match in stateRegex.allMatches(script)) {
+  for (final match in _kvmStateRegex.allMatches(script)) {
     states[match.group(1) ?? ''] = match.group(2) ?? '';
   }
 
   final rows = <List<Object?>>[];
   final seen = <String>{};
-  final nameRegex = RegExp(r"addVMContext\('((?:\\'|[^'])*)','([^']*)'");
-  for (final match in nameRegex.allMatches(html)) {
+  for (final match in _vmContextRegex.allMatches(html)) {
     final name = _decodeJsString(match.group(1) ?? '');
     final uuid = match.group(2) ?? name;
     seen.add(uuid);

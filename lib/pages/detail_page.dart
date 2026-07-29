@@ -76,6 +76,7 @@ class DetailPage extends StatelessWidget {
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(30, 30, 30, 30),
                 child: FadeSlide(
+                  animate: false,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [

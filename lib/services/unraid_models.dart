@@ -241,19 +241,54 @@ class UnraidNotification {
 }
 
 class UnraidFileEntry {
-  UnraidFileEntry({
+  factory UnraidFileEntry({
+    required String name,
+    required String path,
+    required bool isDirectory,
+    required int sizeBytes,
+    required String size,
+    required String modified,
+    required DateTime? modifiedDate,
+  }) {
+    final nameLower = name.toLowerCase();
+    return UnraidFileEntry._(
+      name: name,
+      nameLower: nameLower,
+      path: path,
+      isDirectory: isDirectory,
+      sizeBytes: sizeBytes,
+      size: size,
+      modified: modified,
+      modifiedDate: modifiedDate,
+      isImage:
+          !isDirectory && _nameHasExtensionLower(nameLower, _imageExtensions),
+      isVideo:
+          !isDirectory && _nameHasExtensionLower(nameLower, _videoExtensions),
+      isAudio:
+          !isDirectory && _nameHasExtensionLower(nameLower, _audioExtensions),
+      isLossless: !isDirectory &&
+          _nameHasExtensionLower(nameLower, _losslessAudioExtensions),
+    );
+  }
+
+  const UnraidFileEntry._({
     required this.name,
+    required this.nameLower,
     required this.path,
     required this.isDirectory,
     required this.sizeBytes,
     required this.size,
     required this.modified,
     required this.modifiedDate,
-  })  : isImage = !isDirectory && _nameHasExtension(name, _imageExtensions),
-        isVideo = !isDirectory && _nameHasExtension(name, _videoExtensions),
-        isAudio = !isDirectory && _nameHasExtension(name, _audioExtensions);
+    required this.isImage,
+    required this.isVideo,
+    required this.isAudio,
+    required this.isLossless,
+  });
 
   final String name;
+  /// Cached lowercase name for search haystacks and extension checks.
+  final String nameLower;
   final String path;
   final bool isDirectory;
   final int sizeBytes;
@@ -266,14 +301,15 @@ class UnraidFileEntry {
   final bool isImage;
   final bool isVideo;
   final bool isAudio;
+  /// True for flac/wav/aiff/alac/ape — used by music library stats/tiles.
+  final bool isLossless;
 
   bool get isMedia => isImage || isVideo || isAudio;
 }
 
-bool _nameHasExtension(String name, List<String> extensions) {
-  final lower = name.toLowerCase();
+bool _nameHasExtensionLower(String nameLower, List<String> extensions) {
   for (final extension in extensions) {
-    if (lower.endsWith(extension)) {
+    if (nameLower.endsWith(extension)) {
       return true;
     }
   }
@@ -311,5 +347,13 @@ const _audioExtensions = <String>[
   '.aiff',
   '.ape',
   '.alac',
+];
+
+const _losslessAudioExtensions = <String>[
+  '.flac',
+  '.wav',
+  '.aiff',
+  '.alac',
+  '.ape',
 ];
 

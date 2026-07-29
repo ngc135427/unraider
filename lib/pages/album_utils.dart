@@ -66,25 +66,58 @@ List<LocalMediaAsset> _findPendingUploads({
 
 List<_LocalSection> _groupLocalByDate(List<LocalMediaAsset> media) {
   final buckets = <String, List<LocalMediaAsset>>{};
+  final sortKeys = <String, DateTime>{};
   for (final asset in media) {
+    final day = DateTime(
+      asset.dateModified.year,
+      asset.dateModified.month,
+      asset.dateModified.day,
+    );
     final title = _dateTitle(asset.dateModified);
     buckets.putIfAbsent(title, () => <LocalMediaAsset>[]).add(asset);
+    // Keep the newest day key so sections sort newest-first.
+    final existing = sortKeys[title];
+    if (existing == null || day.isAfter(existing)) {
+      sortKeys[title] = day;
+    }
   }
-  return buckets.entries
-      .map((entry) => _LocalSection(title: entry.key, items: entry.value))
-      .toList(growable: false);
+  final sections = [
+    for (final entry in buckets.entries)
+      _LocalSection(title: entry.key, items: entry.value),
+  ];
+  sections.sort((a, b) {
+    final da = sortKeys[a.title] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final db = sortKeys[b.title] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    return db.compareTo(da);
+  });
+  return sections;
 }
 
 List<_RemoteSection> _groupRemoteByDate(List<UnraidFileEntry> entries) {
   final buckets = <String, List<UnraidFileEntry>>{};
+  final sortKeys = <String, DateTime>{};
   for (final entry in entries) {
     final date = entry.modifiedDate ?? DateTime.fromMillisecondsSinceEpoch(0);
     final title = date.millisecondsSinceEpoch == 0 ? '未知日期' : _dateTitle(date);
     buckets.putIfAbsent(title, () => <UnraidFileEntry>[]).add(entry);
+    final day = date.millisecondsSinceEpoch == 0
+        ? DateTime.fromMillisecondsSinceEpoch(0)
+        : DateTime(date.year, date.month, date.day);
+    final existing = sortKeys[title];
+    if (existing == null || day.isAfter(existing)) {
+      sortKeys[title] = day;
+    }
   }
-  return buckets.entries
-      .map((entry) => _RemoteSection(title: entry.key, items: entry.value))
-      .toList(growable: false);
+  final sections = [
+    for (final entry in buckets.entries)
+      _RemoteSection(title: entry.key, items: entry.value),
+  ];
+  sections.sort((a, b) {
+    final da = sortKeys[a.title] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final db = sortKeys[b.title] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    return db.compareTo(da);
+  });
+  return sections;
 }
 
 String _targetPathFor(String targetDir, LocalMediaAsset asset) {

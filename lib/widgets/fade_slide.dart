@@ -7,10 +7,13 @@ class FadeSlide extends StatefulWidget {
     super.key,
     required this.child,
     this.delay = Duration.zero,
+    /// When false, skip the entrance animation (lists that rebuild often).
+    this.animate = true,
   });
 
   final Widget child;
   final Duration delay;
+  final bool animate;
 
   @override
   State<FadeSlide> createState() => _FadeSlideState();
@@ -18,29 +21,33 @@ class FadeSlide extends StatefulWidget {
 
 class _FadeSlideState extends State<FadeSlide>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _opacity;
-  late final Animation<Offset> _offset;
+  AnimationController? _controller;
+  Animation<double>? _opacity;
+  Animation<Offset>? _offset;
   Timer? _delayTimer;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
+    if (!widget.animate) {
+      return;
+    }
+    final controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 420),
     );
-    _opacity = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _controller = controller;
+    _opacity = CurvedAnimation(parent: controller, curve: Curves.easeOut);
     _offset = Tween<Offset>(
       begin: const Offset(0, 0.05),
       end: Offset.zero,
-    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+    ).animate(CurvedAnimation(parent: controller, curve: Curves.easeOut));
     if (widget.delay == Duration.zero) {
-      _controller.forward();
+      controller.forward();
     } else {
       _delayTimer = Timer(widget.delay, () {
         if (mounted) {
-          _controller.forward();
+          controller.forward();
         }
       });
     }
@@ -49,15 +56,21 @@ class _FadeSlideState extends State<FadeSlide>
   @override
   void dispose() {
     _delayTimer?.cancel();
-    _controller.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final controller = _controller;
+    final opacity = _opacity;
+    final offset = _offset;
+    if (controller == null || opacity == null || offset == null) {
+      return widget.child;
+    }
     return FadeTransition(
-      opacity: _opacity,
-      child: SlideTransition(position: _offset, child: widget.child),
+      opacity: opacity,
+      child: SlideTransition(position: offset, child: widget.child),
     );
   }
 }

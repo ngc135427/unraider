@@ -388,10 +388,9 @@ class UnraidWebGuiClient {
 
     final normalized = _normalizeUnraidPath(path);
     if (!forceRefresh) {
-      final cached = _directoryCache[normalized];
-      if (cached != null &&
-          DateTime.now().difference(cached.fetchedAt) < _directoryCacheTtl) {
-        return cached.entries;
+      final cached = _readDirectoryCache(normalized);
+      if (cached != null) {
+        return cached;
       }
       final inflight = _directoryInflight[normalized];
       if (inflight != null) {
@@ -420,12 +419,14 @@ class UnraidWebGuiClient {
     final generation = (_directoryLoadGeneration[normalized] ?? 0) + 1;
     _directoryLoadGeneration[normalized] = generation;
     try {
-      final output = await _runSshCommand(
+      // Keep large find output as bytes so utf8 decode can run off-isolate.
+      final outputBytes = await _runSshCommandBytes(
         '读取目录',
         _buildSshDirectoryListCommand(normalized),
         timeout: httpTimeout,
       );
-      final entries = await parseSshDirectoryListingAsync(output, normalized);
+      final entries =
+          await parseSshDirectoryListingBytesAsync(outputBytes, normalized);
       // Only the newest generation may publish into the shared TTL cache.
       if (_directoryLoadGeneration[normalized] == generation) {
         _storeDirectoryCache(normalized, entries);
@@ -494,10 +495,9 @@ class UnraidWebGuiClient {
 
     final normalized = _normalizeUnraidPath(path);
     if (!forceRefresh) {
-      final cached = _fileBytesCache[normalized];
-      if (cached != null &&
-          DateTime.now().difference(cached.fetchedAt) < _fileBytesCacheTtl) {
-        return cached.bytes;
+      final cached = _readFileBytesCache(normalized);
+      if (cached != null) {
+        return cached;
       }
     } else {
       // Drop stale bytes so a force-refresh cannot re-serve the old TTL hit
@@ -515,13 +515,7 @@ class UnraidWebGuiClient {
     try {
       final bytes = await future;
       if (bytes.length <= _maxCachedFileBytes) {
-        if (_fileBytesCache.length >= _maxFileBytesCacheEntries) {
-          _fileBytesCache.remove(_fileBytesCache.keys.first);
-        }
-        _fileBytesCache[normalized] = _FileBytesCacheEntry(
-          bytes: bytes,
-          fetchedAt: DateTime.now(),
-        );
+        _storeFileBytesCache(normalized, bytes);
       }
       return bytes;
     } finally {
@@ -529,6 +523,32 @@ class UnraidWebGuiClient {
         _fileBytesInflight.remove(normalized);
       }
     }
+  }
+
+  Uint8List? _readFileBytesCache(String path) {
+    final cached = _fileBytesCache[path];
+    if (cached == null) {
+      return null;
+    }
+    if (DateTime.now().difference(cached.fetchedAt) >= _fileBytesCacheTtl) {
+      _fileBytesCache.remove(path);
+      return null;
+    }
+    // LRU touch for hot thumbnails/previews.
+    _fileBytesCache.remove(path);
+    _fileBytesCache[path] = cached;
+    return cached.bytes;
+  }
+
+  void _storeFileBytesCache(String path, Uint8List bytes) {
+    _fileBytesCache.remove(path);
+    if (_fileBytesCache.length >= _maxFileBytesCacheEntries) {
+      _fileBytesCache.remove(_fileBytesCache.keys.first);
+    }
+    _fileBytesCache[path] = _FileBytesCacheEntry(
+      bytes: bytes,
+      fetchedAt: DateTime.now(),
+    );
   }
 
   Future<Uint8List> _loadFileBytes(String normalized) async {
@@ -825,6 +845,8 @@ class UnraidWebGuiClient {
   }
 
   void _storeDirectoryCache(String path, List<UnraidFileEntry> entries) {
+    // Touch existing keys so repeated opens stay hot under FIFO eviction.
+    _directoryCache.remove(path);
     if (_directoryCache.length >= _maxDirectoryCacheEntries) {
       _directoryCache.remove(_directoryCache.keys.first);
     }
@@ -832,6 +854,21 @@ class UnraidWebGuiClient {
       entries: List<UnraidFileEntry>.unmodifiable(entries),
       fetchedAt: DateTime.now(),
     );
+  }
+
+  List<UnraidFileEntry>? _readDirectoryCache(String path) {
+    final cached = _directoryCache[path];
+    if (cached == null) {
+      return null;
+    }
+    if (DateTime.now().difference(cached.fetchedAt) >= _directoryCacheTtl) {
+      _directoryCache.remove(path);
+      return null;
+    }
+    // LRU touch: reinsert so frequently browsed folders outlive cold ones.
+    _directoryCache.remove(path);
+    _directoryCache[path] = cached;
+    return cached.entries;
   }
 
   void _invalidateDirectoryCache(String path) {
@@ -893,10 +930,9 @@ class UnraidWebGuiClient {
         '$normalized|$depth|img=$includeImages|vid=$includeVideos|aud=$includeAudio';
 
     if (!forceRefresh) {
-      final cached = _mediaScanCache[cacheKey];
-      if (cached != null &&
-          DateTime.now().difference(cached.fetchedAt) < _mediaScanCacheTtl) {
-        return cached.entries;
+      final cached = _readMediaScanCache(cacheKey);
+      if (cached != null) {
+        return cached;
       }
       final inflight = _mediaScanInflight[cacheKey];
       if (inflight != null) {
@@ -927,6 +963,32 @@ class UnraidWebGuiClient {
     }
   }
 
+  List<UnraidFileEntry>? _readMediaScanCache(String cacheKey) {
+    final cached = _mediaScanCache[cacheKey];
+    if (cached == null) {
+      return null;
+    }
+    if (DateTime.now().difference(cached.fetchedAt) >= _mediaScanCacheTtl) {
+      _mediaScanCache.remove(cacheKey);
+      return null;
+    }
+    // LRU touch so album/music reopen keeps the hot scan.
+    _mediaScanCache.remove(cacheKey);
+    _mediaScanCache[cacheKey] = cached;
+    return cached.entries;
+  }
+
+  void _storeMediaScanCache(String cacheKey, List<UnraidFileEntry> results) {
+    _mediaScanCache.remove(cacheKey);
+    if (_mediaScanCache.length >= _maxMediaScanCacheEntries) {
+      _mediaScanCache.remove(_mediaScanCache.keys.first);
+    }
+    _mediaScanCache[cacheKey] = _DirectoryCacheEntry(
+      entries: List<UnraidFileEntry>.unmodifiable(results),
+      fetchedAt: DateTime.now(),
+    );
+  }
+
   Future<List<UnraidFileEntry>> _scanMediaFiles({
     required String cacheKey,
     required String normalized,
@@ -939,13 +1001,14 @@ class UnraidWebGuiClient {
     _mediaScanLoadGeneration[cacheKey] = generation;
     try {
       // Single remote find avoids N recursive directory round-trips.
-      final output = await _runSshCommand(
+      // Decode + parse large media scans off the UI isolate together.
+      final outputBytes = await _runSshCommandBytes(
         '扫描媒体文件',
         _buildSshMediaScanCommand(normalized, maxDepth: depth),
         timeout: fileTransferTimeout,
       );
-      final results = await parseSshDirectoryListingAsync(
-        output,
+      final results = await parseSshDirectoryListingBytesAsync(
+        outputBytes,
         normalized,
         mediaOnly: true,
         includeImages: includeImages,
@@ -953,13 +1016,7 @@ class UnraidWebGuiClient {
         includeAudio: includeAudio,
       );
       if (_mediaScanLoadGeneration[cacheKey] == generation) {
-        if (_mediaScanCache.length >= _maxMediaScanCacheEntries) {
-          _mediaScanCache.remove(_mediaScanCache.keys.first);
-        }
-        _mediaScanCache[cacheKey] = _DirectoryCacheEntry(
-          entries: List<UnraidFileEntry>.unmodifiable(results),
-          fetchedAt: DateTime.now(),
-        );
+        _storeMediaScanCache(cacheKey, results);
       }
       return results;
     } on TimeoutException {
@@ -1237,6 +1294,20 @@ query UnraiderSshConfig {
     String action,
     String command, {
     Duration timeout = httpTimeout,
+  }) async {
+    final bytes = await _runSshCommandBytes(
+      action,
+      command,
+      timeout: timeout,
+    );
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  /// Raw stdout for callers that want to decode/parse off the UI isolate.
+  Future<Uint8List> _runSshCommandBytes(
+    String action,
+    String command, {
+    Duration timeout = httpTimeout,
   }) {
     // Serialize interactive SSH execs so concurrent directory/media scans do
     // not interleave on one session.
@@ -1259,7 +1330,7 @@ query UnraiderSshConfig {
                 : '$action失败：$error',
           );
         }
-        return utf8.decode(result.stdout, allowMalformed: true);
+        return Uint8List.fromList(result.stdout);
       } on TimeoutException {
         throw UnraidClientException('$action超时');
       } on UnraidClientException {
@@ -1452,20 +1523,24 @@ query UnraiderSshConfig {
   Future<List<UnraidManagementItem>> _fetchShareItems() async {
     try {
       final entries = await fetchDirectory('/mnt/user');
-      return entries
-          .where((entry) => entry.isDirectory)
-          .map(
-            (entry) => UnraidManagementItem(
-              id: entry.path,
-              title: entry.name,
-              status: '可浏览',
-              description: entry.path,
-              type: ManagementItemType.share,
-              detail: entry.path,
-              tags: const <String>['共享'],
-            ),
-          )
-          .toList(growable: false);
+      final shares = <UnraidManagementItem>[];
+      for (final entry in entries) {
+        if (!entry.isDirectory) {
+          continue;
+        }
+        shares.add(
+          UnraidManagementItem(
+            id: entry.path,
+            title: entry.name,
+            status: '可浏览',
+            description: entry.path,
+            type: ManagementItemType.share,
+            detail: entry.path,
+            tags: const <String>['共享'],
+          ),
+        );
+      }
+      return shares;
     } on UnraidClientException {
       rethrow;
     } on Object {
@@ -1682,15 +1757,15 @@ query UnraiderSshConfig {
     }
   }
 
+  static final _csrfTokenAssignRegex =
+      RegExp(r'''csrf_token\s*=\s*["']([^"']+)["']''');
+  static final _csrfTokenInputRegex =
+      RegExp(r'''name=["']csrf_token["'][^>]*value=["']([^"']+)["']''');
+
   void _extractCsrf(String html) {
-    final token = _firstMatch(
-          html,
-          RegExp(r'''csrf_token\s*=\s*["']([^"']+)["']'''),
-        ) ??
-        _firstMatch(
-          html,
-          RegExp(r'''name=["']csrf_token["'][^>]*value=["']([^"']+)["']'''),
-        );
+    // Reuse compiled patterns — CSRF is checked on nearly every WebGUI response.
+    final token = _firstMatch(html, _csrfTokenAssignRegex) ??
+        _firstMatch(html, _csrfTokenInputRegex);
     if (token != null && token.isNotEmpty) {
       _csrfToken = token;
     }

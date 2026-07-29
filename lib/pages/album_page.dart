@@ -105,6 +105,34 @@ class AlbumBackupPage extends StatelessWidget {
 
 enum _PhoAlbumTab { local, remote, sync, settings }
 
+class _AlbumSyncProgress {
+  const _AlbumSyncProgress({
+    this.syncing = false,
+    this.uploadedCount = 0,
+    this.pendingCount = 0,
+    this.message,
+  });
+
+  final bool syncing;
+  final int uploadedCount;
+  final int pendingCount;
+  final String? message;
+
+  _AlbumSyncProgress copyWith({
+    bool? syncing,
+    int? uploadedCount,
+    int? pendingCount,
+    String? message,
+  }) {
+    return _AlbumSyncProgress(
+      syncing: syncing ?? this.syncing,
+      uploadedCount: uploadedCount ?? this.uploadedCount,
+      pendingCount: pendingCount ?? this.pendingCount,
+      message: message ?? this.message,
+    );
+  }
+}
+
 class _PhoAlbumShell extends StatefulWidget {
   const _PhoAlbumShell({
     required this.initialTab,
@@ -119,7 +147,8 @@ class _PhoAlbumShell extends StatefulWidget {
 }
 
 class _PhoAlbumShellState extends State<_PhoAlbumShell> {
-  late _PhoAlbumTab _tab = widget.initialTab;
+  late final ValueNotifier<_PhoAlbumTab> _tab =
+      ValueNotifier<_PhoAlbumTab>(widget.initialTab);
   AlbumBackupPreferences _preferences = const AlbumBackupPreferences();
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
@@ -127,16 +156,18 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   /// Only build tab bodies after first visit so remote thumbnails are not
   /// downloaded while the user is still on the local tab.
   late final Set<_PhoAlbumTab> _visitedTabs = <_PhoAlbumTab>{widget.initialTab};
+  /// Bumped when a lazy album tab is first visited.
+  final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
   bool _loadingLocal = true;
   bool _loadingRemote = true;
-  bool _syncing = false;
   bool _loadingAll = false;
   int _loadGeneration = 0;
-  int _uploadedCount = 0;
-  int _pendingCount = 0;
   String? _error;
   String? _remoteError;
-  String? _syncMessage;
+  /// Sync progress is published separately so per-file updates do not rebuild
+  /// the local/remote timeline tabs.
+  final ValueNotifier<_AlbumSyncProgress> _syncProgress =
+      ValueNotifier<_AlbumSyncProgress>(const _AlbumSyncProgress());
 
   // Memoized visible-media projection for stats + tab bodies.
   List<LocalMediaAsset>? _visibleSourceRef;
@@ -216,6 +247,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadAll());
   }
 
+  @override
+  void dispose() {
+    _tab.dispose();
+    _visitedTabsVersion.dispose();
+    _syncProgress.dispose();
+    super.dispose();
+  }
+
   Future<void> _loadAll({bool runAutoSync = true}) async {
     final args = _args;
     if (args == null) {
@@ -270,9 +309,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
-      setState(() {
-        _pendingCount = _countPendingUploads();
-      });
+      final pending = _countPendingUploads();
+      final current = _syncProgress.value;
+      _syncProgress.value = current.copyWith(pendingCount: pending);
 
       if (preferences.autoBackup && runAutoSync && _error == null) {
         unawaited(_syncPending());
@@ -399,9 +438,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     if (!mounted || generation != _loadGeneration) {
       return;
     }
-    setState(() {
-      _pendingCount = _countPendingUploads();
-    });
+    final pending = _countPendingUploads();
+    final current = _syncProgress.value;
+    _syncProgress.value = current.copyWith(pendingCount: pending);
   }
 
   List<LocalMediaAsset> get _pendingUploads {
@@ -429,16 +468,16 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
   Future<void> _syncPending() async {
     final client = _client;
-    if (client == null || _syncing) {
+    if (client == null || _syncProgress.value.syncing) {
       return;
     }
 
     final allPending = _pendingUploads;
     if (allPending.isEmpty) {
-      setState(() {
-        _pendingCount = 0;
-        _syncMessage = '已同步';
-      });
+      _syncProgress.value = const _AlbumSyncProgress(
+        pendingCount: 0,
+        message: '已同步',
+      );
       return;
     }
 
@@ -446,14 +485,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     final pending = allPending.take(_maxSyncBatchSize).toList(growable: false);
     final remainingAfterBatch = allPending.length - pending.length;
 
-    setState(() {
-      _syncing = true;
-      _uploadedCount = 0;
-      _pendingCount = allPending.length;
-      _syncMessage = remainingAfterBatch > 0
+    _syncProgress.value = _AlbumSyncProgress(
+      syncing: true,
+      uploadedCount: 0,
+      pendingCount: allPending.length,
+      message: remainingAfterBatch > 0
           ? '准备同步（本批 ${pending.length} / 共 ${allPending.length}）'
-          : '准备同步';
-    });
+          : '准备同步',
+    );
 
     try {
       var uploaded = 0;
@@ -463,18 +502,18 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         if (!mounted) {
           return;
         }
-        setState(() {
-          _syncMessage =
-              '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}';
-        });
+        _syncProgress.value = _syncProgress.value.copyWith(
+          message:
+              '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}',
+        );
         await client.ensureDirectory(targetDir);
 
         if (!mounted) {
           return;
         }
-        setState(() {
-          _syncMessage = '上传 ${uploaded + 1}/${pending.length}：${asset.name}';
-        });
+        _syncProgress.value = _syncProgress.value.copyWith(
+          message: '上传 ${uploaded + 1}/${pending.length}：${asset.name}',
+        );
         await client.uploadLocalMediaFile(
           targetPath: targetPath,
           sourceUri: asset.uri,
@@ -485,31 +524,33 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         if (!mounted) {
           return;
         }
-        setState(() {
-          _uploadedCount = uploaded;
-          _pendingCount = allPending.length - uploaded;
-        });
+        _syncProgress.value = _syncProgress.value.copyWith(
+          uploadedCount: uploaded,
+          pendingCount: allPending.length - uploaded,
+        );
       }
 
       if (!mounted) {
         return;
       }
-      setState(() {
-        _syncing = false;
-        _syncMessage = remainingAfterBatch > 0
+      _syncProgress.value = _AlbumSyncProgress(
+        syncing: false,
+        uploadedCount: uploaded,
+        pendingCount: remainingAfterBatch,
+        message: remainingAfterBatch > 0
             ? '已上传 $uploaded 个，还有 $remainingAfterBatch 个待同步'
-            : '已上传 $uploaded 个照片/视频';
-      });
+            : '已上传 $uploaded 个照片/视频',
+      );
       LocalMediaStore.invalidateCaches();
       await _reloadRemote();
     } on Object catch (error) {
       if (!mounted) {
         return;
       }
-      setState(() {
-        _syncing = false;
-        _syncMessage = '同步失败：$error';
-      });
+      _syncProgress.value = _syncProgress.value.copyWith(
+        syncing: false,
+        message: '同步失败：$error',
+      );
     }
   }
 
@@ -606,25 +647,37 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                   topRight: Radius.circular(28),
                 ),
               ),
+              // Skip entrance animation: album rebuilds on load/sync often.
               child: FadeSlide(
+                animate: false,
                 child: Column(
                   children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
                       child: Column(
                         children: [
-                          _AlbumStats(
-                            localPhotos: localPhotos,
-                            localVideos: localVideos,
-                            remoteCount: _remoteMedia.length,
-                            pendingCount: _pendingCount,
-                            syncing: _syncing,
+                          ValueListenableBuilder<_AlbumSyncProgress>(
+                            valueListenable: _syncProgress,
+                            builder: (context, progress, _) {
+                              return _AlbumStats(
+                                localPhotos: localPhotos,
+                                localVideos: localVideos,
+                                remoteCount: _remoteMedia.length,
+                                pendingCount: progress.pendingCount,
+                                syncing: progress.syncing,
+                              );
+                            },
                           ),
                           const SizedBox(height: 16),
-                          _AlbumTabs(
-                            current: _tab,
-                            videosOnly: widget.videosOnly,
-                            onChanged: _selectTab,
+                          ValueListenableBuilder<_PhoAlbumTab>(
+                            valueListenable: _tab,
+                            builder: (context, tab, _) {
+                              return _AlbumTabs(
+                                current: tab,
+                                videosOnly: widget.videosOnly,
+                                onChanged: _selectTab,
+                              );
+                            },
                           ),
                           const SizedBox(height: 18),
                         ],
@@ -634,15 +687,26 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                       // Lazy + sticky tab bodies: first visit builds the page,
                       // later switches keep scroll / decoded thumbs without
                       // preloading every remote tile on open.
-                      child: IndexedStack(
-                        index: _tab.index,
-                        sizing: StackFit.expand,
-                        children: [
-                          for (final tab in _PhoAlbumTab.values)
-                            _visitedTabs.contains(tab)
-                                ? _buildTabBody(tab, local)
-                                : const SizedBox.shrink(),
-                        ],
+                      // Tab index is a notifier so switches skip full setState.
+                      child: ValueListenableBuilder<int>(
+                        valueListenable: _visitedTabsVersion,
+                        builder: (context, _, __) {
+                          return ValueListenableBuilder<_PhoAlbumTab>(
+                            valueListenable: _tab,
+                            builder: (context, tab, ___) {
+                              return IndexedStack(
+                                index: tab.index,
+                                sizing: StackFit.expand,
+                                children: [
+                                  for (final value in _PhoAlbumTab.values)
+                                    _visitedTabs.contains(value)
+                                        ? _buildTabBody(value, local)
+                                        : const SizedBox.shrink(),
+                                ],
+                              );
+                            },
+                          );
+                        },
                       ),
                     ),
                   ],
@@ -656,13 +720,15 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   }
 
   void _selectTab(_PhoAlbumTab tab) {
-    if (_tab == tab && _visitedTabs.contains(tab)) {
+    final alreadyVisited = _visitedTabs.contains(tab);
+    if (_tab.value == tab && alreadyVisited) {
       return;
     }
-    setState(() {
-      _tab = tab;
-      _visitedTabs.add(tab);
-    });
+    final isNewVisit = _visitedTabs.add(tab);
+    _tab.value = tab;
+    if (isNewVisit) {
+      _visitedTabsVersion.value += 1;
+    }
   }
 
   Widget _buildTabBody(_PhoAlbumTab tab, List<LocalMediaAsset> local) {
@@ -717,16 +783,21 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       _PhoAlbumTab.sync => ListView(
           padding: padding,
           children: [
-            _SyncPanel(
-              preferences: _preferences,
-              localCount: local.length,
-              remoteCount: _remoteMedia.length,
-              pendingCount: _pendingCount,
-              uploadedCount: _uploadedCount,
-              syncing: _syncing,
-              message: _syncMessage,
-              onSync: _syncPending,
-              onSettings: () => _selectTab(_PhoAlbumTab.settings),
+            ValueListenableBuilder<_AlbumSyncProgress>(
+              valueListenable: _syncProgress,
+              builder: (context, progress, _) {
+                return _SyncPanel(
+                  preferences: _preferences,
+                  localCount: local.length,
+                  remoteCount: _remoteMedia.length,
+                  pendingCount: progress.pendingCount,
+                  uploadedCount: progress.uploadedCount,
+                  syncing: progress.syncing,
+                  message: progress.message,
+                  onSync: _syncPending,
+                  onSettings: () => _selectTab(_PhoAlbumTab.settings),
+                );
+              },
             ),
           ],
         ),

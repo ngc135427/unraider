@@ -73,15 +73,16 @@ class LocalMediaStore {
   static final Map<String, Future<Uint8List?>> _thumbnailCache =
       <String, Future<Uint8List?>>{};
 
+  static const _maxMediaListCacheEntries = 8;
+
   static Future<List<LocalMediaAsset>> listMedia({
     int limit = 0,
     String? bucketId,
   }) async {
     final key = '${bucketId ?? ''}|$limit';
-    final cached = _mediaListCache[key];
-    if (cached != null &&
-        DateTime.now().difference(cached.fetchedAt) < _listCacheTtl) {
-      return cached.value;
+    final cached = _readMediaListCache(key);
+    if (cached != null) {
+      return cached;
     }
     // Coalesce concurrent album/open taps so native MediaStore is hit once.
     final inflight = _mediaListInflight[key];
@@ -93,16 +94,39 @@ class LocalMediaStore {
     _mediaListInflight[key] = future;
     try {
       final media = await future;
-      _mediaListCache[key] = _LocalListCacheEntry(
-        value: media,
-        fetchedAt: DateTime.now(),
-      );
+      _storeMediaListCache(key, media);
       return media;
     } finally {
       if (identical(_mediaListInflight[key], future)) {
         _mediaListInflight.remove(key);
       }
     }
+  }
+
+  static List<LocalMediaAsset>? _readMediaListCache(String key) {
+    final cached = _mediaListCache[key];
+    if (cached == null) {
+      return null;
+    }
+    if (DateTime.now().difference(cached.fetchedAt) >= _listCacheTtl) {
+      _mediaListCache.remove(key);
+      return null;
+    }
+    // LRU touch for frequently reopened album lists.
+    _mediaListCache.remove(key);
+    _mediaListCache[key] = cached;
+    return cached.value;
+  }
+
+  static void _storeMediaListCache(String key, List<LocalMediaAsset> media) {
+    _mediaListCache.remove(key);
+    if (_mediaListCache.length >= _maxMediaListCacheEntries) {
+      _mediaListCache.remove(_mediaListCache.keys.first);
+    }
+    _mediaListCache[key] = _LocalListCacheEntry(
+      value: media,
+      fetchedAt: DateTime.now(),
+    );
   }
 
   static Future<List<LocalMediaAsset>> _listMediaUncached({
@@ -177,8 +201,10 @@ class LocalMediaStore {
     if (uri.isEmpty) {
       return Future<Uint8List?>.value();
     }
-    final cached = _thumbnailCache[uri];
+    final cached = _thumbnailCache.remove(uri);
     if (cached != null) {
+      // LRU touch so hot local tiles outlive cold ones under the cap.
+      _thumbnailCache[uri] = cached;
       return cached;
     }
 

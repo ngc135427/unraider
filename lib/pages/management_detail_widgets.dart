@@ -346,8 +346,10 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
 
   Future<Uint8List> _loadPreviewBytes() {
     final path = widget.entry.path;
-    final cached = _sharePreviewBytesCache[path];
+    final cached = _sharePreviewBytesCache.remove(path);
     if (cached != null) {
+      // LRU touch for recently viewed previews.
+      _sharePreviewBytesCache[path] = cached;
       return cached;
     }
 
@@ -524,13 +526,21 @@ class _TextPreviewState extends State<_TextPreview> {
 
   Future<String> _loadText() {
     final path = widget.entry.path;
-    final cached = _sharePreviewTextCache[path];
+    final cached = _sharePreviewTextCache.remove(path);
     if (cached != null) {
+      // LRU touch for recently opened text previews.
+      _sharePreviewTextCache[path] = cached;
       return cached;
     }
 
     final future = () async {
       final bytes = await widget.client.fetchFileBytes(path);
+      // Large text payloads decode off the UI isolate to avoid jank.
+      if (bytes.length >= 32 * 1024) {
+        return Isolate.run(
+          () => utf8.decode(bytes, allowMalformed: true),
+        );
+      }
       return utf8.decode(bytes, allowMalformed: true);
     }();
 
@@ -642,12 +652,12 @@ const _textPreviewExtensions = <String>{
   '.dart',
 };
 
-bool _isTextPreviewFile(String name) {
-  final dot = name.lastIndexOf('.');
-  if (dot < 0 || dot == name.length - 1) {
+bool _isTextPreviewEntry(UnraidFileEntry entry) {
+  final dot = entry.nameLower.lastIndexOf('.');
+  if (dot < 0 || dot == entry.nameLower.length - 1) {
     return false;
   }
-  return _textPreviewExtensions.contains(name.substring(dot).toLowerCase());
+  return _textPreviewExtensions.contains(entry.nameLower.substring(dot));
 }
 
 class _StateMessage extends StatelessWidget {
