@@ -242,12 +242,15 @@ class _LocalTimeline extends StatefulWidget {
   const _LocalTimeline({
     required this.loading,
     required this.media,
+    required this.gallery,
     required this.videosOnly,
     required this.padding,
   });
 
   final bool loading;
   final List<LocalMediaAsset> media;
+  /// Full visible gallery used for swipe navigation (may exceed section caps).
+  final List<LocalMediaAsset> gallery;
   final bool videosOnly;
   final EdgeInsets padding;
 
@@ -318,7 +321,7 @@ class _LocalTimelineState extends State<_LocalTimeline> {
                     count: section.items.length,
                   ),
                   const SizedBox(height: 10),
-                  _LocalGrid(items: visible),
+                  _LocalGrid(items: visible, gallery: widget.gallery),
                   if (section.items.length > _maxAlbumSectionTiles) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -345,6 +348,7 @@ class _RemoteTimeline extends StatefulWidget {
   const _RemoteTimeline({
     required this.loading,
     required this.entries,
+    required this.gallery,
     required this.client,
     required this.padding,
     this.error,
@@ -355,6 +359,8 @@ class _RemoteTimeline extends StatefulWidget {
   final String? error;
   final UnraidClient? client;
   final List<UnraidFileEntry> entries;
+  /// Full remote gallery used for swipe navigation.
+  final List<UnraidFileEntry> gallery;
   final VoidCallback? onRetry;
   final EdgeInsets padding;
 
@@ -436,7 +442,11 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
                     count: section.items.length,
                   ),
                   const SizedBox(height: 10),
-                  _RemoteGrid(client: widget.client, items: visible),
+                  _RemoteGrid(
+                    client: widget.client,
+                    items: visible,
+                    gallery: widget.gallery,
+                  ),
                   if (section.items.length > _maxAlbumSectionTiles) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -659,9 +669,13 @@ class _SettingsPanelState extends State<_SettingsPanel> {
 }
 
 class _LocalGrid extends StatelessWidget {
-  const _LocalGrid({required this.items});
+  const _LocalGrid({
+    required this.items,
+    required this.gallery,
+  });
 
   final List<LocalMediaAsset> items;
+  final List<LocalMediaAsset> gallery;
 
   @override
   Widget build(BuildContext context) {
@@ -675,8 +689,16 @@ class _LocalGrid extends StatelessWidget {
         crossAxisSpacing: 6,
       ),
       itemBuilder: (context, index) {
+        final asset = items[index];
         return RepaintBoundary(
-          child: _LocalTile(asset: items[index]),
+          child: _LocalTile(
+            asset: asset,
+            onTap: () => _openLocalPreview(
+              context,
+              gallery: gallery,
+              asset: asset,
+            ),
+          ),
         );
       },
     );
@@ -687,10 +709,12 @@ class _RemoteGrid extends StatelessWidget {
   const _RemoteGrid({
     required this.client,
     required this.items,
+    required this.gallery,
   });
 
   final UnraidClient? client;
   final List<UnraidFileEntry> items;
+  final List<UnraidFileEntry> gallery;
 
   @override
   Widget build(BuildContext context) {
@@ -704,8 +728,18 @@ class _RemoteGrid extends StatelessWidget {
         crossAxisSpacing: 6,
       ),
       itemBuilder: (context, index) {
+        final entry = items[index];
         return RepaintBoundary(
-          child: _RemoteTile(client: client, entry: items[index]),
+          child: _RemoteTile(
+            client: client,
+            entry: entry,
+            onTap: () => _openRemotePreview(
+              context,
+              client: client,
+              gallery: gallery,
+              entry: entry,
+            ),
+          ),
         );
       },
     );
@@ -713,9 +747,13 @@ class _RemoteGrid extends StatelessWidget {
 }
 
 class _LocalTile extends StatefulWidget {
-  const _LocalTile({required this.asset});
+  const _LocalTile({
+    required this.asset,
+    required this.onTap,
+  });
 
   final LocalMediaAsset asset;
+  final VoidCallback onTap;
 
   @override
   State<_LocalTile> createState() => _LocalTileState();
@@ -728,37 +766,47 @@ class _LocalTileState extends State<_LocalTile> {
   @override
   Widget build(BuildContext context) {
     final asset = widget.asset;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          FutureBuilder<Uint8List?>(
-            future: _thumbnailFuture,
-            builder: (context, snapshot) {
-              final bytes = snapshot.data;
-              if (bytes == null || bytes.isEmpty) {
-                return const ColoredBox(
-                  color: AppTheme.inputBackground,
-                  child: Icon(Icons.image_outlined, color: AppTheme.textLight),
-                );
-              }
-              return Image.memory(
-                bytes,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                cacheWidth: _maxAlbumTileDecodeExtent,
-                cacheHeight: _maxAlbumTileDecodeExtent,
-              );
-            },
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              FutureBuilder<Uint8List?>(
+                future: _thumbnailFuture,
+                builder: (context, snapshot) {
+                  final bytes = snapshot.data;
+                  if (bytes == null || bytes.isEmpty) {
+                    return const ColoredBox(
+                      color: AppTheme.inputBackground,
+                      child: Icon(
+                        Icons.image_outlined,
+                        color: AppTheme.textLight,
+                      ),
+                    );
+                  }
+                  return Image.memory(
+                    bytes,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    cacheWidth: _maxAlbumTileDecodeExtent,
+                    cacheHeight: _maxAlbumTileDecodeExtent,
+                  );
+                },
+              ),
+              if (asset.isVideo)
+                const Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: _MediaBadge(icon: Icons.play_arrow),
+                ),
+            ],
           ),
-          if (asset.isVideo)
-            const Positioned(
-              right: 6,
-              bottom: 6,
-              child: _MediaBadge(icon: Icons.play_arrow),
-            ),
-        ],
+        ),
       ),
     );
   }
@@ -768,10 +816,12 @@ class _RemoteTile extends StatefulWidget {
   const _RemoteTile({
     required this.client,
     required this.entry,
+    required this.onTap,
   });
 
   final UnraidClient? client;
   final UnraidFileEntry entry;
+  final VoidCallback onTap;
 
   @override
   State<_RemoteTile> createState() => _RemoteTileState();
@@ -834,43 +884,52 @@ class _RemoteTileState extends State<_RemoteTile> {
   @override
   Widget build(BuildContext context) {
     final entry = widget.entry;
+    Widget child;
     if (entry.isVideo || widget.client == null) {
-      return _RemotePlaceholder(entry: entry);
-    }
-    if (entry.sizeBytes > _maxAlbumPreviewBytes) {
-      return _RemotePlaceholder(entry: entry);
+      child = _RemotePlaceholder(entry: entry);
+    } else if (entry.sizeBytes > _maxAlbumPreviewBytes) {
+      child = _RemotePlaceholder(entry: entry);
+    } else {
+      child = ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: FutureBuilder<Uint8List?>(
+          future: _bytesFuture,
+          builder: (context, snapshot) {
+            final bytes = snapshot.data;
+            if (bytes == null || bytes.isEmpty) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const ColoredBox(
+                  color: AppTheme.inputBackground,
+                  child: Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                );
+              }
+              return _RemotePlaceholder(entry: entry);
+            }
+            return Image.memory(
+              bytes,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              cacheWidth: _maxAlbumTileDecodeExtent,
+              cacheHeight: _maxAlbumTileDecodeExtent,
+              errorBuilder: (_, __, ___) => _RemotePlaceholder(entry: entry),
+            );
+          },
+        ),
+      );
     }
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: FutureBuilder<Uint8List?>(
-        future: _bytesFuture,
-        builder: (context, snapshot) {
-          final bytes = snapshot.data;
-          if (bytes == null || bytes.isEmpty) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const ColoredBox(
-                color: AppTheme.inputBackground,
-                child: Center(
-                  child: SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-              );
-            }
-            return _RemotePlaceholder(entry: entry);
-          }
-          return Image.memory(
-            bytes,
-            fit: BoxFit.cover,
-            gaplessPlayback: true,
-            cacheWidth: _maxAlbumTileDecodeExtent,
-            cacheHeight: _maxAlbumTileDecodeExtent,
-            errorBuilder: (_, __, ___) => _RemotePlaceholder(entry: entry),
-          );
-        },
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: child,
       ),
     );
   }
@@ -1168,5 +1227,945 @@ class _RemoteSection {
 
   final String title;
   final List<UnraidFileEntry> items;
+}
+
+Future<void> _openLocalPreview(
+  BuildContext context, {
+  required List<LocalMediaAsset> gallery,
+  required LocalMediaAsset asset,
+}) async {
+  final items = gallery.isEmpty ? <LocalMediaAsset>[asset] : gallery;
+  var index = items.indexWhere((item) => item.id == asset.id);
+  if (index < 0) {
+    index = 0;
+  }
+  await showDialog<void>(
+    context: context,
+    builder: (context) => Dialog.fullscreen(
+      child: _LocalMediaPreview(
+        items: items,
+        initialIndex: index,
+      ),
+    ),
+  );
+}
+
+Future<void> _openRemotePreview(
+  BuildContext context, {
+  required UnraidClient? client,
+  required List<UnraidFileEntry> gallery,
+  required UnraidFileEntry entry,
+}) async {
+  if (client == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('缺少服务器连接')),
+    );
+    return;
+  }
+  final items = gallery.isEmpty ? <UnraidFileEntry>[entry] : gallery;
+  var index = items.indexWhere((item) => item.path == entry.path);
+  if (index < 0) {
+    index = 0;
+  }
+  await showDialog<void>(
+    context: context,
+    builder: (context) => Dialog.fullscreen(
+      child: _RemoteMediaPreview(
+        client: client,
+        items: items,
+        initialIndex: index,
+      ),
+    ),
+  );
+}
+
+class _LocalMediaPreview extends StatefulWidget {
+  const _LocalMediaPreview({
+    required this.items,
+    required this.initialIndex,
+  });
+
+  final List<LocalMediaAsset> items;
+  final int initialIndex;
+
+  @override
+  State<_LocalMediaPreview> createState() => _LocalMediaPreviewState();
+}
+
+class _LocalMediaPreviewState extends State<_LocalMediaPreview> {
+  late final PageController _controller;
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex.clamp(0, widget.items.length - 1);
+    _controller = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _go(int delta) {
+    final next = (_index + delta).clamp(0, widget.items.length - 1);
+    if (next == _index) {
+      return;
+    }
+    _controller.animateToPage(
+      next,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final asset = widget.items[_index];
+    return ColoredBox(
+      color: Colors.black,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _PreviewChrome(
+              title: widget.items.length > 1
+                  ? '${asset.name}  ${_index + 1}/${widget.items.length}'
+                  : asset.name,
+              canGoBack: _index > 0,
+              canGoForward: _index < widget.items.length - 1,
+              onBack: () => _go(-1),
+              onForward: () => _go(1),
+              onClose: () => Navigator.of(context).pop(),
+            ),
+            Expanded(
+              child: PageView.builder(
+                controller: _controller,
+                itemCount: widget.items.length,
+                allowImplicitScrolling: false,
+                onPageChanged: (value) => setState(() => _index = value),
+                itemBuilder: (context, index) {
+                  final distance = (index - _index).abs();
+                  final item = widget.items[index];
+                  return item.isVideo
+                      ? _LocalVideoPreviewPage(
+                          key: ValueKey<String>('lv:${item.id}'),
+                          asset: item,
+                          active: distance == 0,
+                        )
+                      : _LocalImagePreviewPage(
+                          key: ValueKey<String>('li:${item.id}'),
+                          asset: item,
+                          active: distance <= 1,
+                        );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RemoteMediaPreview extends StatefulWidget {
+  const _RemoteMediaPreview({
+    required this.client,
+    required this.items,
+    required this.initialIndex,
+  });
+
+  final UnraidClient client;
+  final List<UnraidFileEntry> items;
+  final int initialIndex;
+
+  @override
+  State<_RemoteMediaPreview> createState() => _RemoteMediaPreviewState();
+}
+
+class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
+  late final PageController _controller;
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex.clamp(0, widget.items.length - 1);
+    _controller = PageController(initialPage: _index);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _go(int delta) {
+    final next = (_index + delta).clamp(0, widget.items.length - 1);
+    if (next == _index) {
+      return;
+    }
+    _controller.animateToPage(
+      next,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = widget.items[_index];
+    return ColoredBox(
+      color: Colors.black,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _PreviewChrome(
+              title: widget.items.length > 1
+                  ? '${entry.name}  ${_index + 1}/${widget.items.length}'
+                  : entry.name,
+              canGoBack: _index > 0,
+              canGoForward: _index < widget.items.length - 1,
+              onBack: () => _go(-1),
+              onForward: () => _go(1),
+              onClose: () => Navigator.of(context).pop(),
+            ),
+            Expanded(
+              child: PageView.builder(
+                controller: _controller,
+                itemCount: widget.items.length,
+                allowImplicitScrolling: false,
+                onPageChanged: (value) => setState(() => _index = value),
+                itemBuilder: (context, index) {
+                  final distance = (index - _index).abs();
+                  final item = widget.items[index];
+                  return item.isVideo
+                      ? _RemoteVideoPreviewPage(
+                          key: ValueKey<String>('rv:${item.path}'),
+                          client: widget.client,
+                          entry: item,
+                          active: distance == 0,
+                        )
+                      : _RemoteImagePreviewPage(
+                          key: ValueKey<String>('ri:${item.path}'),
+                          client: widget.client,
+                          entry: item,
+                          active: distance <= 1,
+                        );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PreviewChrome extends StatelessWidget {
+  const _PreviewChrome({
+    required this.title,
+    required this.canGoBack,
+    required this.canGoForward,
+    required this.onBack,
+    required this.onForward,
+    required this.onClose,
+  });
+
+  final String title;
+  final bool canGoBack;
+  final bool canGoForward;
+  final VoidCallback onBack;
+  final VoidCallback onForward;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 52,
+      child: Row(
+        children: [
+          const SizedBox(width: 16),
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          IconButton(
+            tooltip: '上一项',
+            onPressed: canGoBack ? onBack : null,
+            icon: const Icon(Icons.chevron_left, color: Colors.white),
+          ),
+          IconButton(
+            tooltip: '下一项',
+            onPressed: canGoForward ? onForward : null,
+            icon: const Icon(Icons.chevron_right, color: Colors.white),
+          ),
+          IconButton(
+            tooltip: '关闭',
+            onPressed: onClose,
+            icon: const Icon(Icons.close, color: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AlbumPreviewMessage extends StatelessWidget {
+  const _AlbumPreviewMessage({
+    required this.message,
+    this.color = Colors.white70,
+  });
+
+  final String message;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Center(
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: color, fontSize: 15, height: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+Future<File> _loadLocalFullscreenFile(LocalMediaAsset asset) {
+  final uri = asset.uri;
+  final cached = _localFullscreenFileCache.remove(uri);
+  if (cached != null) {
+    _localFullscreenFileCache[uri] = cached;
+    return cached;
+  }
+  final future = MediaCache.ensureLocalUriFile(
+    uri: uri,
+    preferredName: asset.name,
+    expectedSizeBytes: asset.sizeBytes,
+  );
+  if (_localFullscreenFileCache.length >= _maxLocalFullscreenCacheEntries) {
+    _localFullscreenFileCache.remove(_localFullscreenFileCache.keys.first);
+  }
+  _localFullscreenFileCache[uri] = future;
+  unawaited(
+    future.then<void>(
+      (_) {},
+      onError: (Object _) {
+        if (identical(_localFullscreenFileCache[uri], future)) {
+          _localFullscreenFileCache.remove(uri);
+        }
+      },
+    ),
+  );
+  return future;
+}
+
+class _LocalImagePreviewPage extends StatefulWidget {
+  const _LocalImagePreviewPage({
+    super.key,
+    required this.asset,
+    required this.active,
+  });
+
+  final LocalMediaAsset asset;
+  final bool active;
+
+  @override
+  State<_LocalImagePreviewPage> createState() => _LocalImagePreviewPageState();
+}
+
+class _LocalImagePreviewPageState extends State<_LocalImagePreviewPage> {
+  Future<File>? _fileFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) {
+      _fileFuture = _loadLocalFullscreenFile(widget.asset);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _LocalImagePreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active &&
+        _fileFuture == null &&
+        oldWidget.asset.id == widget.asset.id) {
+      setState(() {
+        _fileFuture = _loadLocalFullscreenFile(widget.asset);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final future = _fileFuture;
+    if (future == null) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Icon(Icons.image_outlined, color: Colors.white24, size: 48),
+        ),
+      );
+    }
+    return FutureBuilder<File>(
+      future: future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 14),
+                Text(
+                  widget.asset.sizeBytes > 0
+                      ? '正在流式加载… ${formatByteSize(widget.asset.sizeBytes)}'
+                      : '正在流式加载…',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          );
+        }
+        if (snapshot.hasError || snapshot.data == null) {
+          return _AlbumPreviewMessage(
+            message: snapshot.error?.toString() ?? '图片加载失败',
+            color: AppTheme.danger,
+          );
+        }
+        return InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 4,
+          child: Center(
+            child: Image.file(
+              snapshot.data!,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              cacheWidth: _maxAlbumFullscreenDecodeExtent,
+              cacheHeight: _maxAlbumFullscreenDecodeExtent,
+              errorBuilder: (_, __, ___) => const _AlbumPreviewMessage(
+                message: '图片格式不支持或文件已损坏',
+                color: AppTheme.danger,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RemoteImagePreviewPage extends StatefulWidget {
+  const _RemoteImagePreviewPage({
+    super.key,
+    required this.client,
+    required this.entry,
+    required this.active,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+  final bool active;
+
+  @override
+  State<_RemoteImagePreviewPage> createState() =>
+      _RemoteImagePreviewPageState();
+}
+
+class _RemoteImagePreviewPageState extends State<_RemoteImagePreviewPage> {
+  Future<File>? _fileFuture;
+  double _progress = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) {
+      _startLoad();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _RemoteImagePreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active &&
+        _fileFuture == null &&
+        oldWidget.entry.path == widget.entry.path) {
+      _startLoad();
+    }
+  }
+
+  void _startLoad() {
+    setState(() {
+      _progress = 0;
+      _fileFuture = MediaCache.ensureLocalFile(
+        client: widget.client,
+        remotePath: widget.entry.path,
+        expectedSizeBytes: widget.entry.sizeBytes,
+        fileName: widget.entry.name,
+        onProgress: (value) {
+          if (!mounted) {
+            return;
+          }
+          setState(() => _progress = value);
+        },
+      );
+      // Also park in the process cache for swipe re-entry.
+      final path = widget.entry.path;
+      final future = _fileFuture!;
+      final cached = _remoteFullscreenFileCache.remove(path);
+      if (cached != null) {
+        _remoteFullscreenFileCache[path] = cached;
+        _fileFuture = cached;
+      } else {
+        if (_remoteFullscreenFileCache.length >=
+            _maxRemoteFullscreenCacheEntries) {
+          _remoteFullscreenFileCache
+              .remove(_remoteFullscreenFileCache.keys.first);
+        }
+        _remoteFullscreenFileCache[path] = future;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final future = _fileFuture;
+    if (future == null) {
+      return const ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: Icon(Icons.image_outlined, color: Colors.white24, size: 48),
+        ),
+      );
+    }
+    return FutureBuilder<File>(
+      future: future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          final pct = (_progress * 100).clamp(0, 100).toStringAsFixed(0);
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(
+                  value: _progress > 0 && _progress < 1 ? _progress : null,
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '正在流式加载… $pct%'
+                  '${widget.entry.size.isEmpty ? '' : ' · ${widget.entry.size}'}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          );
+        }
+        if (snapshot.hasError || snapshot.data == null) {
+          return _AlbumPreviewMessage(
+            message: snapshot.error?.toString() ?? '图片加载失败',
+            color: AppTheme.danger,
+          );
+        }
+        return InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 4,
+          child: Center(
+            child: Image.file(
+              snapshot.data!,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              cacheWidth: _maxAlbumFullscreenDecodeExtent,
+              cacheHeight: _maxAlbumFullscreenDecodeExtent,
+              errorBuilder: (_, __, ___) => const _AlbumPreviewMessage(
+                message: '图片格式不支持或文件已损坏',
+                color: AppTheme.danger,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _LocalVideoPreviewPage extends StatefulWidget {
+  const _LocalVideoPreviewPage({
+    super.key,
+    required this.asset,
+    required this.active,
+  });
+
+  final LocalMediaAsset asset;
+  final bool active;
+
+  @override
+  State<_LocalVideoPreviewPage> createState() => _LocalVideoPreviewPageState();
+}
+
+class _LocalVideoPreviewPageState extends State<_LocalVideoPreviewPage> {
+  VideoPlayerController? _controller;
+  Future<void>? _initFuture;
+  String? _error;
+  bool _started = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) {
+      unawaited(_ensurePlayer());
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _LocalVideoPreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_started) {
+      unawaited(_ensurePlayer());
+    } else if (!widget.active && _controller != null) {
+      unawaited(_controller!.pause());
+    }
+  }
+
+  Future<void> _ensurePlayer() async {
+    if (_started) {
+      return;
+    }
+    _started = true;
+    final future = () async {
+      try {
+        // Prefer content URI playback on Android (true streaming, no size cap).
+        final controller = VideoPlayerController.networkUrl(
+          Uri.parse(widget.asset.uri),
+        );
+        await controller.initialize();
+        await controller.setLooping(true);
+        await controller.play();
+        if (!mounted) {
+          await controller.dispose();
+          return;
+        }
+        setState(() {
+          _controller = controller;
+          _error = null;
+        });
+      } on Object {
+        // Content URI may fail — stream MediaStore chunks into a temp file.
+        final file = await MediaCache.ensureLocalUriFile(
+          uri: widget.asset.uri,
+          preferredName: widget.asset.name,
+          expectedSizeBytes: widget.asset.sizeBytes,
+        );
+        final controller = VideoPlayerController.file(file);
+        await controller.initialize();
+        await controller.setLooping(true);
+        await controller.play();
+        if (!mounted) {
+          await controller.dispose();
+          return;
+        }
+        setState(() {
+          _controller = controller;
+          _error = null;
+        });
+      }
+    }();
+    setState(() {
+      _initFuture = future;
+      _error = null;
+    });
+    try {
+      await future;
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error.toString();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    final controller = _controller;
+    _controller = null;
+    unawaited(controller?.dispose() ?? Future<void>.value());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return _AlbumPreviewMessage(message: _error!, color: AppTheme.danger);
+    }
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 14),
+            Text(
+              widget.active ? '正在准备视频…' : '等待播放',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            if (_initFuture != null)
+              FutureBuilder<void>(
+                future: _initFuture,
+                builder: (_, __) => const SizedBox.shrink(),
+              ),
+          ],
+        ),
+      );
+    }
+    return _VideoPlayerScaffold(controller: controller);
+  }
+}
+
+class _RemoteVideoPreviewPage extends StatefulWidget {
+  const _RemoteVideoPreviewPage({
+    super.key,
+    required this.client,
+    required this.entry,
+    required this.active,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+  final bool active;
+
+  @override
+  State<_RemoteVideoPreviewPage> createState() =>
+      _RemoteVideoPreviewPageState();
+}
+
+class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
+  VideoPlayerController? _controller;
+  Future<void>? _initFuture;
+  String? _error;
+  bool _started = false;
+  double _progress = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) {
+      unawaited(_ensurePlayer());
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _RemoteVideoPreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_started) {
+      unawaited(_ensurePlayer());
+    } else if (!widget.active && _controller != null) {
+      unawaited(_controller!.pause());
+    }
+  }
+
+  Future<void> _ensurePlayer() async {
+    if (_started) {
+      return;
+    }
+    _started = true;
+    final future = () async {
+      // Progressive range download with no size ceiling: start after ~1 MB and
+      // keep filling so later seeks work as more bytes land on disk.
+      final handle = await MediaCache.ensureProgressive(
+        client: widget.client,
+        remotePath: widget.entry.path,
+        expectedSizeBytes: widget.entry.sizeBytes,
+        fileName: widget.entry.name,
+      );
+      handle.progress.listen((value) {
+        if (!mounted) {
+          return;
+        }
+        setState(() => _progress = value);
+      });
+      await handle.ready;
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final controller = VideoPlayerController.file(handle.file);
+      await controller.initialize();
+      await controller.setLooping(true);
+      await controller.play();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _controller = controller;
+        _error = null;
+      });
+    }();
+    setState(() {
+      _initFuture = future;
+      _error = null;
+    });
+    try {
+      await future;
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error.toString();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    final controller = _controller;
+    _controller = null;
+    unawaited(controller?.dispose() ?? Future<void>.value());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return _AlbumPreviewMessage(message: _error!, color: AppTheme.danger);
+    }
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 14),
+            Text(
+              widget.active
+                  ? '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                  : '等待播放',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            if (_initFuture != null)
+              FutureBuilder<void>(
+                future: _initFuture,
+                builder: (_, __) => const SizedBox.shrink(),
+              ),
+          ],
+        ),
+      );
+    }
+    return _VideoPlayerScaffold(controller: controller);
+  }
+}
+
+class _VideoPlayerScaffold extends StatelessWidget {
+  const _VideoPlayerScaffold({required this.controller});
+
+  final VideoPlayerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Center(
+          child: AspectRatio(
+            aspectRatio: controller.value.aspectRatio == 0
+                ? 16 / 9
+                : controller.value.aspectRatio,
+            child: VideoPlayer(controller),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: ColoredBox(
+            color: Colors.black.withValues(alpha: 0.45),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                VideoProgressIndicator(
+                  controller,
+                  allowScrubbing: true,
+                  colors: const VideoProgressColors(
+                    playedColor: Colors.white,
+                    bufferedColor: Colors.white38,
+                    backgroundColor: Colors.white24,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                ),
+                ValueListenableBuilder<VideoPlayerValue>(
+                  valueListenable: controller,
+                  builder: (context, value, _) {
+                    return Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          tooltip: value.isPlaying ? '暂停' : '播放',
+                          onPressed: () {
+                            if (value.isPlaying) {
+                              unawaited(controller.pause());
+                            } else {
+                              unawaited(controller.play());
+                            }
+                          },
+                          icon: Icon(
+                            value.isPlaying
+                                ? Icons.pause_circle_filled
+                                : Icons.play_circle_filled,
+                            color: Colors.white,
+                            size: 40,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${_formatDuration(value.position)} / '
+                          '${_formatDuration(value.duration)}',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+String _formatDuration(Duration value) {
+  final total = value.inSeconds;
+  final minutes = (total ~/ 60).toString().padLeft(2, '0');
+  final seconds = (total % 60).toString().padLeft(2, '0');
+  final hours = value.inHours;
+  if (hours > 0) {
+    return '$hours:$minutes:$seconds';
+  }
+  return '$minutes:$seconds';
 }
 

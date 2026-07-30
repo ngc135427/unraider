@@ -34,12 +34,13 @@ class _LoginPageState extends State<LoginPage> {
   bool _loginSucceeded = false;
   /// Header compact mode only — avoids rebuilding the whole login form on focus.
   final ValueNotifier<bool> _hasInputFocus = ValueNotifier<bool>(false);
-  bool _isSubmitting = false;
+  /// Submit busy + status/error strip are isolated from the rest of the form.
+  final ValueNotifier<bool> _isSubmitting = ValueNotifier<bool>(false);
+  final ValueNotifier<_LoginFeedback?> _feedback =
+      ValueNotifier<_LoginFeedback?>(null);
   /// Password visibility is isolated so toggles do not rebuild the full form.
   final ValueNotifier<bool> _showPassword = ValueNotifier<bool>(false);
   bool _loadingPreferences = true;
-  String? _statusMessage;
-  String? _errorMessage;
   Timer? _navigateHomeTimer;
 
   @override
@@ -64,6 +65,8 @@ class _LoginPageState extends State<LoginPage> {
     _usernameController.dispose();
     _passwordController.dispose();
     _hasInputFocus.dispose();
+    _isSubmitting.dispose();
+    _feedback.dispose();
     _showPassword.dispose();
     super.dispose();
   }
@@ -79,17 +82,14 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   void _clearErrorOnEdit() {
-    if (_errorMessage == null && _statusMessage == null) {
+    if (_feedback.value == null) {
       return;
     }
-    setState(() {
-      _errorMessage = null;
-      _statusMessage = null;
-    });
+    _feedback.value = null;
   }
 
   Future<void> _submit() async {
-    if (_isSubmitting || _loginSucceeded || _loadingPreferences) {
+    if (_isSubmitting.value || _loginSucceeded || _loadingPreferences) {
       return;
     }
 
@@ -105,11 +105,10 @@ class _LoginPageState extends State<LoginPage> {
       password: _passwordController.text,
     );
 
-    setState(() {
-      _isSubmitting = true;
-      _errorMessage = null;
-      _statusMessage = '正在连接 ${_domainController.text.trim()}…';
-    });
+    _isSubmitting.value = true;
+    _feedback.value = _LoginFeedback.status(
+      '正在连接 ${_domainController.text.trim()}…',
+    );
 
     try {
       await client.checkConnection();
@@ -121,10 +120,8 @@ class _LoginPageState extends State<LoginPage> {
       if (!mounted) {
         return;
       }
-      setState(() {
-        _loginSucceeded = true;
-        _statusMessage = '已连接，正在进入主页…';
-      });
+      setState(() => _loginSucceeded = true);
+      _feedback.value = const _LoginFeedback.status('已连接，正在进入主页…');
       _navigateHomeTimer?.cancel();
       _navigateHomeTimer = Timer(const Duration(milliseconds: 320), () {
         if (!mounted) {
@@ -140,31 +137,24 @@ class _LoginPageState extends State<LoginPage> {
       if (!mounted) {
         return;
       }
-      setState(() {
-        _errorMessage = error.message;
-        _statusMessage = null;
-        _isSubmitting = false;
-      });
+      _isSubmitting.value = false;
+      _feedback.value = _LoginFeedback.error(error.message);
     } on TimeoutException {
       client.close();
       if (!mounted) {
         return;
       }
-      setState(() {
-        _errorMessage = '连接超时，请检查服务器地址、协议和网络';
-        _statusMessage = null;
-        _isSubmitting = false;
-      });
+      _isSubmitting.value = false;
+      _feedback.value = const _LoginFeedback.error(
+        '连接超时，请检查服务器地址、协议和网络',
+      );
     } on Object catch (error) {
       client.close();
       if (!mounted) {
         return;
       }
-      setState(() {
-        _errorMessage = '登录失败：$error';
-        _statusMessage = null;
-        _isSubmitting = false;
-      });
+      _isSubmitting.value = false;
+      _feedback.value = _LoginFeedback.error('登录失败：$error');
     }
   }
 
@@ -261,10 +251,10 @@ class _LoginPageState extends State<LoginPage> {
                           useHttps: _useHttps,
                           controller: _domainController,
                           focusNode: _domainFocusNode,
-                          enabled: !_isSubmitting && !_loginSucceeded,
+                          enabled: !_isSubmitting.value && !_loginSucceeded,
                           onChanged: (_) => _clearErrorOnEdit(),
                           onToggle: () {
-                            if (_isSubmitting || _loginSucceeded) {
+                            if (_isSubmitting.value || _loginSucceeded) {
                               return;
                             }
                             setState(() => _useHttps = !_useHttps);
@@ -279,7 +269,7 @@ class _LoginPageState extends State<LoginPage> {
                           controller: _usernameController,
                           focusNode: _usernameFocusNode,
                           hint: 'root',
-                          enabled: !_isSubmitting && !_loginSucceeded,
+                          enabled: !_isSubmitting.value && !_loginSucceeded,
                           textInputAction: TextInputAction.next,
                           autofillHints: const [AutofillHints.username],
                           onChanged: (_) => _clearErrorOnEdit(),
@@ -310,14 +300,14 @@ class _LoginPageState extends State<LoginPage> {
                               focusNode: _passwordFocusNode,
                               hint: '请输入 root 密码',
                               obscureText: !showPassword,
-                              enabled: !_isSubmitting && !_loginSucceeded,
+                              enabled: !_isSubmitting.value && !_loginSucceeded,
                               textInputAction: TextInputAction.done,
                               autofillHints: const [AutofillHints.password],
                               onChanged: (_) => _clearErrorOnEdit(),
                               onFieldSubmitted: (_) => unawaited(_submit()),
                               suffixIcon: IconButton(
                                 tooltip: showPassword ? '隐藏密码' : '显示密码',
-                                onPressed: _isSubmitting || _loginSucceeded
+                                onPressed: _isSubmitting.value || _loginSucceeded
                                     ? null
                                     : () {
                                         _showPassword.value = !showPassword;
@@ -345,7 +335,7 @@ class _LoginPageState extends State<LoginPage> {
                               value: _rememberMe,
                               activeColor: AppTheme.secondary,
                               visualDensity: VisualDensity.compact,
-                              onChanged: _isSubmitting || _loginSucceeded
+                              onChanged: _isSubmitting.value || _loginSucceeded
                                   ? null
                                   : (value) {
                                       setState(
@@ -369,85 +359,105 @@ class _LoginPageState extends State<LoginPage> {
                           ],
                         ),
                         const SizedBox(height: 16),
-                        if (_statusMessage != null && _errorMessage == null) ...[
-                          Row(
-                            children: [
-                              if (_isSubmitting && !_loginSucceeded) ...[
-                                const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
+                        ValueListenableBuilder<_LoginFeedback?>(
+                          valueListenable: _feedback,
+                          builder: (context, feedback, _) {
+                            if (feedback == null) {
+                              return const SizedBox.shrink();
+                            }
+                            if (feedback.isError) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
                                   ),
-                                ),
-                                const SizedBox(width: 8),
-                              ],
-                              Expanded(
-                                child: Text(
-                                  _statusMessage!,
-                                  style: const TextStyle(
-                                    color: AppTheme.textMedium,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        if (_errorMessage != null) ...[
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 10,
-                            ),
-                            decoration: BoxDecoration(
-                              color: AppTheme.danger.withValues(alpha: 0.08),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: AppTheme.danger.withValues(alpha: 0.28),
-                              ),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(
-                                  Icons.error_outline,
-                                  color: AppTheme.danger,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _errorMessage!,
-                                    style: const TextStyle(
-                                      color: AppTheme.danger,
-                                      fontSize: 13,
-                                      height: 1.35,
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.danger.withValues(alpha: 0.08),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: AppTheme.danger.withValues(alpha: 0.28),
                                     ),
                                   ),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      const Icon(
+                                        Icons.error_outline,
+                                        color: AppTheme.danger,
+                                        size: 18,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          feedback.message,
+                                          style: const TextStyle(
+                                            color: AppTheme.danger,
+                                            fontSize: 13,
+                                            height: 1.35,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        GradientButton(
-                          label: _loginSucceeded
-                              ? '登录成功'
-                              : _isSubmitting
-                                  ? '正在连接…'
-                                  : _loadingPreferences
-                                      ? '加载中…'
-                                      : '登录',
-                          icon: _loginSucceeded ? Icons.check : null,
-                          isSuccess: _loginSucceeded,
-                          onPressed: _loginSucceeded ||
-                                  _isSubmitting ||
-                                  _loadingPreferences
-                              ? null
-                              : _submit,
+                              );
+                            }
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: ValueListenableBuilder<bool>(
+                                valueListenable: _isSubmitting,
+                                builder: (context, submitting, __) {
+                                  return Row(
+                                    children: [
+                                      if (submitting && !_loginSucceeded) ...[
+                                        const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                      ],
+                                      Expanded(
+                                        child: Text(
+                                          feedback.message,
+                                          style: const TextStyle(
+                                            color: AppTheme.textMedium,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            );
+                          },
+                        ),
+                        ValueListenableBuilder<bool>(
+                          valueListenable: _isSubmitting,
+                          builder: (context, submitting, _) {
+                            return GradientButton(
+                              label: _loginSucceeded
+                                  ? '登录成功'
+                                  : submitting
+                                      ? '正在连接…'
+                                      : _loadingPreferences
+                                          ? '加载中…'
+                                          : '登录',
+                              icon: _loginSucceeded ? Icons.check : null,
+                              isSuccess: _loginSucceeded,
+                              onPressed: _loginSucceeded ||
+                                      submitting ||
+                                      _loadingPreferences
+                                  ? null
+                                  : _submit,
+                            );
+                          },
                         ),
                       ],
                     ),
@@ -460,6 +470,22 @@ class _LoginPageState extends State<LoginPage> {
       ),
     );
   }
+}
+
+class _LoginFeedback {
+  const _LoginFeedback._({
+    required this.message,
+    required this.isError,
+  });
+
+  const _LoginFeedback.status(String message)
+      : this._(message: message, isError: false);
+
+  const _LoginFeedback.error(String message)
+      : this._(message: message, isError: true);
+
+  final String message;
+  final bool isError;
 }
 
 class _ProtocolDomainField extends StatelessWidget {

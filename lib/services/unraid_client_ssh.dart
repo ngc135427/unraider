@@ -246,6 +246,34 @@ List<UnraidFileEntry> _filterMediaEntries(
 /// Large Dashboard HTML is cheaper to scrape off the UI isolate.
 const _dashboardParseIsolateThresholdBytes = 32 * 1024;
 
+final _dashboardMemoryInstalledRegex = RegExp(
+  r'''fa-line-chart[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
+  caseSensitive: false,
+  dotAll: true,
+);
+final _dashboardMemoryUsableRegex = RegExp(
+  r'''fa-compress[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
+  caseSensitive: false,
+  dotAll: true,
+);
+final _dashboardArrayListRegex = RegExp(
+  r'''<tbody\b[^>]*\bid=["']array_list["'][^>]*>(.*?)</tbody>''',
+  caseSensitive: false,
+  dotAll: true,
+);
+final _dashboardArrayHeaderRegex = RegExp(
+  r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>(.*?)</h3>''',
+  caseSensitive: false,
+  dotAll: true,
+);
+final _dashboardArrayUsageRegex = RegExp(
+  r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>.*?</h3>\s*<span>\s*(.*?)\s*</span>''',
+  caseSensitive: false,
+  dotAll: true,
+);
+final _dashboardVersionRegex =
+    RegExp(r'Unraid(?: OS)?\s+([0-9][^<\s"]*)', caseSensitive: false);
+
 _DashboardSnapshot _parseDashboardSnapshot(String html) {
   final cpuSummary = _normalizeText(_extractSectionTextAfterHeader(
         html: html,
@@ -255,47 +283,18 @@ _DashboardSnapshot _parseDashboardSnapshot(String html) {
       '';
   final memoryInstalled = _normalizeText(_firstMatch(
     html,
-    RegExp(
-      r'''fa-line-chart[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
-      caseSensitive: false,
-      dotAll: true,
-    ),
+    _dashboardMemoryInstalledRegex,
   ));
   final memoryUsable = _normalizeText(_firstMatch(
     html,
-    RegExp(
-      r'''fa-compress[^>]*></i>\s*[^:：<]*[:：]\s*([^<]+)''',
-      caseSensitive: false,
-      dotAll: true,
-    ),
+    _dashboardMemoryUsableRegex,
   ));
-  final arrayBlock = _firstMatch(
-        html,
-        RegExp(
-          r'''<tbody\b[^>]*\bid=["']array_list["'][^>]*>(.*?)</tbody>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      ) ??
-      '';
-  final arrayHeader = _normalizeText(_firstMatch(
-        arrayBlock,
-        RegExp(
-          r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>(.*?)</h3>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      )) ??
-      '';
-  final arrayUsage = _normalizeText(_firstMatch(
-        arrayBlock,
-        RegExp(
-          r'''<h3\b[^>]*class=["']tile-header-main["'][^>]*>.*?</h3>\s*<span>\s*(.*?)\s*</span>''',
-          caseSensitive: false,
-          dotAll: true,
-        ),
-      )) ??
-      '';
+  final arrayBlock = _firstMatch(html, _dashboardArrayListRegex) ?? '';
+  final arrayHeader =
+      _normalizeText(_firstMatch(arrayBlock, _dashboardArrayHeaderRegex)) ??
+          '';
+  final arrayUsage =
+      _normalizeText(_firstMatch(arrayBlock, _dashboardArrayUsageRegex)) ?? '';
   final arrayPercent = _parsePercent(arrayUsage);
 
   return _DashboardSnapshot(
@@ -320,11 +319,7 @@ List<Object?> _parseDashboardOverviewRows(String html) {
   final snapshot = _parseDashboardSnapshot(html);
   return <Object?>[
     _serverNameFromHtml(html),
-    _firstMatch(
-          html,
-          RegExp(r'Unraid(?: OS)?\s+([0-9][^<\s"]*)', caseSensitive: false),
-        ) ??
-        'WebGUI',
+    _firstMatch(html, _dashboardVersionRegex) ?? 'WebGUI',
     snapshot.cpuSummary,
     snapshot.memoryUsage,
     snapshot.arrayState,
@@ -405,6 +400,20 @@ bool _isWritableDirectoryPath(String path) {
       normalized.startsWith('/boot/');
 }
 
+final _diskOrCacheRootRegex = RegExp(r'^/mnt/(?:disk[^/]*|cache[^/]*)$');
+final _inputCheckedRegex = RegExp(r'\bchecked\b', caseSensitive: false);
+final _inputValueRegex = RegExp(r'''value=["']([^"']*)["']''', caseSensitive: false);
+final _expiresDayRegex = RegExp(r'^\s*\d{2}\s');
+final _whitespaceCollapseRegex = RegExp(r'\s+');
+final _percentValueRegex = RegExp(r'(\d+(?:[.,]\d+)?)\s*%');
+final _htmlTitleRegex =
+    RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true);
+final _titleUnraidDashRegex =
+    RegExp(r'\s+-\s+Unraid.*$', caseSensitive: false);
+final _titleUnraidPipeRegex =
+    RegExp(r'\s+\|\s+Unraid.*$', caseSensitive: false);
+final _htmlTagRegex = RegExp(r'<[^>]+>');
+
 @visibleForTesting
 bool isUnsafeDestructivePath(String path) {
   final normalized = _normalizeUnraidPath(path);
@@ -414,7 +423,7 @@ bool isUnsafeDestructivePath(String path) {
       normalized == '/boot') {
     return true;
   }
-  return RegExp(r'^/mnt/(?:disk[^/]*|cache[^/]*)$').hasMatch(normalized);
+  return _diskOrCacheRootRegex.hasMatch(normalized);
 }
 
 void _throwIfUnsafeDestructivePath(String path, String label) {
@@ -496,122 +505,6 @@ SmbSharePath? smbSharePathFromUnraidPath(String path) {
   );
 }
 
-class _LocalMediaUploadRequest {
-  const _LocalMediaUploadRequest({
-    required this.rootToken,
-    required this.host,
-    required this.port,
-    required this.username,
-    required this.password,
-    required this.targetPath,
-    required this.sourceUri,
-    required this.sizeBytes,
-    required this.chunkSize,
-    this.modifiedMs,
-  });
-
-  final RootIsolateToken rootToken;
-  final String host;
-  final int port;
-  final String username;
-  final String password;
-  final String targetPath;
-  final String sourceUri;
-  final int sizeBytes;
-  final int chunkSize;
-  final int? modifiedMs;
-}
-
-Future<void> _uploadLocalMediaFileInBackground(
-  _LocalMediaUploadRequest request,
-) async {
-  BackgroundIsolateBinaryMessenger.ensureInitialized(request.rootToken);
-  const localMediaChannel = MethodChannel('unraider/local_media');
-  SSHClient? client;
-  SftpFile? file;
-  try {
-    final socket = await SSHSocket.connect(
-      request.host,
-      request.port,
-      timeout: const Duration(seconds: 10),
-    );
-    client = SSHClient(
-      socket,
-      username: request.username,
-      onPasswordRequest: () => request.password,
-      ident: 'unraider-sync',
-    );
-    await client.authenticated.timeout(const Duration(seconds: 15));
-    final sftp = await client.sftp().timeout(const Duration(seconds: 15));
-    await sftp.handshake.timeout(const Duration(seconds: 15));
-    file = await sftp.open(
-      request.targetPath,
-      mode: SftpFileOpenMode.create |
-          SftpFileOpenMode.truncate |
-          SftpFileOpenMode.write,
-    );
-
-    var offset = 0;
-    while (
-        offset < request.sizeBytes || (request.sizeBytes == 0 && offset == 0)) {
-      final remaining = request.sizeBytes - offset;
-      final length = request.sizeBytes == 0
-          ? 0
-          : remaining < request.chunkSize
-              ? remaining
-              : request.chunkSize;
-      final chunk = request.sizeBytes == 0
-          ? Uint8List(0)
-          : await localMediaChannel.invokeMethod<Uint8List>('readChunk', {
-              'uri': request.sourceUri,
-              'offset': offset,
-              'length': length,
-            });
-      final bytes = chunk ?? Uint8List(0);
-      if (bytes.length < length) {
-        throw const UnraidClientException('读取本机媒体文件失败');
-      }
-      if (bytes.isNotEmpty) {
-        await file.writeBytes(bytes, offset: offset);
-      }
-      offset += bytes.length;
-      if (request.sizeBytes == 0) {
-        break;
-      }
-    }
-    await file.close();
-    file = null;
-
-    final modifiedMs = request.modifiedMs;
-    if (modifiedMs != null && modifiedMs > 0) {
-      final result = await client
-          .runWithResult(
-            buildSetModifiedTimeCommand(
-              request.targetPath,
-              DateTime.fromMillisecondsSinceEpoch(modifiedMs, isUtc: true),
-            ),
-            stdout: true,
-            stderr: true,
-          )
-          .timeout(const Duration(seconds: 20));
-      if (result.exitCode != 0) {
-        final error = utf8
-            .decode(
-              result.stderr.isNotEmpty ? result.stderr : result.stdout,
-              allowMalformed: true,
-            )
-            .trim();
-        throw UnraidClientException(
-          error.isEmpty ? '保留文件时间失败' : '保留文件时间失败：$error',
-        );
-      }
-    }
-  } finally {
-    await file?.close();
-    client?.close();
-  }
-}
-
 @visibleForTesting
 String shellQuote(String value) {
   if (value.isEmpty) {
@@ -641,13 +534,14 @@ Future<Uint8List> _readRemoteFileViaSsh({
       ident: 'unraider-preview',
     );
     await client.authenticated.timeout(const Duration(seconds: 15));
+    // Large album/video/music downloads need more than the old 30s cap.
     final result = await client
         .runWithResult(
           'cat -- ${shellQuote(path)}',
           stdout: true,
           stderr: true,
         )
-        .timeout(const Duration(seconds: 30));
+        .timeout(const Duration(minutes: 3));
     if (result.exitCode != 0) {
       final error = utf8
           .decode(
@@ -785,13 +679,10 @@ bool? _parseSettingsBool(String html, String name) {
   if (input == null) {
     return _parseBoolish(_htmlInputValue(html, name));
   }
-  if (RegExp(r'\bchecked\b', caseSensitive: false).hasMatch(input)) {
+  if (_inputCheckedRegex.hasMatch(input)) {
     return true;
   }
-  final value = RegExp(
-    r'''value=["']([^"']*)["']''',
-    caseSensitive: false,
-  ).firstMatch(input)?.group(1);
+  final value = _inputValueRegex.firstMatch(input)?.group(1);
   return _parseBoolish(value);
 }
 
@@ -817,7 +708,7 @@ bool _looksLikeExpiresComma(String header, int commaIndex) {
   final prefix = header.substring(0, commaIndex).toLowerCase();
   final suffix = header.substring(commaIndex + 1);
   return prefix.lastIndexOf('expires=') > prefix.lastIndexOf(';') &&
-      RegExp(r'^\s*\d{2}\s').hasMatch(suffix);
+      _expiresDayRegex.hasMatch(suffix);
 }
 
 String? _firstMatch(String input, RegExp regex) {
@@ -851,7 +742,7 @@ String? _extractSectionTextAfterHeader({
 
 String? _normalizeText(String? value) {
   final text = _decodeHtml(_stripHtml(value ?? ''))
-      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_whitespaceCollapseRegex, ' ')
       .trim();
   if (text.isEmpty || text == 'N/A') {
     return null;
@@ -860,7 +751,7 @@ String? _normalizeText(String? value) {
 }
 
 double _parsePercent(String value) {
-  final match = RegExp(r'(\d+(?:[.,]\d+)?)\s*%').firstMatch(value);
+  final match = _percentValueRegex.firstMatch(value);
   if (match == null) {
     return 0;
   }
@@ -873,21 +764,14 @@ double _parsePercent(String value) {
 
 String _serverNameFromHtml(String html) {
   final title = _decodeHtml(
-    _stripHtml(
-      _firstMatch(
-            html,
-            RegExp(r'<title[^>]*>(.*?)</title>',
-                caseSensitive: false, dotAll: true),
-          ) ??
-          '',
-    ),
+    _stripHtml(_firstMatch(html, _htmlTitleRegex) ?? ''),
   ).trim();
   if (title.isEmpty) {
     return 'Unraid';
   }
   return title
-      .replaceAll(RegExp(r'\s+-\s+Unraid.*$', caseSensitive: false), '')
-      .replaceAll(RegExp(r'\s+\|\s+Unraid.*$', caseSensitive: false), '')
+      .replaceAll(_titleUnraidDashRegex, '')
+      .replaceAll(_titleUnraidPipeRegex, '')
       .trim();
 }
 
@@ -909,7 +793,7 @@ String _decodeHtml(String value) {
 }
 
 String _stripHtml(String html) {
-  return html.replaceAll(RegExp(r'<[^>]+>'), ' ');
+  return html.replaceAll(_htmlTagRegex, ' ');
 }
 
 String _joinPath(String parent, String child) {

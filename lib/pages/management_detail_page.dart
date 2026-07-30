@@ -10,7 +10,8 @@ class ManagementDetailPage extends StatefulWidget {
 }
 
 class _ManagementDetailPageState extends State<ManagementDetailPage> {
-  bool _isSubmitting = false;
+  /// Action busy flag is isolated so start/stop/restart do not rebuild details.
+  final ValueNotifier<bool> _isSubmitting = ValueNotifier<bool>(false);
   bool _shareBrowserReady = false;
   /// Spinner-only flag so soft directory refresh does not rebuild the file list.
   final ValueNotifier<bool> _shareLoading = ValueNotifier<bool>(false);
@@ -38,6 +39,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   void dispose() {
     _shareSearchDebounce?.cancel();
     _shareSearchController.dispose();
+    _isSubmitting.dispose();
     _shareLoading.dispose();
     _shareQuery.dispose();
     super.dispose();
@@ -210,47 +212,52 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                   ),
                 ],
                 const SizedBox(height: 18),
-                _DetailPanel(
-                  children: [
-                    _ManagementActionButton(
-                      icon: Icons.play_arrow,
-                      label: '启动',
-                      color: AppTheme.success,
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => _runAction(
-                                detailArgs,
-                                ManagementAction.start,
-                                '启动',
-                              ),
-                    ),
-                    const SizedBox(height: 10),
-                    _ManagementActionButton(
-                      icon: Icons.stop,
-                      label: '停止',
-                      color: AppTheme.danger,
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => _runAction(
-                                detailArgs,
-                                ManagementAction.stop,
-                                '停止',
-                              ),
-                    ),
-                    const SizedBox(height: 10),
-                    _ManagementActionButton(
-                      icon: Icons.refresh,
-                      label: '重启',
-                      color: const Color(0xFF3498DB),
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => _runAction(
-                                detailArgs,
-                                ManagementAction.restart,
-                                '重启',
-                              ),
-                    ),
-                  ],
+                ValueListenableBuilder<bool>(
+                  valueListenable: _isSubmitting,
+                  builder: (context, submitting, _) {
+                    return _DetailPanel(
+                      children: [
+                        _ManagementActionButton(
+                          icon: Icons.play_arrow,
+                          label: '启动',
+                          color: AppTheme.success,
+                          onPressed: submitting
+                              ? null
+                              : () => _runAction(
+                                    detailArgs,
+                                    ManagementAction.start,
+                                    '启动',
+                                  ),
+                        ),
+                        const SizedBox(height: 10),
+                        _ManagementActionButton(
+                          icon: Icons.stop,
+                          label: '停止',
+                          color: AppTheme.danger,
+                          onPressed: submitting
+                              ? null
+                              : () => _runAction(
+                                    detailArgs,
+                                    ManagementAction.stop,
+                                    '停止',
+                                  ),
+                        ),
+                        const SizedBox(height: 10),
+                        _ManagementActionButton(
+                          icon: Icons.refresh,
+                          label: '重启',
+                          color: const Color(0xFF3498DB),
+                          onPressed: submitting
+                              ? null
+                              : () => _runAction(
+                                    detailArgs,
+                                    ManagementAction.restart,
+                                    '重启',
+                                  ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
@@ -395,7 +402,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       return;
     }
 
-    setState(() => _isSubmitting = true);
+    _isSubmitting.value = true;
     try {
       await client.runManagementAction(
         type: args.data.type,
@@ -413,7 +420,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       _showMessage(error.message);
     } finally {
       if (mounted) {
-        setState(() => _isSubmitting = false);
+        _isSubmitting.value = false;
       }
     }
   }
@@ -568,9 +575,13 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                       ? Icons.folder
                       : entry.isImage
                           ? Icons.image
-                          : _isTextPreviewEntry(entry)
-                              ? Icons.description_outlined
-                              : Icons.insert_drive_file,
+                          : entry.isVideo
+                              ? Icons.movie_outlined
+                              : entry.isAudio
+                                  ? Icons.audiotrack
+                                  : _isTextPreviewEntry(entry)
+                                      ? Icons.description_outlined
+                                      : Icons.insert_drive_file,
                   title: entry.name,
                   subtitle:
                       entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
@@ -579,6 +590,10 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                       _openSharePath(entry.path);
                     } else if (entry.isImage) {
                       _previewImage(args, entry, imageEntries);
+                    } else if (entry.isVideo) {
+                      _previewVideo(args, entry);
+                    } else if (entry.isAudio) {
+                      _previewAudio(args, entry);
                     } else if (_isTextPreviewEntry(entry)) {
                       _previewText(args, entry);
                     } else {
@@ -761,6 +776,48 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       builder: (context) => Dialog(
         insetPadding: const EdgeInsets.all(18),
         child: _TextPreview(client: client, entry: entry),
+      ),
+    );
+  }
+
+  Future<void> _previewVideo(
+    ManagementDetailArgs args,
+    UnraidFileEntry entry,
+  ) async {
+    final client = args.unraidClient;
+    if (client == null) {
+      _showMessage('缺少服务器连接');
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog.fullscreen(
+        child: _ShareVideoPreview(client: client, entry: entry),
+      ),
+    );
+  }
+
+  Future<void> _previewAudio(
+    ManagementDetailArgs args,
+    UnraidFileEntry entry,
+  ) async {
+    final client = args.unraidClient;
+    if (client == null) {
+      _showMessage('缺少服务器连接');
+      return;
+    }
+    await MusicPlayerService.instance.playQueue(
+      client: client,
+      tracks: <UnraidFileEntry>[entry],
+      initial: entry,
+      rootPath: _parentPath(entry.path),
+    );
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => const MusicPlayerPage(),
       ),
     );
   }

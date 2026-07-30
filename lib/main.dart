@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:just_audio_background/just_audio_background.dart';
 
 import 'pages/album_page.dart';
 import 'pages/detail_page.dart';
@@ -11,6 +12,7 @@ import 'pages/music_page.dart';
 import 'pages/register_page.dart';
 import 'services/app_logger.dart';
 import 'theme/app_theme.dart';
+import 'widgets/mini_player_bar.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,6 +21,16 @@ Future<void> main() async {
   final imageCache = PaintingBinding.instance.imageCache;
   imageCache.maximumSize = 120;
   imageCache.maximumSizeBytes = 48 << 20; // 48 MB
+
+  if (!kIsWeb) {
+    await JustAudioBackground.init(
+      androidNotificationChannelId: 'com.ngc.unraider.channel.audio',
+      androidNotificationChannelName: '音乐播放',
+      androidNotificationOngoing: true,
+      androidStopForegroundOnPause: true,
+      preloadArtwork: false,
+    );
+  }
 
   await AppLogger.initialize();
 
@@ -68,6 +80,26 @@ class UnraiderApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       initialRoute: LoginPage.routeName,
+      builder: (context, child) {
+        // Global mini player above every route so playback survives navigation.
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            child ?? const SizedBox.shrink(),
+            const Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                top: false,
+                // Sit above the 58px shell bottom nav; other routes just get
+                // a little extra bottom inset which is fine.
+                child: MiniPlayerBar(bottomOffset: 58),
+              ),
+            ),
+          ],
+        );
+      },
       routes: {
         LoginPage.routeName: (_) => const LoginPage(),
         RegisterPage.routeName: (_) => const RegisterPage(),

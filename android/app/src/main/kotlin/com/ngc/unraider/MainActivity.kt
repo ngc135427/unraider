@@ -17,7 +17,7 @@ import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.share.DiskShare
-import io.flutter.embedding.android.FlutterActivity
+import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
@@ -30,7 +30,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
-class MainActivity : FlutterActivity() {
+class MainActivity : AudioServiceActivity() {
     companion object {
         private const val LOG_TAG = "UnraiderLog"
         @Volatile private var uncaughtHandlerInstalled = false
@@ -166,6 +166,27 @@ class MainActivity : FlutterActivity() {
                         }.start()
                     }
                 }
+                "readBytes" -> {
+                    val uri = call.argument<String>("uri")
+                    if (uri.isNullOrBlank()) {
+                        result.success(ByteArray(0))
+                    } else {
+                        Thread {
+                            try {
+                                val bytes = readBytes(uri)
+                                runOnUiThread { result.success(bytes) }
+                            } catch (error: Exception) {
+                                runOnUiThread {
+                                    result.error(
+                                        "read_bytes_failed",
+                                        error.message ?: "读取本机媒体失败",
+                                        null
+                                    )
+                                }
+                            }
+                        }.start()
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -204,6 +225,47 @@ class MainActivity : FlutterActivity() {
                                     result.error(
                                         "smb_read_failed",
                                         error.message ?: "SMB 读取失败",
+                                        null
+                                    )
+                                }
+                            }
+                        }.start()
+                    }
+                }
+                "readSmbFileRange" -> {
+                    val host = call.argument<String>("host").orEmpty()
+                    val username = call.argument<String>("username").orEmpty()
+                    val password = call.argument<String>("password").orEmpty()
+                    val share = call.argument<String>("share").orEmpty()
+                    val relativePath = call.argument<String>("relativePath").orEmpty()
+                    val offset = (call.argument<Number>("offset") ?: 0).toLong()
+                    val length = call.argument<Int>("length") ?: 0
+
+                    if (host.isBlank() || share.isBlank() || relativePath.isBlank() || length <= 0) {
+                        result.error("invalid_arguments", "SMB range 参数不完整", null)
+                    } else {
+                        Thread {
+                            try {
+                                val bytes = readSmbFileRangeBytes(
+                                    host = host,
+                                    username = username,
+                                    password = password,
+                                    shareName = share,
+                                    relativePath = relativePath,
+                                    offset = offset,
+                                    length = length,
+                                )
+                                runOnUiThread { result.success(bytes) }
+                            } catch (error: Exception) {
+                                appendLogLine(
+                                    "${timestamp()} smb_range_error host=$host share=$share " +
+                                        "path=$relativePath offset=$offset length=$length " +
+                                        Log.getStackTraceString(error)
+                                )
+                                runOnUiThread {
+                                    result.error(
+                                        "smb_range_failed",
+                                        error.message ?: "SMB range 读取失败",
                                         null
                                     )
                                 }
@@ -402,14 +464,50 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun readChunk(uriText: String, offset: Long, length: Int): ByteArray {
+        if (length <= 0) return ByteArray(0)
+        val uri = Uri.parse(uriText)
+        // Prefer AssetFileDescriptor + FileChannel so large album uploads can
+        // seek instead of slowly skipping through the whole stream.
+        try {
+            contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                val channel = afd.createInputStream().channel
+                channel.position(offset.coerceAtLeast(0L))
+                val buffer = java.nio.ByteBuffer.allocate(length)
+                while (buffer.hasRemaining()) {
+                    val read = channel.read(buffer)
+                    if (read <= 0) break
+                }
+                val total = buffer.position()
+                return if (total == length) buffer.array() else buffer.array().copyOf(total)
+            }
+        } catch (error: Exception) {
+            appendLogLine(
+                "${timestamp()} local_media_read_chunk_afd_error uri=$uriText " +
+                    "offset=$offset length=$length ${error.message}"
+            )
+        }
+
         return try {
-            contentResolver.openInputStream(Uri.parse(uriText)).use { input ->
-                if (input == null) return ByteArray(0)
+            contentResolver.openInputStream(uri).use { input ->
+                if (input == null) {
+                    throw IllegalStateException("无法打开媒体流")
+                }
                 var remainingSkip = offset
                 while (remainingSkip > 0) {
                     val skipped = input.skip(remainingSkip)
-                    if (skipped <= 0) break
-                    remainingSkip -= skipped
+                    if (skipped <= 0) {
+                        // Some ContentProviders return 0 from skip(); fall back
+                        // to draining bytes so album sync can still progress.
+                        val drain = ByteArray(minOf(remainingSkip, 64L * 1024L).toInt())
+                        val read = input.read(drain)
+                        if (read <= 0) break
+                        remainingSkip -= read.toLong()
+                    } else {
+                        remainingSkip -= skipped
+                    }
+                }
+                if (remainingSkip > 0) {
+                    return ByteArray(0)
                 }
                 val buffer = ByteArray(length)
                 var total = 0
@@ -420,8 +518,21 @@ class MainActivity : FlutterActivity() {
                 }
                 if (total == buffer.size) buffer else buffer.copyOf(total)
             } ?: ByteArray(0)
-        } catch (_: Exception) {
-            ByteArray(0)
+        } catch (error: Exception) {
+            appendLogLine(
+                "${timestamp()} local_media_read_chunk_error uri=$uriText " +
+                    "offset=$offset length=$length ${Log.getStackTraceString(error)}"
+            )
+            throw error
+        }
+    }
+
+    private fun readBytes(uriText: String): ByteArray {
+        contentResolver.openInputStream(Uri.parse(uriText)).use { input ->
+            if (input == null) {
+                throw IllegalStateException("无法打开媒体文件")
+            }
+            return input.readBytes()
         }
     }
 
@@ -485,6 +596,91 @@ class MainActivity : FlutterActivity() {
                         remoteFile.inputStream.use { input ->
                             return input.readBytes()
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun readSmbFileRangeBytes(
+        host: String,
+        username: String,
+        password: String,
+        shareName: String,
+        relativePath: String,
+        offset: Long,
+        length: Int
+    ): ByteArray {
+        val smbPath = relativePath
+            .replace('/', '\\')
+            .trim { it == '\\' || it == '/' }
+        if (smbPath.isBlank()) {
+            throw IllegalArgumentException("SMB 文件路径为空")
+        }
+        if (offset < 0 || length <= 0) {
+            return ByteArray(0)
+        }
+
+        val config = SmbConfig.builder()
+            .withTimeout(30, TimeUnit.SECONDS)
+            .withSoTimeout(30, TimeUnit.SECONDS)
+            .build()
+
+        val authContexts = mutableListOf<AuthenticationContext>()
+        if (username.isNotBlank()) {
+            authContexts.add(AuthenticationContext(username, password.toCharArray(), null))
+        }
+        authContexts.add(AuthenticationContext.guest())
+        authContexts.add(AuthenticationContext.anonymous())
+
+        var lastError: Exception? = null
+        for (auth in authContexts) {
+            try {
+                return readSmbFileRangeWithAuth(
+                    config = config,
+                    host = host,
+                    auth = auth,
+                    shareName = shareName,
+                    smbPath = smbPath,
+                    offset = offset,
+                    length = length,
+                )
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+
+        throw lastError ?: IllegalStateException("SMB range 读取失败")
+    }
+
+    private fun readSmbFileRangeWithAuth(
+        config: SmbConfig,
+        host: String,
+        auth: AuthenticationContext,
+        shareName: String,
+        smbPath: String,
+        offset: Long,
+        length: Int
+    ): ByteArray {
+        SMBClient(config).use { client ->
+            client.connect(host).use { connection ->
+                val session = connection.authenticate(auth)
+                (session.connectShare(shareName) as DiskShare).use { share ->
+                    share.openFile(
+                        smbPath,
+                        EnumSet.of(AccessMask.GENERIC_READ),
+                        EnumSet.noneOf(FileAttributes::class.java),
+                        SMB2ShareAccess.ALL,
+                        SMB2CreateDisposition.FILE_OPEN,
+                        EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE)
+                    ).use { remoteFile ->
+                        val buffer = ByteArray(length)
+                        // SMBJ File.read returns the number of bytes copied into buffer.
+                        val read = remoteFile.read(buffer, offset, 0, length)
+                        if (read <= 0) {
+                            return ByteArray(0)
+                        }
+                        return if (read == buffer.size) buffer else buffer.copyOf(read)
                     }
                 }
             }

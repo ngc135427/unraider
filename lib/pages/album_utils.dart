@@ -142,11 +142,14 @@ String _dateTitle(DateTime date) {
   return '${date.year}年${date.month.toString().padLeft(2, '0')}月${date.day.toString().padLeft(2, '0')}日';
 }
 
+final _controlCharRegex = RegExp(r'[\x00-\x1F]');
+final _localMultiSlashRegex = RegExp(r'/+');
+
 String _safeRemoteName(String name) {
   final sanitized = name
       .replaceAll('/', '_')
       .replaceAll(r'\', '_')
-      .replaceAll(RegExp(r'[\x00-\x1F]'), '_')
+      .replaceAll(_controlCharRegex, '_')
       .trim();
   if (sanitized.isEmpty) {
     return 'media_${DateTime.now().millisecondsSinceEpoch}';
@@ -191,5 +194,5 @@ String _normalizeLocalPath(String path) {
   if (!normalized.startsWith('/')) {
     normalized = '/$normalized';
   }
-  return _trimSlash(normalized.replaceAll(RegExp(r'/+'), '/'));
+  return _trimSlash(normalized.replaceAll(_localMultiSlashRegex, '/'));
 }

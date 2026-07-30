@@ -61,6 +61,7 @@ class _DashboardSegmentCache {
 }
 
 const _remoteFileChannel = MethodChannel('unraider/remote_file');
+const _localMediaChannel = MethodChannel('unraider/local_media');
 
 class UnraidWebGuiClient {
   UnraidWebGuiClient({
@@ -87,7 +88,8 @@ class UnraidWebGuiClient {
   static const loginTimeout = Duration(seconds: 25);
 
   /// Long-running SSH/SFTP file transfers.
-  static const fileTransferTimeout = Duration(seconds: 45);
+  /// Generous timeout so album/video/music previews can pull larger media.
+  static const fileTransferTimeout = Duration(minutes: 3);
 
   /// Short probes (SSH port discovery, directory existence).
   static const probeTimeout = Duration(seconds: 10);
@@ -124,6 +126,9 @@ class UnraidWebGuiClient {
   final Map<String, _FileBytesCacheEntry> _fileBytesCache =
       <String, _FileBytesCacheEntry>{};
   final Map<String, Future<Uint8List>> _fileBytesInflight =
+      <String, Future<Uint8List>>{};
+  /// In-flight byte-range reads for progressive media streaming.
+  final Map<String, Future<Uint8List>> _fileRangeInflight =
       <String, Future<Uint8List>>{};
   String? _csrfToken;
   Future<void>? _csrfTokenFuture;
@@ -525,6 +530,59 @@ class UnraidWebGuiClient {
     }
   }
 
+  /// Range read for progressive audio/video streaming.
+  ///
+  /// [offset] is zero-based; [length] is the maximum number of bytes to return.
+  /// The returned buffer may be shorter near EOF.
+  Future<Uint8List> fetchFileRange(
+    String path, {
+    required int offset,
+    required int length,
+  }) async {
+    if (kIsWeb) {
+      throw const UnraidClientException('Web 端暂不支持直接读取 Unraid 文件');
+    }
+    if (offset < 0) {
+      throw const UnraidClientException('无效的读取偏移');
+    }
+    if (length <= 0) {
+      return Uint8List(0);
+    }
+
+    final normalized = _normalizeUnraidPath(path);
+    // Small whole-file cache hits can satisfy range requests without network.
+    final cached = _readFileBytesCache(normalized);
+    if (cached != null) {
+      if (offset >= cached.length) {
+        return Uint8List(0);
+      }
+      final end = offset + length > cached.length
+          ? cached.length
+          : offset + length;
+      return Uint8List.sublistView(cached, offset, end);
+    }
+
+    final rangeKey = '$normalized|$offset|$length';
+    final inflight = _fileRangeInflight[rangeKey];
+    if (inflight != null) {
+      return inflight;
+    }
+
+    final future = _loadFileRange(
+      normalized,
+      offset: offset,
+      length: length,
+    );
+    _fileRangeInflight[rangeKey] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_fileRangeInflight[rangeKey], future)) {
+        _fileRangeInflight.remove(rangeKey);
+      }
+    }
+  }
+
   Uint8List? _readFileBytesCache(String path) {
     final cached = _fileBytesCache[path];
     if (cached == null) {
@@ -609,6 +667,65 @@ class UnraidWebGuiClient {
     }
   }
 
+  Future<Uint8List> _loadFileRange(
+    String normalized, {
+    required int offset,
+    required int length,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final smbPath = smbSharePathFromUnraidPath(normalized);
+    if (defaultTargetPlatform == TargetPlatform.android && smbPath != null) {
+      return _fetchFileRangeViaAndroidSmb(
+        normalizedPath: normalized,
+        smbPath: smbPath,
+        offset: offset,
+        length: length,
+        stopwatch: stopwatch,
+      );
+    }
+
+    try {
+      await AppLogger.log(
+        'fetch_file_range_start path=$normalized offset=$offset length=$length',
+      );
+      final bytes = await _runSftpTransfer(() async {
+        SftpFile? file;
+        try {
+          final sftp = await _ensureSftpClient();
+          file = await sftp.open(
+            normalized,
+            mode: SftpFileOpenMode.read,
+          );
+          return await file.readBytes(offset: offset, length: length);
+        } finally {
+          await file?.close();
+        }
+      }).timeout(fileTransferTimeout);
+      await AppLogger.log(
+        'fetch_file_range_success path=$normalized bytes=${bytes.length} '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      return bytes;
+    } on TimeoutException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_range_timeout path=$normalized offset=$offset '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw const UnraidClientException('流式读取超时');
+    } on UnraidClientException {
+      rethrow;
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_range_error path=$normalized offset=$offset',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UnraidClientException('无法流式读取文件：$error');
+    }
+  }
+
   Future<Uint8List> _fetchFileBytesViaAndroidSmb({
     required String normalizedPath,
     required SmbSharePath smbPath,
@@ -674,6 +791,65 @@ class UnraidWebGuiClient {
     }
   }
 
+  Future<Uint8List> _fetchFileRangeViaAndroidSmb({
+    required String normalizedPath,
+    required SmbSharePath smbPath,
+    required int offset,
+    required int length,
+    required Stopwatch stopwatch,
+  }) async {
+    try {
+      await AppLogger.log(
+        'fetch_file_range_smb_start path=$normalizedPath '
+        'share=${smbPath.share} offset=$offset length=$length',
+      );
+      final bytes = await _remoteFileChannel.invokeMethod<Uint8List>(
+        'readSmbFileRange',
+        <String, Object?>{
+          'host': Uri.parse(baseUrl).host,
+          'username': username,
+          'password': _password,
+          'share': smbPath.share,
+          'relativePath': smbPath.relativePath,
+          'offset': offset,
+          'length': length,
+        },
+      ).timeout(fileTransferTimeout);
+      if (bytes == null) {
+        throw const UnraidClientException('SMB 没有返回文件内容');
+      }
+      await AppLogger.log(
+        'fetch_file_range_smb_success path=$normalizedPath '
+        'bytes=${bytes.length} elapsedMs=${stopwatch.elapsedMilliseconds}',
+      );
+      return bytes;
+    } on TimeoutException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_range_smb_timeout path=$normalizedPath '
+        'elapsedMs=${stopwatch.elapsedMilliseconds}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw const UnraidClientException('SMB 流式读取超时');
+    } on PlatformException catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_range_smb_error path=$normalizedPath',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UnraidClientException(
+        'SMB 流式读取失败：${error.message ?? error.code}',
+      );
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'fetch_file_range_smb_error path=$normalizedPath',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      throw UnraidClientException('SMB 流式读取失败：$error');
+    }
+  }
+
   Future<void> uploadFile({
     required String targetPath,
     required int sizeBytes,
@@ -711,21 +887,25 @@ class UnraidWebGuiClient {
                     : chunkSize;
             final chunk =
                 sizeBytes == 0 ? Uint8List(0) : await readChunk(offset, length);
-            if (chunk.length < length) {
-              throw const UnraidClientException('读取本机媒体文件失败');
+            // Near EOF the provider may return a short final chunk; only treat
+            // mid-file short reads as hard failures.
+            if (chunk.length < length && offset + chunk.length < sizeBytes) {
+              throw UnraidClientException(
+                '读取本机媒体文件失败（offset=$offset want=$length got=${chunk.length}）',
+              );
             }
             if (chunk.isNotEmpty) {
               await file.writeBytes(chunk, offset: offset);
             }
             offset += chunk.length;
-            if (sizeBytes == 0) {
+            if (sizeBytes == 0 || chunk.isEmpty) {
               break;
             }
           }
         } finally {
           await file?.close();
         }
-      });
+      }).timeout(fileTransferTimeout);
       if (modifiedDate != null && modifiedDate.millisecondsSinceEpoch > 0) {
         await _runSshCommand(
           '保留文件时间',
@@ -733,6 +913,7 @@ class UnraidWebGuiClient {
           timeout: httpTimeout,
         );
       }
+      // Parent path invalidation also drops nested media-scan cache keys.
       _invalidateDirectoryCache(_parentPath(normalized));
     } on TimeoutException {
       throw const UnraidClientException('上传文件超时');
@@ -743,51 +924,89 @@ class UnraidWebGuiClient {
     }
   }
 
+  /// Upload a local MediaStore item to Unraid over the shared SFTP session.
+  ///
+  /// Runs on the main isolate (not a background isolate) so the local-media
+  /// MethodChannel stays available. Background-isolate uploads previously
+  /// failed with channel/plugin "unavailable" errors after the audio-service
+  /// activity change.
   Future<void> uploadLocalMediaFile({
     required String targetPath,
     required String sourceUri,
     required int sizeBytes,
     DateTime? modifiedDate,
-    int chunkSize = 4 * 1024 * 1024,
+    int chunkSize = 1024 * 1024,
   }) async {
     if (kIsWeb) {
       throw const UnraidClientException('Web 端暂不支持上传文件到 Unraid');
     }
-    if (!_isWritableFilePath(targetPath)) {
-      throw const UnraidClientException('目标路径必须位于 /mnt 或 /boot 下');
+    if (sourceUri.trim().isEmpty) {
+      throw const UnraidClientException('本机媒体 URI 为空，无法上传');
     }
-    final rootToken = RootIsolateToken.instance;
-    if (rootToken == null) {
-      throw const UnraidClientException('后台上传初始化失败');
+    if (sizeBytes < 0) {
+      throw const UnraidClientException('本机媒体大小无效');
     }
 
-    final normalized = _normalizeUnraidPath(targetPath);
-    await ensureDirectory(_parentPath(normalized));
-    final port = await _resolveSshPort();
+    await AppLogger.log(
+      'album_upload_start path=$targetPath sizeBytes=$sizeBytes '
+      'uri=$sourceUri',
+    );
     try {
-      await Isolate.run(
-        () => _uploadLocalMediaFileInBackground(
-          _LocalMediaUploadRequest(
-            rootToken: rootToken,
-            host: Uri.parse(baseUrl).host,
-            port: port,
-            username: username,
-            password: _password,
-            targetPath: normalized,
-            sourceUri: sourceUri,
-            sizeBytes: sizeBytes,
-            modifiedMs: modifiedDate?.millisecondsSinceEpoch,
-            chunkSize: chunkSize,
-          ),
-        ),
+      await uploadFile(
+        targetPath: targetPath,
+        sizeBytes: sizeBytes,
+        modifiedDate: modifiedDate,
+        chunkSize: chunkSize,
+        readChunk: (offset, length) async {
+          final bytes = await _readLocalMediaChunk(
+            uri: sourceUri,
+            offset: offset,
+            length: length,
+          );
+          if (bytes.length < length && offset + bytes.length < sizeBytes) {
+            throw UnraidClientException(
+              '读取本机媒体不完整（offset=$offset want=$length got=${bytes.length}）',
+            );
+          }
+          return bytes;
+        },
       );
-      _invalidateDirectoryCache(_parentPath(normalized));
-    } on TimeoutException {
-      throw const UnraidClientException('上传文件超时');
+      await AppLogger.log('album_upload_success path=$targetPath');
     } on UnraidClientException {
       rethrow;
-    } on Object catch (error) {
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'album_upload_error path=$targetPath',
+        error: error,
+        stackTrace: stackTrace,
+      );
       throw UnraidClientException('无法上传文件：$error');
+    }
+  }
+
+  Future<Uint8List> _readLocalMediaChunk({
+    required String uri,
+    required int offset,
+    required int length,
+  }) async {
+    try {
+      final bytes = await _localMediaChannel.invokeMethod<Uint8List>(
+        'readChunk',
+        <String, Object?>{
+          'uri': uri,
+          'offset': offset,
+          'length': length,
+        },
+      );
+      return bytes ?? Uint8List(0);
+    } on MissingPluginException {
+      throw const UnraidClientException(
+        '本机媒体通道不可用，请确认在 Android 真机/模拟器上运行',
+      );
+    } on PlatformException catch (error) {
+      throw UnraidClientException(
+        '读取本机媒体失败：${error.message ?? error.code}',
+      );
     }
   }
 
@@ -1078,6 +1297,7 @@ class UnraidWebGuiClient {
     _mediaScanLoadGeneration.clear();
     _fileBytesCache.clear();
     _fileBytesInflight.clear();
+    _fileRangeInflight.clear();
     _cookies.clear();
     _cookieHeaderCache = null;
     _dashboardSegmentCache = null;

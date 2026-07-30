@@ -229,80 +229,179 @@ class _TrackSearchBox extends StatelessWidget {
 }
 
 class _PlayerProgress extends StatelessWidget {
-  const _PlayerProgress();
+  const _PlayerProgress({required this.player});
+
+  final AudioPlayer player;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: LinearProgressIndicator(
-            value: 0,
-            minHeight: 5,
-            backgroundColor: Colors.white.withValues(alpha: 0.18),
-            valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              '0:00',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.76),
-                fontSize: 12,
-              ),
-            ),
-            Text(
-              '--:--',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.76),
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      ],
+    return StreamBuilder<Duration?>(
+      stream: player.durationStream,
+      builder: (context, durationSnapshot) {
+        final duration = durationSnapshot.data ?? Duration.zero;
+        return StreamBuilder<Duration>(
+          stream: player.positionStream,
+          builder: (context, positionSnapshot) {
+            final position = positionSnapshot.data ?? Duration.zero;
+            final totalMs = duration.inMilliseconds;
+            final value = totalMs <= 0
+                ? 0.0
+                : (position.inMilliseconds / totalMs).clamp(0.0, 1.0);
+            return Column(
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 4,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 7,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 14,
+                    ),
+                    activeTrackColor: Colors.white,
+                    inactiveTrackColor: Colors.white.withValues(alpha: 0.22),
+                    thumbColor: Colors.white,
+                    overlayColor: Colors.white24,
+                  ),
+                  child: Slider(
+                    value: value,
+                    onChanged: totalMs <= 0
+                        ? null
+                        : (next) {
+                            final seekTo = Duration(
+                              milliseconds: (next * totalMs).round(),
+                            );
+                            unawaited(player.seek(seekTo));
+                          },
+                  ),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _formatPlayerTime(position),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.76),
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      totalMs <= 0 ? '--:--' : _formatPlayerTime(duration),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.76),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 }
 
 class _PlayerControls extends StatelessWidget {
-  const _PlayerControls();
+  const _PlayerControls({
+    required this.player,
+    required this.enabled,
+    required this.canSkip,
+    required this.onPlayPause,
+    this.onPrevious,
+    this.onNext,
+    this.onRetry,
+  });
+
+  final AudioPlayer player;
+  final bool enabled;
+  final bool canSkip;
+  final VoidCallback onPlayPause;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
+    return Column(
       children: [
-        IconButton(
-          onPressed: () {},
-          icon: const Icon(Icons.skip_previous, color: Colors.white, size: 34),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            IconButton(
+              onPressed: canSkip ? onPrevious : null,
+              icon: Icon(
+                Icons.skip_previous,
+                color: Colors.white.withValues(alpha: canSkip ? 1 : 0.35),
+                size: 34,
+              ),
+            ),
+            const SizedBox(width: 18),
+            StreamBuilder<PlayerState>(
+              stream: player.playerStateStream,
+              builder: (context, snapshot) {
+                final playing = snapshot.data?.playing ?? false;
+                final processing = snapshot.data?.processingState;
+                final busy = processing == ProcessingState.loading ||
+                    processing == ProcessingState.buffering;
+                return Material(
+                  color: Colors.white,
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    customBorder: const CircleBorder(),
+                    onTap: enabled ? onPlayPause : null,
+                    child: SizedBox(
+                      width: 64,
+                      height: 64,
+                      child: busy
+                          ? const Padding(
+                              padding: EdgeInsets.all(18),
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(
+                              playing ? Icons.pause : Icons.play_arrow,
+                              color: enabled
+                                  ? AppTheme.primary
+                                  : AppTheme.textLight,
+                              size: 34,
+                            ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(width: 18),
+            IconButton(
+              onPressed: canSkip ? onNext : null,
+              icon: Icon(
+                Icons.skip_next,
+                color: Colors.white.withValues(alpha: canSkip ? 1 : 0.35),
+                size: 34,
+              ),
+            ),
+          ],
         ),
-        const SizedBox(width: 18),
-        Container(
-          width: 64,
-          height: 64,
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            shape: BoxShape.circle,
+        if (onRetry != null) ...[
+          const SizedBox(height: 10),
+          TextButton(
+            onPressed: onRetry,
+            child: const Text(
+              '重试',
+              style: TextStyle(color: Colors.white),
+            ),
           ),
-          child: const Icon(
-            Icons.play_arrow,
-            color: AppTheme.primary,
-            size: 34,
-          ),
-        ),
-        const SizedBox(width: 18),
-        IconButton(
-          onPressed: () {},
-          icon: const Icon(Icons.skip_next, color: Colors.white, size: 34),
-        ),
+        ],
       ],
     );
   }
+}
+
+String _formatPlayerTime(Duration value) {
+  final total = value.inSeconds;
+  final minutes = total ~/ 60;
+  final seconds = (total % 60).toString().padLeft(2, '0');
+  return '$minutes:$seconds';
 }
 
 class _NowPlayingCard extends StatelessWidget {

@@ -243,11 +243,35 @@ class LocalMediaStore {
     required int offset,
     required int length,
   }) async {
+    if (uri.isEmpty || length <= 0) {
+      return Uint8List(0);
+    }
     try {
       final bytes = await _channel.invokeMethod<Uint8List>('readChunk', {
         'uri': uri,
         'offset': offset,
         'length': length,
+      });
+      return bytes ?? Uint8List(0);
+    } on MissingPluginException {
+      // Do not silently return empty bytes — callers (album sync) would then
+      // treat a truncated read as a hard failure with a clearer message.
+      throw const LocalMediaException(
+        '本机媒体通道不可用，请确认在 Android 真机/模拟器上运行',
+      );
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '读取媒体文件失败');
+    }
+  }
+
+  /// Full-file read for local photo fullscreen preview.
+  static Future<Uint8List> readBytes(String uri) async {
+    if (uri.isEmpty) {
+      return Uint8List(0);
+    }
+    try {
+      final bytes = await _channel.invokeMethod<Uint8List>('readBytes', {
+        'uri': uri,
       });
       return bytes ?? Uint8List(0);
     } on MissingPluginException {

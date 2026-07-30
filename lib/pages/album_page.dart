@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:video_player/video_player.dart';
 
 import '../services/album_preferences.dart';
 import '../services/local_media_store.dart';
+import '../services/media_cache.dart';
 import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
 import '../widgets/fade_slide.dart';
@@ -14,12 +17,24 @@ import '../widgets/phone_frame.dart';
 part 'album_widgets.dart';
 part 'album_utils.dart';
 
-/// Skip full-resolution remote downloads above this size for album tiles.
+/// Skip full-resolution remote downloads above this size for album *tiles*
+/// only — fullscreen stills stream to disk with no size ceiling.
 const _maxAlbumPreviewBytes = 8 * 1024 * 1024;
+const _maxAlbumFullscreenDecodeExtent = 2400;
 const _maxSyncBatchSize = 10;
 const _maxAlbumTileDecodeExtent = 480;
 /// Cap tiles per day-section so a huge day does not expand the outer ListView.
 const _maxAlbumSectionTiles = 60;
+
+/// Process-local cache for local fullscreen image files (uri -> File).
+final Map<String, Future<File>> _localFullscreenFileCache =
+    <String, Future<File>>{};
+const _maxLocalFullscreenCacheEntries = 12;
+
+/// Process-local cache for remote fullscreen image files (path -> File).
+final Map<String, Future<File>> _remoteFullscreenFileCache =
+    <String, Future<File>>{};
+const _maxRemoteFullscreenCacheEntries = 12;
 
 /// In-memory LRU-ish cache for remote album thumbnails within one process.
 final Map<String, Future<Uint8List?>> _remoteThumbnailCache =
@@ -133,6 +148,27 @@ class _AlbumSyncProgress {
   }
 }
 
+class _AlbumPaneState {
+  const _AlbumPaneState({
+    this.loading = true,
+    this.error,
+  });
+
+  final bool loading;
+  final String? error;
+
+  _AlbumPaneState copyWith({
+    bool? loading,
+    String? error,
+    bool clearError = false,
+  }) {
+    return _AlbumPaneState(
+      loading: loading ?? this.loading,
+      error: clearError ? null : (error ?? this.error),
+    );
+  }
+}
+
 class _PhoAlbumShell extends StatefulWidget {
   const _PhoAlbumShell({
     required this.initialTab,
@@ -158,12 +194,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   late final Set<_PhoAlbumTab> _visitedTabs = <_PhoAlbumTab>{widget.initialTab};
   /// Bumped when a lazy album tab is first visited.
   final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
-  bool _loadingLocal = true;
-  bool _loadingRemote = true;
   bool _loadingAll = false;
   int _loadGeneration = 0;
-  String? _error;
-  String? _remoteError;
+  /// Local/remote loading banners are isolated so one side finishing does not
+  /// rebuild the other timeline body.
+  final ValueNotifier<_AlbumPaneState> _localState =
+      ValueNotifier<_AlbumPaneState>(const _AlbumPaneState());
+  final ValueNotifier<_AlbumPaneState> _remoteState =
+      ValueNotifier<_AlbumPaneState>(const _AlbumPaneState());
   /// Sync progress is published separately so per-file updates do not rebuild
   /// the local/remote timeline tabs.
   final ValueNotifier<_AlbumSyncProgress> _syncProgress =
@@ -251,6 +289,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   void dispose() {
     _tab.dispose();
     _visitedTabsVersion.dispose();
+    _localState.dispose();
+    _remoteState.dispose();
     _syncProgress.dispose();
     super.dispose();
   }
@@ -258,11 +298,11 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   Future<void> _loadAll({bool runAutoSync = true}) async {
     final args = _args;
     if (args == null) {
-      setState(() {
-        _error = '缺少连接参数，请从主页应用入口打开相册';
-        _loadingLocal = false;
-        _loadingRemote = false;
-      });
+      _localState.value = const _AlbumPaneState(
+        loading: false,
+        error: '缺少连接参数，请从主页应用入口打开相册',
+      );
+      _remoteState.value = const _AlbumPaneState(loading: false);
       return;
     }
 
@@ -274,12 +314,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     final generation = ++_loadGeneration;
     _loadingAll = true;
 
-    setState(() {
-      _loadingLocal = true;
-      _loadingRemote = true;
-      _error = null;
-      _remoteError = null;
-    });
+    _localState.value = const _AlbumPaneState(loading: true);
+    _remoteState.value = const _AlbumPaneState(loading: true);
 
     try {
       final preferences = await AlbumPreferences.load();
@@ -313,7 +349,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       final current = _syncProgress.value;
       _syncProgress.value = current.copyWith(pendingCount: pending);
 
-      if (preferences.autoBackup && runAutoSync && _error == null) {
+      if (preferences.autoBackup && runAutoSync && _localState.value.error == null) {
         unawaited(_syncPending());
       }
     } finally {
@@ -331,11 +367,13 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
           return;
         }
         setState(() {
-          _error = '需要照片和视频权限。请在系统设置中允许访问相册后重试。';
           _localMedia = const <LocalMediaAsset>[];
           _buckets = const <LocalMediaBucket>[];
-          _loadingLocal = false;
         });
+        _localState.value = const _AlbumPaneState(
+          loading: false,
+          error: '需要照片和视频权限。请在系统设置中允许访问相册后重试。',
+        );
         return;
       }
 
@@ -349,29 +387,29 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       setState(() {
         _localMedia = results[0] as List<LocalMediaAsset>;
         _buckets = results[1] as List<LocalMediaBucket>;
-        _error = null;
-        _loadingLocal = false;
       });
+      _localState.value = const _AlbumPaneState(loading: false);
     } on LocalMediaException catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
-        _error = error.message;
         _localMedia = const <LocalMediaAsset>[];
         _buckets = const <LocalMediaBucket>[];
-        _loadingLocal = false;
       });
+      _localState.value = _AlbumPaneState(loading: false, error: error.message);
     } on Object catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
-        _error = '本机相册加载失败：$error';
         _localMedia = const <LocalMediaAsset>[];
         _buckets = const <LocalMediaBucket>[];
-        _loadingLocal = false;
       });
+      _localState.value = _AlbumPaneState(
+        loading: false,
+        error: '本机相册加载失败：$error',
+      );
     }
   }
 
@@ -395,27 +433,30 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
       setState(() {
         _remoteMedia = remote;
-        _remoteError = null;
-        _loadingRemote = false;
       });
+      _remoteState.value = const _AlbumPaneState(loading: false);
     } on UnraidClientException catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
         _remoteMedia = const <UnraidFileEntry>[];
-        _remoteError = error.message;
-        _loadingRemote = false;
       });
+      _remoteState.value = _AlbumPaneState(
+        loading: false,
+        error: error.message,
+      );
     } on Object catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
       setState(() {
         _remoteMedia = const <UnraidFileEntry>[];
-        _remoteError = '云端读取失败：$error';
-        _loadingRemote = false;
       });
+      _remoteState.value = _AlbumPaneState(
+        loading: false,
+        error: '云端读取失败：$error',
+      );
     }
   }
 
@@ -425,10 +466,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       return;
     }
     final generation = ++_loadGeneration;
-    setState(() {
-      _loadingRemote = true;
-      _remoteError = null;
-    });
+    _remoteState.value = const _AlbumPaneState(loading: true);
     await _loadRemoteMedia(
       client: client,
       targetDir: _preferences.targetDir,
@@ -496,7 +534,12 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
     try {
       var uploaded = 0;
+      Object? lastError;
       for (final asset in pending) {
+        if (asset.uri.isEmpty) {
+          lastError = '媒体 URI 为空：${asset.name}';
+          continue;
+        }
         final targetPath = _targetPathFor(_preferences.targetDir, asset);
         final targetDir = _parentPath(targetPath);
         if (!mounted) {
@@ -514,13 +557,26 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _syncProgress.value = _syncProgress.value.copyWith(
           message: '上传 ${uploaded + 1}/${pending.length}：${asset.name}',
         );
-        await client.uploadLocalMediaFile(
-          targetPath: targetPath,
-          sourceUri: asset.uri,
-          sizeBytes: asset.sizeBytes,
-          modifiedDate: asset.dateModified,
-        );
-        uploaded += 1;
+        try {
+          await client.uploadLocalMediaFile(
+            targetPath: targetPath,
+            sourceUri: asset.uri,
+            sizeBytes: asset.sizeBytes,
+            modifiedDate: asset.dateModified,
+          );
+          uploaded += 1;
+        } on Object catch (error) {
+          lastError = error;
+          // Continue the batch so one bad file does not block the rest.
+          if (!mounted) {
+            return;
+          }
+          _syncProgress.value = _syncProgress.value.copyWith(
+            message: '跳过 ${asset.name}：$error',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+          continue;
+        }
         if (!mounted) {
           return;
         }
@@ -533,13 +589,18 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       if (!mounted) {
         return;
       }
+      final failed = pending.length - uploaded;
       _syncProgress.value = _AlbumSyncProgress(
         syncing: false,
         uploadedCount: uploaded,
-        pendingCount: remainingAfterBatch,
-        message: remainingAfterBatch > 0
-            ? '已上传 $uploaded 个，还有 $remainingAfterBatch 个待同步'
-            : '已上传 $uploaded 个照片/视频',
+        pendingCount: remainingAfterBatch + failed,
+        message: failed > 0
+            ? '已上传 $uploaded 个，失败 $failed 个'
+                '${lastError == null ? '' : '（$lastError）'}'
+                '${remainingAfterBatch > 0 ? '，还有 $remainingAfterBatch 个待同步' : ''}'
+            : remainingAfterBatch > 0
+                ? '已上传 $uploaded 个，还有 $remainingAfterBatch 个待同步'
+                : '已上传 $uploaded 个照片/视频',
       );
       LocalMediaStore.invalidateCaches();
       await _reloadRemote();
@@ -736,49 +797,61 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     return switch (tab) {
       // Local/remote use CustomScrollView so day sections are virtualized
       // instead of expanding every grid inside one unbounded ListView.
-      _PhoAlbumTab.local => RefreshIndicator(
-          onRefresh: () => _loadAll(runAutoSync: false),
-          child: CustomScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            slivers: [
-              if (_error != null)
-                SliverPadding(
-                  padding: padding,
-                  sliver: SliverToBoxAdapter(
-                    child: _InlineState(
-                      icon: Icons.error_outline,
-                      title: '本机相册读取失败',
-                      detail: _error!,
-                      actionLabel: '重试',
-                      onAction: () => _loadAll(runAutoSync: false),
+      _PhoAlbumTab.local => ValueListenableBuilder<_AlbumPaneState>(
+          valueListenable: _localState,
+          builder: (context, localState, _) {
+            return RefreshIndicator(
+              onRefresh: () => _loadAll(runAutoSync: false),
+              child: CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  if (localState.error != null)
+                    SliverPadding(
+                      padding: padding,
+                      sliver: SliverToBoxAdapter(
+                        child: _InlineState(
+                          icon: Icons.error_outline,
+                          title: '本机相册读取失败',
+                          detail: localState.error!,
+                          actionLabel: '重试',
+                          onAction: () => _loadAll(runAutoSync: false),
+                        ),
+                      ),
+                    )
+                  else
+                    _LocalTimeline(
+                      loading: localState.loading,
+                      media: local,
+                      gallery: local,
+                      videosOnly: widget.videosOnly,
+                      padding: padding,
                     ),
-                  ),
-                )
-              else
-                _LocalTimeline(
-                  loading: _loadingLocal,
-                  media: local,
-                  videosOnly: widget.videosOnly,
-                  padding: padding,
-                ),
-            ],
-          ),
-        ),
-      _PhoAlbumTab.remote => RefreshIndicator(
-          onRefresh: _reloadRemote,
-          child: CustomScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            slivers: [
-              _RemoteTimeline(
-                loading: _loadingRemote,
-                error: _remoteError,
-                client: _client,
-                entries: _remoteMedia,
-                onRetry: _reloadRemote,
-                padding: padding,
+                ],
               ),
-            ],
-          ),
+            );
+          },
+        ),
+      _PhoAlbumTab.remote => ValueListenableBuilder<_AlbumPaneState>(
+          valueListenable: _remoteState,
+          builder: (context, remoteState, _) {
+            return RefreshIndicator(
+              onRefresh: _reloadRemote,
+              child: CustomScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  _RemoteTimeline(
+                    loading: remoteState.loading,
+                    error: remoteState.error,
+                    client: _client,
+                    entries: _remoteMedia,
+                    gallery: _remoteMedia,
+                    onRetry: _reloadRemote,
+                    padding: padding,
+                  ),
+                ],
+              ),
+            );
+          },
         ),
       _PhoAlbumTab.sync => ListView(
           padding: padding,

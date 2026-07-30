@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 
+import '../services/music_player_service.dart';
 import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
 import '../widgets/fade_slide.dart';
@@ -51,6 +53,27 @@ _MusicLibraryCacheEntry? _readMusicLibraryCache(String key) {
   return cached;
 }
 
+class _MusicLoadState {
+  const _MusicLoadState({
+    this.loading = true,
+    this.error,
+  });
+
+  final bool loading;
+  final String? error;
+
+  _MusicLoadState copyWith({
+    bool? loading,
+    String? error,
+    bool clearError = false,
+  }) {
+    return _MusicLoadState(
+      loading: loading ?? this.loading,
+      error: clearError ? null : (error ?? this.error),
+    );
+  }
+}
+
 class MusicPageArgs {
   const MusicPageArgs({
     required this.unraidClient,
@@ -74,10 +97,11 @@ class _MusicPageState extends State<MusicPage> {
   UnraidClient? _client;
   String _rootPath = '/mnt/user/music';
   List<UnraidFileEntry> _tracks = const <UnraidFileEntry>[];
-  bool _loading = true;
   bool _loadingTracks = false;
   int _loadGeneration = 0;
-  String? _error;
+  /// Loading/error strip is isolated so search typing does not rebuild summary.
+  final ValueNotifier<_MusicLoadState> _loadState =
+      ValueNotifier<_MusicLoadState>(const _MusicLoadState());
   /// Search query is isolated so typing does not rebuild summary/now-playing.
   final ValueNotifier<String> _query = ValueNotifier<String>('');
   Timer? _searchDebounce;
@@ -175,6 +199,7 @@ class _MusicPageState extends State<MusicPage> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _loadState.dispose();
     _query.dispose();
     super.dispose();
   }
@@ -194,10 +219,10 @@ class _MusicPageState extends State<MusicPage> {
       _client = args;
       unawaited(_loadTracks());
     } else {
-      setState(() {
-        _loading = false;
-        _error = '缺少连接参数，请从主页应用入口打开音乐';
-      });
+      _loadState.value = const _MusicLoadState(
+        loading: false,
+        error: '缺少连接参数，请从主页应用入口打开音乐',
+      );
     }
   }
 
@@ -214,9 +239,8 @@ class _MusicPageState extends State<MusicPage> {
           _rootPath = cached.rootPath;
           _tracks = cached.tracks;
           _currentTrack ??= cached.tracks.isEmpty ? null : cached.tracks.first;
-          _loading = false;
-          _error = null;
         });
+        _loadState.value = const _MusicLoadState(loading: false);
         return;
       }
       if (_loadingTracks) {
@@ -226,10 +250,7 @@ class _MusicPageState extends State<MusicPage> {
 
     final generation = ++_loadGeneration;
     _loadingTracks = true;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    _loadState.value = const _MusicLoadState(loading: true);
 
     try {
       final roots = _candidateMusicRoots(_rootPath);
@@ -283,25 +304,21 @@ class _MusicPageState extends State<MusicPage> {
         _rootPath = usedRoot;
         _tracks = tracks;
         _currentTrack ??= tracks.isEmpty ? null : tracks.first;
-        _loading = false;
-        _error = null;
       });
+      _loadState.value = const _MusicLoadState(loading: false);
     } on UnraidClientException catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
-      setState(() {
-        _loading = false;
-        _error = error.message;
-      });
+      _loadState.value = _MusicLoadState(loading: false, error: error.message);
     } on Object catch (error) {
       if (!mounted || generation != _loadGeneration) {
         return;
       }
-      setState(() {
-        _loading = false;
-        _error = '加载音乐库失败：$error';
-      });
+      _loadState.value = _MusicLoadState(
+        loading: false,
+        error: '加载音乐库失败：$error',
+      );
     } finally {
       if (generation == _loadGeneration) {
         _loadingTracks = false;
@@ -320,6 +337,10 @@ class _MusicPageState extends State<MusicPage> {
   }
 
   void _openTracksPage() {
+    final client = _client;
+    if (client == null) {
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => MusicTracksPage(
@@ -328,42 +349,63 @@ class _MusicPageState extends State<MusicPage> {
           currentTrack: _currentTrack,
           onSelect: (track) {
             setState(() => _currentTrack = track);
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (context) => MusicPlayerPage(
-                  track: track,
-                  album: _albumName(track.path, _rootPath),
-                ),
-              ),
-            );
+            unawaited(_playAndOpen(client, track));
           },
         ),
       ),
     );
   }
 
+  Future<void> _playAndOpen(UnraidClient client, UnraidFileEntry track) async {
+    await MusicPlayerService.instance.playQueue(
+      client: client,
+      tracks: _tracks,
+      initial: track,
+      rootPath: _rootPath,
+    );
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => const MusicPlayerPage(),
+      ),
+    );
+  }
+
   void _openPlayer([UnraidFileEntry? track]) {
-    final selected = track ?? _currentTrack;
-    if (selected == null) {
+    final client = _client;
+    final selected = track ??
+        _currentTrack ??
+        MusicPlayerService.instance.current;
+    if (client == null || selected == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('音乐库中暂无歌曲')),
       );
       return;
     }
     setState(() => _currentTrack = selected);
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (context) => MusicPlayerPage(
-          track: selected,
-          album: _albumName(selected.path, _rootPath),
+    // If the same track is already loaded, just open the player sheet.
+    final service = MusicPlayerService.instance;
+    if (service.hasSession &&
+        service.current?.path == selected.path &&
+        identical(service.client, client)) {
+      unawaited(
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (context) => const MusicPlayerPage(),
+          ),
         ),
-      ),
-    );
+      );
+      return;
+    }
+    unawaited(_playAndOpen(client, selected));
   }
 
   @override
   Widget build(BuildContext context) {
-    final current = _currentTrack;
+    final service = MusicPlayerService.instance;
+    final current = service.current ?? _currentTrack;
 
     return _MusicScaffold(
       title: '音乐',
@@ -378,13 +420,21 @@ class _MusicPageState extends State<MusicPage> {
             onSongsTap: _openTracksPage,
           ),
           const SizedBox(height: 18),
-          _NowPlayingCard(
-            title: current?.name ?? '暂无播放',
-            subtitle: current == null
-                ? '从下方选择一首歌曲'
-                : _albumName(current.path, _rootPath),
-            enabled: current != null,
-            onTap: () => _openPlayer(),
+          AnimatedBuilder(
+            animation: service,
+            builder: (context, _) {
+              final playing = service.current ?? current;
+              return _NowPlayingCard(
+                title: playing?.name ?? '暂无播放',
+                subtitle: playing == null
+                    ? '从下方选择一首歌曲'
+                    : service.loading
+                        ? '正在流式缓冲…'
+                        : _albumName(playing.path, _rootPath),
+                enabled: playing != null,
+                onTap: () => _openPlayer(playing),
+              );
+            },
           ),
           const SizedBox(height: 18),
           _TrackSearchBox(
@@ -402,59 +452,65 @@ class _MusicPageState extends State<MusicPage> {
             ),
           ),
           const SizedBox(height: 12),
-          if (_loading)
-            const _MusicLoading(label: '正在扫描 Unraid 音乐库…')
-          else if (_error != null)
-            _MusicState(
-              icon: Icons.library_music_outlined,
-              title: '音乐库读取失败',
-              detail: _error!,
-              actionLabel: '重试',
-              onAction: () => _loadTracks(force: true),
-            )
-          else
-            ValueListenableBuilder<String>(
-              valueListenable: _query,
-              builder: (context, query, _) {
-                final tracks = _filteredTracksFor(query);
-                if (tracks.isEmpty) {
-                  return _MusicState(
-                    icon: Icons.queue_music,
-                    title: query.trim().isEmpty ? '暂无音频文件' : '没有匹配的歌曲',
-                    detail: query.trim().isEmpty
-                        ? '请在 $_rootPath 或其常见子目录中放入 mp3 / flac 等音频文件后刷新。'
-                        : '试试其他关键词',
-                    actionLabel: query.trim().isEmpty ? '刷新' : null,
-                    onAction: query.trim().isEmpty
-                        ? () => _loadTracks(force: true)
-                        : null,
-                  );
-                }
-                return Column(
-                  children: [
-                    for (final track in tracks.take(20))
-                      RepaintBoundary(
-                        key: ValueKey<String>(track.path),
-                        child: _TrackTile(
-                          track: track,
-                          album: _albumName(track.path, _rootPath),
-                          selected: current?.path == track.path,
-                          onTap: () => _openPlayer(track),
-                        ),
-                      ),
-                    if (tracks.length > 20) ...[
-                      const SizedBox(height: 8),
-                      Center(
-                        child: TextButton(
-                          onPressed: _openTracksPage,
-                          child: Text('查看全部 ${tracks.length} 首'),
-                        ),
-                      ),
-                    ],
-                  ],
+          ValueListenableBuilder<_MusicLoadState>(
+            valueListenable: _loadState,
+            builder: (context, loadState, _) {
+              if (loadState.loading) {
+                return const _MusicLoading(label: '正在扫描 Unraid 音乐库…');
+              }
+              if (loadState.error != null) {
+                return _MusicState(
+                  icon: Icons.library_music_outlined,
+                  title: '音乐库读取失败',
+                  detail: loadState.error!,
+                  actionLabel: '重试',
+                  onAction: () => _loadTracks(force: true),
                 );
-              },
-            ),
+              }
+              return ValueListenableBuilder<String>(
+                valueListenable: _query,
+                builder: (context, query, __) {
+                  final tracks = _filteredTracksFor(query);
+                  if (tracks.isEmpty) {
+                    return _MusicState(
+                      icon: Icons.queue_music,
+                      title: query.trim().isEmpty ? '暂无音频文件' : '没有匹配的歌曲',
+                      detail: query.trim().isEmpty
+                          ? '请在 $_rootPath 或其常见子目录中放入 mp3 / flac 等音频文件后刷新。'
+                          : '试试其他关键词',
+                      actionLabel: query.trim().isEmpty ? '刷新' : null,
+                      onAction: query.trim().isEmpty
+                          ? () => _loadTracks(force: true)
+                          : null,
+                    );
+                  }
+                  return Column(
+                    children: [
+                      for (final track in tracks.take(20))
+                        RepaintBoundary(
+                          key: ValueKey<String>(track.path),
+                          child: _TrackTile(
+                            track: track,
+                            album: _albumName(track.path, _rootPath),
+                            selected: current?.path == track.path,
+                            onTap: () => _openPlayer(track),
+                          ),
+                        ),
+                      if (tracks.length > 20) ...[
+                        const SizedBox(height: 8),
+                        Center(
+                          child: TextButton(
+                            onPressed: _openTracksPage,
+                            child: Text('查看全部 ${tracks.length} 首'),
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                },
+              );
+            },
+          ),
         ],
       ),
     );
@@ -626,133 +682,229 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
   }
 }
 
-class MusicPlayerPage extends StatelessWidget {
-  const MusicPlayerPage({
-    super.key,
-    required this.track,
-    required this.album,
-  });
+class MusicPlayerPage extends StatefulWidget {
+  const MusicPlayerPage({super.key});
 
   static const routeName = '/music-player';
 
-  final UnraidFileEntry track;
-  final String album;
+  @override
+  State<MusicPlayerPage> createState() => _MusicPlayerPageState();
+}
+
+class _MusicPlayerPageState extends State<MusicPlayerPage> {
+  @override
+  void initState() {
+    super.initState();
+    MusicPlayerService.instance.enterFullPlayer();
+  }
+
+  @override
+  void dispose() {
+    MusicPlayerService.instance.leaveFullPlayer();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final title = _displayTitle(track.name);
+    final service = MusicPlayerService.instance;
     return PhoneFrame(
       maxContentWidth: 900,
-      child: Column(
-        children: [
-          SizedBox(
-            height: 68,
-            child: Stack(
+      child: AnimatedBuilder(
+        animation: service,
+        builder: (context, _) {
+          final track = service.current;
+          if (track == null) {
+            return Column(
               children: [
-                Positioned(
-                  left: 12,
-                  top: 10,
-                  child: TextButton.icon(
-                    onPressed: () => Navigator.of(context).maybePop(),
-                    icon: const Icon(Icons.keyboard_arrow_down,
-                        color: Colors.white),
-                    label: const Text(
-                      '收起',
-                      style: TextStyle(color: Colors.white),
+                _PlayerTopBar(
+                  onClose: () => Navigator.of(context).maybePop(),
+                ),
+                const Expanded(
+                  child: Center(
+                    child: Text(
+                      '当前没有播放会话',
+                      style: TextStyle(color: Colors.white70),
                     ),
                   ),
                 ),
               ],
-            ),
-          ),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(30, 20, 30, 34),
-              child: FadeSlide(
-                animate: false,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: Center(
-                        child: Container(
-                          width: 240,
-                          height: 240,
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [Color(0xFF3498DB), Color(0xFF52C41A)],
-                            ),
-                            borderRadius: BorderRadius.circular(28),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF3498DB)
-                                    .withValues(alpha: 0.28),
-                                blurRadius: 28,
-                                offset: const Offset(0, 14),
+            );
+          }
+
+          final title = _displayTitle(track.name);
+          final album = _albumName(track.path, service.rootPath);
+          final canSkip = service.canSkip;
+          final loading = service.loading;
+          final error = service.error;
+          final player = service.player;
+
+          return Column(
+            children: [
+              _PlayerTopBar(
+                onClose: () => Navigator.of(context).maybePop(),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(30, 20, 30, 34),
+                  child: FadeSlide(
+                    animate: false,
+                    child: Column(
+                      children: [
+                        Expanded(
+                          child: Center(
+                            child: Container(
+                              width: 240,
+                              height: 240,
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    Color(0xFF3498DB),
+                                    Color(0xFF52C41A)
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(28),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(0xFF3498DB)
+                                        .withValues(alpha: 0.28),
+                                    blurRadius: 28,
+                                    offset: const Offset(0, 14),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                          child: Icon(
-                            track.isAudio
-                                ? Icons.music_note
-                                : Icons.audio_file,
-                            color: Colors.white,
-                            size: 78,
+                              child: loading
+                                  ? const Center(
+                                      child: CircularProgressIndicator(
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : Icon(
+                                      track.isAudio
+                                          ? Icons.music_note
+                                          : Icons.audio_file,
+                                      color: Colors.white,
+                                      size: 78,
+                                    ),
+                            ),
                           ),
                         ),
-                      ),
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          album,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.74),
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          track.size.isEmpty
+                              ? track.path
+                              : '${track.size} · ${track.path}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.55),
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(height: 26),
+                        if (error != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 16),
+                            child: Text(
+                              error,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFFFCDD2),
+                                fontSize: 13,
+                                height: 1.35,
+                              ),
+                            ),
+                          )
+                        else
+                          _PlayerProgress(player: player),
+                        const SizedBox(height: 24),
+                        _PlayerControls(
+                          player: player,
+                          enabled: !loading && error == null,
+                          canSkip: canSkip,
+                          onPrevious:
+                              canSkip ? () => unawaited(service.skip(-1)) : null,
+                          onNext:
+                              canSkip ? () => unawaited(service.skip(1)) : null,
+                          onPlayPause: () =>
+                              unawaited(service.togglePlayPause()),
+                          onRetry: error == null
+                              ? null
+                              : () => unawaited(service.retry()),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          loading
+                              ? '正在按需流式缓冲…'
+                              : error != null
+                                  ? '流式读取或解码失败，可重试'
+                                  : '后台常驻播放 · SFTP/SMB 按需拉取',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.58),
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
                     ),
-                    Text(
-                      title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      album,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.74),
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      track.size.isEmpty
-                          ? track.path
-                          : '${track.size} · ${track.path}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.55),
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 26),
-                    const _PlayerProgress(),
-                    const SizedBox(height: 24),
-                    const _PlayerControls(),
-                    const SizedBox(height: 18),
-                    Text(
-                      '当前可通过 Unraid 文件路径浏览该曲目。\n完整流式播放将在后续版本接入。',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.58),
-                        fontSize: 12,
-                        height: 1.4,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _PlayerTopBar extends StatelessWidget {
+  const _PlayerTopBar({required this.onClose});
+
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 68,
+      child: Stack(
+        children: [
+          Positioned(
+            left: 12,
+            top: 10,
+            child: TextButton.icon(
+              onPressed: onClose,
+              icon: const Icon(
+                Icons.keyboard_arrow_down,
+                color: Colors.white,
+              ),
+              label: const Text(
+                '收起',
+                style: TextStyle(color: Colors.white),
               ),
             ),
           ),

@@ -306,50 +306,35 @@ class _ImagePreviewPage extends StatefulWidget {
 }
 
 class _ImagePreviewPageState extends State<_ImagePreviewPage> {
-  late final bool _isTooLarge;
-  Future<Uint8List>? _bytesFuture;
+  Future<File>? _fileFuture;
+  double _progress = 0;
   bool _decodeSuccessLogged = false;
-  bool _skipLogged = false;
 
   @override
   void initState() {
     super.initState();
-    _isTooLarge = widget.entry.sizeBytes > _maxImagePreviewBytes;
-    if (_isTooLarge) {
-      _bytesFuture = null;
-      if (!_skipLogged) {
-        _skipLogged = true;
-        unawaited(
-          AppLogger.log(
-            'share_preview_skip_large path=${widget.entry.path} '
-            'sizeBytes=${widget.entry.sizeBytes} limit=$_maxImagePreviewBytes',
-          ),
-        );
-      }
-    } else if (widget.active) {
-      _bytesFuture = _loadPreviewBytes();
+    if (widget.active) {
+      _fileFuture = _loadPreviewFile();
     }
   }
 
   @override
   void didUpdateWidget(covariant _ImagePreviewPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!_isTooLarge &&
-        widget.active &&
-        _bytesFuture == null &&
+    if (widget.active &&
+        _fileFuture == null &&
         oldWidget.entry.path == widget.entry.path) {
       setState(() {
-        _bytesFuture = _loadPreviewBytes();
+        _fileFuture = _loadPreviewFile();
       });
     }
   }
 
-  Future<Uint8List> _loadPreviewBytes() {
+  Future<File> _loadPreviewFile() {
     final path = widget.entry.path;
-    final cached = _sharePreviewBytesCache.remove(path);
+    final cached = _sharePreviewFileCache.remove(path);
     if (cached != null) {
-      // LRU touch for recently viewed previews.
-      _sharePreviewBytesCache[path] = cached;
+      _sharePreviewFileCache[path] = cached;
       return cached;
     }
 
@@ -359,12 +344,23 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
         'sizeBytes=${widget.entry.sizeBytes}',
       );
       try {
-        final bytes = await widget.client.fetchFileBytes(path);
+        final file = await MediaCache.ensureLocalFile(
+          client: widget.client,
+          remotePath: path,
+          expectedSizeBytes: widget.entry.sizeBytes,
+          fileName: widget.entry.name,
+          onProgress: (value) {
+            if (!mounted) {
+              return;
+            }
+            setState(() => _progress = value);
+          },
+        );
         await AppLogger.log(
           'share_preview_fetch_success path=$path '
-          'bytes=${bytes.length}',
+          'bytes=${await file.length()}',
         );
-        return bytes;
+        return file;
       } on Object catch (error, stackTrace) {
         await AppLogger.log(
           'share_preview_fetch_error path=$path',
@@ -375,17 +371,16 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
       }
     }();
 
-    if (_sharePreviewBytesCache.length >= _maxSharePreviewCacheEntries) {
-      _sharePreviewBytesCache.remove(_sharePreviewBytesCache.keys.first);
+    if (_sharePreviewFileCache.length >= _maxSharePreviewCacheEntries) {
+      _sharePreviewFileCache.remove(_sharePreviewFileCache.keys.first);
     }
-    _sharePreviewBytesCache[path] = future;
-    // Drop failed futures so a retry can re-fetch.
+    _sharePreviewFileCache[path] = future;
     unawaited(
       future.then<void>(
         (_) {},
         onError: (Object _) {
-          if (identical(_sharePreviewBytesCache[path], future)) {
-            _sharePreviewBytesCache.remove(path);
+          if (identical(_sharePreviewFileCache[path], future)) {
+            _sharePreviewFileCache.remove(path);
           }
         },
       ),
@@ -395,16 +390,8 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isTooLarge) {
-      return _PreviewMessage(
-        message: '文件超过 32 MB，暂不直接预览（${widget.entry.size}）',
-        color: AppTheme.danger,
-      );
-    }
-
-    final bytesFuture = _bytesFuture;
-    if (bytesFuture == null) {
-      // Inactive off-screen pages stay lightweight until swiped near.
+    final fileFuture = _fileFuture;
+    if (fileFuture == null) {
       return const ColoredBox(
         color: Colors.black,
         child: Center(
@@ -413,11 +400,27 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
       );
     }
 
-    return FutureBuilder<Uint8List>(
-      future: bytesFuture,
+    return FutureBuilder<File>(
+      future: fileFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
+          final pct = (_progress * 100).clamp(0, 100).toStringAsFixed(0);
+          return Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(
+                  value: _progress > 0 && _progress < 1 ? _progress : null,
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '正在流式加载… $pct%'
+                  '${widget.entry.size.isEmpty ? '' : ' · ${widget.entry.size}'}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          );
         }
 
         if (snapshot.hasError || !snapshot.hasData) {
@@ -427,12 +430,13 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
           );
         }
 
+        final file = snapshot.data!;
         return InteractiveViewer(
           minScale: 0.5,
           maxScale: 4,
           child: Center(
-            child: Image.memory(
-              snapshot.data!,
+            child: Image.file(
+              file,
               fit: BoxFit.contain,
               gaplessPlayback: true,
               cacheWidth: _maxImagePreviewDecodeExtent,
@@ -443,8 +447,7 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
                   unawaited(
                     AppLogger.log(
                       'share_preview_decode_success '
-                      'path=${widget.entry.path} '
-                      'bytes=${snapshot.data!.length}',
+                      'path=${widget.entry.path}',
                     ),
                   );
                 }
@@ -454,8 +457,7 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
                 unawaited(
                   AppLogger.log(
                     'share_preview_decode_error '
-                    'path=${widget.entry.path} '
-                    'bytes=${snapshot.data!.length}',
+                    'path=${widget.entry.path}',
                     error: error,
                     stackTrace: stackTrace,
                   ),
@@ -632,6 +634,214 @@ class _TextPreviewState extends State<_TextPreview> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ShareVideoPreview extends StatefulWidget {
+  const _ShareVideoPreview({
+    required this.client,
+    required this.entry,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+
+  @override
+  State<_ShareVideoPreview> createState() => _ShareVideoPreviewState();
+}
+
+class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
+  VideoPlayerController? _controller;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_start());
+  }
+
+  double _progress = 0;
+
+  Future<void> _start() async {
+    try {
+      final handle = await MediaCache.ensureProgressive(
+        client: widget.client,
+        remotePath: widget.entry.path,
+        expectedSizeBytes: widget.entry.sizeBytes,
+        fileName: widget.entry.name,
+      );
+      handle.progress.listen((value) {
+        if (!mounted) {
+          return;
+        }
+        setState(() => _progress = value);
+      });
+      await handle.ready;
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      final controller = VideoPlayerController.file(handle.file);
+      await controller.initialize();
+      await controller.setLooping(true);
+      await controller.play();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _controller = controller;
+        _loading = false;
+        _error = null;
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    final controller = _controller;
+    _controller = null;
+    unawaited(controller?.dispose() ?? Future<void>.value());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    return ColoredBox(
+      color: Colors.black,
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: 52,
+              child: Row(
+                children: [
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      widget.entry.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _error != null
+                  ? _PreviewMessage(message: _error!, color: AppTheme.danger)
+                  : _loading ||
+                          controller == null ||
+                          !controller.value.isInitialized
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 14),
+                              Text(
+                                '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+                                style: const TextStyle(color: Colors.white70),
+                              ),
+                            ],
+                          ),
+                        )
+                      : _ShareVideoPlayer(controller: controller),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ShareVideoPlayer extends StatelessWidget {
+  const _ShareVideoPlayer({required this.controller});
+
+  final VideoPlayerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Center(
+          child: AspectRatio(
+            aspectRatio: controller.value.aspectRatio == 0
+                ? 16 / 9
+                : controller.value.aspectRatio,
+            child: VideoPlayer(controller),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: ColoredBox(
+            color: Colors.black.withValues(alpha: 0.45),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                VideoProgressIndicator(
+                  controller,
+                  allowScrubbing: true,
+                  colors: const VideoProgressColors(
+                    playedColor: Colors.white,
+                    bufferedColor: Colors.white38,
+                    backgroundColor: Colors.white24,
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                ),
+                ValueListenableBuilder<VideoPlayerValue>(
+                  valueListenable: controller,
+                  builder: (context, value, _) {
+                    return IconButton(
+                      tooltip: value.isPlaying ? '暂停' : '播放',
+                      onPressed: () {
+                        if (value.isPlaying) {
+                          unawaited(controller.pause());
+                        } else {
+                          unawaited(controller.play());
+                        }
+                      },
+                      icon: Icon(
+                        value.isPlaying
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_filled,
+                        color: Colors.white,
+                        size: 42,
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

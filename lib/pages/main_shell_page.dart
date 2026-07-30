@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
 
 import '../services/app_logger.dart';
+import '../services/media_cache.dart';
+import '../services/music_player_service.dart';
 import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
 import '../widgets/bottom_nav.dart';
@@ -22,13 +25,13 @@ part 'management_page.dart';
 part 'management_detail_page.dart';
 part 'management_detail_widgets.dart';
 
-const _maxImagePreviewBytes = 32 * 1024 * 1024;
 const _maxImagePreviewDecodeExtent = 2400;
 const _maxTextPreviewBytes = 1024 * 1024;
 
-/// Process-local cache for share browser image previews (path -> bytes).
-final Map<String, Future<Uint8List>> _sharePreviewBytesCache =
-    <String, Future<Uint8List>>{};
+/// Process-local cache for share browser image previews (path -> File).
+/// Full-resolution stills stream to disk; no hard byte-size reject.
+final Map<String, Future<File>> _sharePreviewFileCache =
+    <String, Future<File>>{};
 const _maxSharePreviewCacheEntries = 16;
 
 /// Process-local cache for share browser text previews (path -> decoded text).
@@ -100,6 +103,8 @@ class _MainShellPageState extends State<MainShellPage>
     _visitedTabsVersion.dispose();
     _dashboard.dispose();
     _dashboardRefreshing.dispose();
+    // Stop background music when leaving the shell (logout / reconnect).
+    unawaited(MusicPlayerService.instance.stopAndClear());
     _unraidClient?.close();
     super.dispose();
   }
