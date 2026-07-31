@@ -309,6 +309,10 @@ class _PlayerControls extends StatelessWidget {
     required this.enabled,
     required this.canSkip,
     required this.onPlayPause,
+    required this.shuffle,
+    required this.repeatMode,
+    required this.onToggleShuffle,
+    required this.onCycleRepeat,
     this.onPrevious,
     this.onNext,
     this.onRetry,
@@ -317,19 +321,39 @@ class _PlayerControls extends StatelessWidget {
   final AudioPlayer player;
   final bool enabled;
   final bool canSkip;
+  final bool shuffle;
+  final MusicRepeatMode repeatMode;
   final VoidCallback onPlayPause;
+  final VoidCallback onToggleShuffle;
+  final VoidCallback onCycleRepeat;
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
   final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
+    final (repeatIcon, repeatLabel, repeatActive) = switch (repeatMode) {
+      MusicRepeatMode.off => (Icons.repeat, '顺序播放', false),
+      MusicRepeatMode.all => (Icons.repeat, '列表循环', true),
+      MusicRepeatMode.one => (Icons.repeat_one, '单曲循环', true),
+    };
+
     return Column(
       children: [
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             IconButton(
+              tooltip: shuffle ? '关闭随机' : '随机播放',
+              onPressed: onToggleShuffle,
+              icon: Icon(
+                Icons.shuffle,
+                color: Colors.white.withValues(alpha: shuffle ? 1 : 0.45),
+                size: 26,
+              ),
+            ),
+            IconButton(
+              tooltip: '上一首',
               onPressed: canSkip ? onPrevious : null,
               icon: Icon(
                 Icons.skip_previous,
@@ -337,7 +361,7 @@ class _PlayerControls extends StatelessWidget {
                 size: 34,
               ),
             ),
-            const SizedBox(width: 18),
+            const SizedBox(width: 10),
             StreamBuilder<PlayerState>(
               stream: player.playerStateStream,
               builder: (context, snapshot) {
@@ -371,13 +395,23 @@ class _PlayerControls extends StatelessWidget {
                 );
               },
             ),
-            const SizedBox(width: 18),
+            const SizedBox(width: 10),
             IconButton(
+              tooltip: '下一首',
               onPressed: canSkip ? onNext : null,
               icon: Icon(
                 Icons.skip_next,
                 color: Colors.white.withValues(alpha: canSkip ? 1 : 0.35),
                 size: 34,
+              ),
+            ),
+            IconButton(
+              tooltip: repeatLabel,
+              onPressed: onCycleRepeat,
+              icon: Icon(
+                repeatIcon,
+                color: Colors.white.withValues(alpha: repeatActive ? 1 : 0.45),
+                size: 26,
               ),
             ),
           ],

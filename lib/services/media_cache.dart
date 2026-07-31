@@ -87,13 +87,35 @@ class MediaCache {
 
   /// Start (or resume) a progressive download that becomes ready after the
   /// first [readyBytes]. Used for video so playback can begin early.
+  /// Choose a start-play threshold from file size so small clips start faster
+  /// and large videos still get a usable container probe buffer.
+  static int adaptiveReadyBytes(int? expectedSizeBytes) {
+    final size = expectedSizeBytes ?? 0;
+    if (size <= 0) {
+      return 1024 * 1024;
+    }
+    if (size < 2 * 1024 * 1024) {
+      // Tiny clips: wait for most of the file (min 256 KB).
+      return size < 256 * 1024 ? size : (size * 3) ~/ 4;
+    }
+    if (size < 32 * 1024 * 1024) {
+      return 1024 * 1024;
+    }
+    if (size < 200 * 1024 * 1024) {
+      return 2 * 1024 * 1024;
+    }
+    return 4 * 1024 * 1024;
+  }
+
   static Future<ProgressiveMediaHandle> ensureProgressive({
     required UnraidClient client,
     required String remotePath,
     int? expectedSizeBytes,
     String? fileName,
-    int readyBytes = 1024 * 1024,
+    int? readyBytes,
   }) async {
+    final resolvedReady =
+        readyBytes ?? adaptiveReadyBytes(expectedSizeBytes);
     if (kIsWeb) {
       throw const UnraidClientException('Web 端暂不支持媒体缓存');
     }
@@ -124,7 +146,7 @@ class MediaCache {
       remotePath: remotePath,
       targetFile: target,
       expectedSizeBytes: expectedSizeBytes ?? 0,
-      readyBytes: readyBytes,
+      readyBytes: resolvedReady,
     );
     _progressive[key] = progressive;
     unawaited(

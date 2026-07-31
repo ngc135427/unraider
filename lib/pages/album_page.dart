@@ -504,110 +504,168 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
   int _countPendingUploads() => _pendingUploads.length;
 
+  int _syncGeneration = 0;
+  bool _syncCancelRequested = false;
+
+  void _cancelSync() {
+    if (!_syncProgress.value.syncing) {
+      return;
+    }
+    _syncCancelRequested = true;
+    _syncProgress.value = _syncProgress.value.copyWith(
+      message: '正在取消…',
+    );
+  }
+
   Future<void> _syncPending() async {
     final client = _client;
     if (client == null || _syncProgress.value.syncing) {
       return;
     }
 
-    final allPending = _pendingUploads;
-    if (allPending.isEmpty) {
-      _syncProgress.value = const _AlbumSyncProgress(
-        pendingCount: 0,
-        message: '已同步',
-      );
-      return;
-    }
+    final generation = ++_syncGeneration;
+    _syncCancelRequested = false;
 
-    // Keep interactive syncs bounded so a huge backlog does not freeze the UI.
-    final pending = allPending.take(_maxSyncBatchSize).toList(growable: false);
-    final remainingAfterBatch = allPending.length - pending.length;
+    var totalUploaded = 0;
+    var totalFailed = 0;
+    Object? lastError;
+    final ensuredDirs = <String>{};
 
     _syncProgress.value = _AlbumSyncProgress(
       syncing: true,
       uploadedCount: 0,
-      pendingCount: allPending.length,
-      message: remainingAfterBatch > 0
-          ? '准备同步（本批 ${pending.length} / 共 ${allPending.length}）'
-          : '准备同步',
+      pendingCount: _countPendingUploads(),
+      message: '准备同步',
     );
 
     try {
-      var uploaded = 0;
-      Object? lastError;
-      for (final asset in pending) {
-        if (asset.uri.isEmpty) {
-          lastError = '媒体 URI 为空：${asset.name}';
-          continue;
+      // Drain the backlog in bounded batches so the UI stays responsive and
+      // remote listings refresh between waves.
+      while (mounted &&
+          generation == _syncGeneration &&
+          !_syncCancelRequested) {
+        // Recompute pending each wave so successful uploads drop out.
+        final allPending = _pendingUploads;
+        if (allPending.isEmpty) {
+          break;
         }
-        final targetPath = _targetPathFor(_preferences.targetDir, asset);
-        final targetDir = _parentPath(targetPath);
-        if (!mounted) {
-          return;
-        }
-        _syncProgress.value = _syncProgress.value.copyWith(
-          message:
-              '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}',
-        );
-        await client.ensureDirectory(targetDir);
+        final pending =
+            allPending.take(_maxSyncBatchSize).toList(growable: false);
+        final remainingAfterBatch = allPending.length - pending.length;
 
-        if (!mounted) {
-          return;
-        }
         _syncProgress.value = _syncProgress.value.copyWith(
-          message: '上传 ${uploaded + 1}/${pending.length}：${asset.name}',
+          pendingCount: allPending.length,
+          message: remainingAfterBatch > 0
+              ? '本批 ${pending.length} / 剩余 ${allPending.length}'
+              : '上传 ${pending.length} 个',
         );
-        try {
-          await client.uploadLocalMediaFile(
-            targetPath: targetPath,
-            sourceUri: asset.uri,
-            sizeBytes: asset.sizeBytes,
-            modifiedDate: asset.dateModified,
+
+        var batchUploaded = 0;
+        for (final asset in pending) {
+          if (!mounted ||
+              generation != _syncGeneration ||
+              _syncCancelRequested) {
+            break;
+          }
+          if (asset.uri.isEmpty) {
+            totalFailed += 1;
+            lastError = '媒体 URI 为空：${asset.name}';
+            continue;
+          }
+          final targetPath = _targetPathFor(_preferences.targetDir, asset);
+          final targetDir = _parentPath(targetPath);
+          if (ensuredDirs.add(targetDir)) {
+            _syncProgress.value = _syncProgress.value.copyWith(
+              message:
+                  '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}',
+            );
+            await client.ensureDirectory(targetDir);
+          }
+
+          if (!mounted ||
+              generation != _syncGeneration ||
+              _syncCancelRequested) {
+            break;
+          }
+          _syncProgress.value = _syncProgress.value.copyWith(
+            message:
+                '上传 ${totalUploaded + batchUploaded + 1}：${asset.name}',
           );
-          uploaded += 1;
-        } on Object catch (error) {
-          lastError = error;
-          // Continue the batch so one bad file does not block the rest.
+          try {
+            await client.uploadLocalMediaFile(
+              targetPath: targetPath,
+              sourceUri: asset.uri,
+              sizeBytes: asset.sizeBytes,
+              modifiedDate: asset.dateModified,
+            );
+            batchUploaded += 1;
+            totalUploaded += 1;
+          } on Object catch (error) {
+            totalFailed += 1;
+            lastError = error;
+            if (!mounted) {
+              return;
+            }
+            _syncProgress.value = _syncProgress.value.copyWith(
+              message: '跳过 ${asset.name}：$error',
+            );
+            await Future<void>.delayed(const Duration(milliseconds: 350));
+            continue;
+          }
           if (!mounted) {
             return;
           }
           _syncProgress.value = _syncProgress.value.copyWith(
-            message: '跳过 ${asset.name}：$error',
+            uploadedCount: totalUploaded,
+            pendingCount: allPending.length - batchUploaded,
           );
-          await Future<void>.delayed(const Duration(milliseconds: 400));
-          continue;
         }
-        if (!mounted) {
+
+        LocalMediaStore.invalidateCaches();
+        if (!mounted || generation != _syncGeneration) {
           return;
         }
-        _syncProgress.value = _syncProgress.value.copyWith(
-          uploadedCount: uploaded,
-          pendingCount: allPending.length - uploaded,
-        );
+        await _reloadRemote();
+
+        if (_syncCancelRequested) {
+          break;
+        }
+        // Stop when this wave uploaded nothing useful and failures remain —
+        // otherwise a permanent bad file would loop forever.
+        if (batchUploaded == 0) {
+          break;
+        }
       }
 
-      if (!mounted) {
+      if (!mounted || generation != _syncGeneration) {
         return;
       }
-      final failed = pending.length - uploaded;
+      final stillPending = _countPendingUploads();
+      final cancelled = _syncCancelRequested;
+      _syncCancelRequested = false;
       _syncProgress.value = _AlbumSyncProgress(
         syncing: false,
-        uploadedCount: uploaded,
-        pendingCount: remainingAfterBatch + failed,
-        message: failed > 0
-            ? '已上传 $uploaded 个，失败 $failed 个'
-                '${lastError == null ? '' : '（$lastError）'}'
-                '${remainingAfterBatch > 0 ? '，还有 $remainingAfterBatch 个待同步' : ''}'
-            : remainingAfterBatch > 0
-                ? '已上传 $uploaded 个，还有 $remainingAfterBatch 个待同步'
-                : '已上传 $uploaded 个照片/视频',
+        uploadedCount: totalUploaded,
+        pendingCount: stillPending,
+        message: cancelled
+            ? '已取消：上传 $totalUploaded 个'
+                '${totalFailed > 0 ? '，失败 $totalFailed 个' : ''}'
+                '${stillPending > 0 ? '，剩余 $stillPending 个' : ''}'
+            : totalFailed > 0
+                ? '已上传 $totalUploaded 个，失败 $totalFailed 个'
+                    '${lastError == null ? '' : '（$lastError）'}'
+                    '${stillPending > 0 ? '，剩余 $stillPending 个' : ''}'
+                : stillPending > 0
+                    ? '已上传 $totalUploaded 个，剩余 $stillPending 个'
+                    : totalUploaded > 0
+                        ? '已上传 $totalUploaded 个照片/视频'
+                        : '已同步',
       );
-      LocalMediaStore.invalidateCaches();
-      await _reloadRemote();
     } on Object catch (error) {
-      if (!mounted) {
+      if (!mounted || generation != _syncGeneration) {
         return;
       }
+      _syncCancelRequested = false;
       _syncProgress.value = _syncProgress.value.copyWith(
         syncing: false,
         message: '同步失败：$error',
@@ -868,6 +926,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                   syncing: progress.syncing,
                   message: progress.message,
                   onSync: _syncPending,
+                  onCancel: _cancelSync,
                   onSettings: () => _selectTab(_PhoAlbumTab.settings),
                 );
               },

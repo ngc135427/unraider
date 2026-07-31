@@ -9,7 +9,8 @@ val androidReleaseAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 android {
     namespace = "com.ngc.unraider"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = "27.0.12077973"
+    // Match plugin requirements (jni); higher NDK is backward compatible.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

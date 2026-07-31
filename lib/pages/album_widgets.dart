@@ -478,6 +478,7 @@ class _SyncPanel extends StatelessWidget {
     required this.uploadedCount,
     required this.syncing,
     required this.onSync,
+    required this.onCancel,
     required this.onSettings,
     this.message,
   });
@@ -490,19 +491,23 @@ class _SyncPanel extends StatelessWidget {
   final bool syncing;
   final String? message;
   final VoidCallback onSync;
+  final VoidCallback onCancel;
   final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
     final total = uploadedCount + pendingCount;
-    final progress = total == 0 ? 0.0 : uploadedCount / total;
+    final progress = total == 0
+        ? null
+        : (uploadedCount / total).clamp(0.0, 1.0);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _InfoCard(
           icon: Icons.sync,
           title: syncing ? '正在同步' : '同步',
-          subtitle: message ?? (pendingCount == 0 ? '已同步' : '$pendingCount 个待上传'),
+          subtitle:
+              message ?? (pendingCount == 0 ? '已同步' : '$pendingCount 个待上传'),
           child: syncing
               ? Padding(
                   padding: const EdgeInsets.only(top: 14),
@@ -517,6 +522,7 @@ class _SyncPanel extends StatelessWidget {
             ('目标目录', preferences.targetDir),
             ('本机项目', '$localCount'),
             ('云端项目', '$remoteCount'),
+            if (syncing) ('本轮已传', '$uploadedCount'),
           ],
         ),
         const SizedBox(height: 14),
@@ -526,9 +532,17 @@ class _SyncPanel extends StatelessWidget {
               child: FilledButton.icon(
                 onPressed: syncing ? null : onSync,
                 icon: const Icon(Icons.cloud_upload_outlined),
-                label: const Text('立即同步'),
+                label: Text(syncing ? '同步中…' : '立即同步'),
               ),
             ),
+            if (syncing) ...[
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                onPressed: onCancel,
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: const Text('取消'),
+              ),
+            ],
             const SizedBox(width: 12),
             IconButton.outlined(
               tooltip: '同步设置',

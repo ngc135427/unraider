@@ -742,6 +742,9 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
             children: [
               _PlayerTopBar(
                 onClose: () => Navigator.of(context).maybePop(),
+                onQueue: service.queue.length > 1
+                    ? () => _showQueueSheet(context, service)
+                    : null,
               ),
               Expanded(
                 child: Padding(
@@ -845,10 +848,12 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
                           player: player,
                           enabled: !loading && error == null,
                           canSkip: canSkip,
-                          onPrevious:
-                              canSkip ? () => unawaited(service.skip(-1)) : null,
-                          onNext:
-                              canSkip ? () => unawaited(service.skip(1)) : null,
+                          shuffle: service.shuffle,
+                          repeatMode: service.repeatMode,
+                          onToggleShuffle: service.toggleShuffle,
+                          onCycleRepeat: service.cycleRepeatMode,
+                          onPrevious: () => unawaited(service.skip(-1)),
+                          onNext: () => unawaited(service.skip(1)),
                           onPlayPause: () =>
                               unawaited(service.togglePlayPause()),
                           onRetry: error == null
@@ -861,7 +866,7 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
                               ? '正在按需流式缓冲…'
                               : error != null
                                   ? '流式读取或解码失败，可重试'
-                                  : '后台常驻播放 · SFTP/SMB 按需拉取',
+                                  : _playerStatusLine(service),
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.58),
@@ -880,12 +885,124 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
       ),
     );
   }
+
+  void _showQueueSheet(BuildContext context, MusicPlayerService service) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF152033),
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return AnimatedBuilder(
+          animation: service,
+          builder: (context, _) {
+            final ordered = service.orderedQueue;
+            final currentPath = service.current?.path;
+            return SafeArea(
+              child: SizedBox(
+                height: MediaQuery.sizeOf(context).height * 0.55,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                      child: Text(
+                        '播放队列 · ${ordered.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: ordered.length,
+                        itemBuilder: (context, i) {
+                          final item = ordered[i];
+                          final selected = item.path == currentPath;
+                          return ListTile(
+                            dense: true,
+                            selected: selected,
+                            selectedTileColor:
+                                Colors.white.withValues(alpha: 0.08),
+                            leading: Icon(
+                              selected
+                                  ? Icons.equalizer
+                                  : Icons.music_note_outlined,
+                              color: selected
+                                  ? const Color(0xFF52C41A)
+                                  : Colors.white70,
+                            ),
+                            title: Text(
+                              _displayTitle(item.name),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: selected
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                              ),
+                            ),
+                            subtitle: Text(
+                              _albumName(item.path, service.rootPath),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white54),
+                            ),
+                            trailing: Text(
+                              item.size,
+                              style: const TextStyle(
+                                color: Colors.white38,
+                                fontSize: 12,
+                              ),
+                            ),
+                            onTap: () {
+                              final queueIndex = service.queue
+                                  .indexWhere((t) => t.path == item.path);
+                              if (queueIndex >= 0) {
+                                unawaited(
+                                  service.playTrackAt(queueIndex),
+                                );
+                              }
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+String _playerStatusLine(MusicPlayerService service) {
+  final mode = switch (service.repeatMode) {
+    MusicRepeatMode.off => '顺序',
+    MusicRepeatMode.all => '列表循环',
+    MusicRepeatMode.one => '单曲循环',
+  };
+  final shuffle = service.shuffle ? ' · 随机' : '';
+  final pos = service.index < 0
+      ? ''
+      : ' · ${service.index + 1}/${service.queue.length}';
+  return '后台常驻 · $mode$shuffle$pos · SFTP/SMB 流式';
 }
 
 class _PlayerTopBar extends StatelessWidget {
-  const _PlayerTopBar({required this.onClose});
+  const _PlayerTopBar({
+    required this.onClose,
+    this.onQueue,
+  });
 
   final VoidCallback onClose;
+  final VoidCallback? onQueue;
 
   @override
   Widget build(BuildContext context) {
@@ -908,6 +1025,16 @@ class _PlayerTopBar extends StatelessWidget {
               ),
             ),
           ),
+          if (onQueue != null)
+            Positioned(
+              right: 12,
+              top: 10,
+              child: IconButton(
+                tooltip: '播放队列',
+                onPressed: onQueue,
+                icon: const Icon(Icons.queue_music, color: Colors.white),
+              ),
+            ),
         ],
       ),
     );
