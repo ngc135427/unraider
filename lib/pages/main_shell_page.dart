@@ -4,7 +4,11 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
 
 import '../services/app_logger.dart';
 import '../services/media_cache.dart';
@@ -27,6 +31,8 @@ part 'management_detail_widgets.dart';
 
 const _maxImagePreviewDecodeExtent = 2400;
 const _maxTextPreviewBytes = 1024 * 1024;
+/// Soft guidance only — PDF still streams to disk; very large docs may be slow.
+const _maxPdfPreviewHintBytes = 80 * 1024 * 1024;
 
 /// Process-local cache for share browser image previews (path -> File).
 /// Full-resolution stills stream to disk; no hard byte-size reject.

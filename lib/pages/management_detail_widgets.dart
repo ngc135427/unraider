@@ -870,6 +870,307 @@ bool _isTextPreviewEntry(UnraidFileEntry entry) {
   return _textPreviewExtensions.contains(entry.nameLower.substring(dot));
 }
 
+bool _isPdfPreviewEntry(UnraidFileEntry entry) {
+  if (entry.isDirectory) {
+    return false;
+  }
+  return entry.nameLower.endsWith('.pdf');
+}
+
+/// Fullscreen PDF preview powered by offline PDF.js inside a WebView.
+class _SharePdfPreview extends StatefulWidget {
+  const _SharePdfPreview({
+    required this.client,
+    required this.entry,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+
+  @override
+  State<_SharePdfPreview> createState() => _SharePdfPreviewState();
+}
+
+class _SharePdfPreviewState extends State<_SharePdfPreview> {
+  WebViewController? _webController;
+  double _progress = 0;
+  String? _error;
+  bool _loadingFile = true;
+  bool _viewerReady = false;
+  String? _status;
+  Directory? _sessionDir;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_bootstrap());
+  }
+
+  @override
+  void dispose() {
+    final dir = _sessionDir;
+    _sessionDir = null;
+    if (dir != null) {
+      unawaited(
+        dir.delete(recursive: true).catchError((Object _) => dir),
+      );
+    }
+    super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
+    setState(() {
+      _loadingFile = true;
+      _error = null;
+      _status = '正在从 Unraid 下载 PDF…';
+      _progress = 0;
+    });
+    try {
+      final pdfFile = await MediaCache.ensureLocalFile(
+        client: widget.client,
+        remotePath: widget.entry.path,
+        expectedSizeBytes: widget.entry.sizeBytes,
+        fileName: widget.entry.name,
+        onProgress: (value) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _progress = value;
+            final pct = (value * 100).clamp(0, 100).toStringAsFixed(0);
+            _status = '正在下载 PDF… $pct%';
+          });
+        },
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = '正在准备 PDF.js 阅读器…';
+        _progress = 1;
+      });
+
+      final session = await _prepareViewerSession(pdfFile);
+      if (!mounted) {
+        return;
+      }
+      _sessionDir = session.dir;
+
+      final controller = WebViewController();
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await controller.setBackgroundColor(const Color(0xFF121212));
+      // Android: allow file:// HTML to read sibling PDF/worker scripts.
+      final platform = controller.platform;
+      if (platform is AndroidWebViewController) {
+        await platform.setAllowFileAccess(true);
+        await platform.setMediaPlaybackRequiresUserGesture(false);
+      }
+      await controller.setNavigationDelegate(
+        NavigationDelegate(
+          onPageFinished: (url) {
+            unawaited(_onViewerPageFinished(controller));
+          },
+          onWebResourceError: (error) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _error = 'WebView 错误：${error.description}';
+              _loadingFile = false;
+            });
+          },
+        ),
+      );
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _webController = controller;
+        _loadingFile = false;
+        _viewerReady = false;
+        _status = '正在打开阅读器…';
+      });
+      await controller.loadFile(session.viewerHtml.path);
+    } on Object catch (error, stackTrace) {
+      unawaited(
+        AppLogger.log(
+          'share_pdf_preview_error path=${widget.entry.path}',
+          error: error,
+          stackTrace: stackTrace,
+        ),
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadingFile = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  Future<void> _onViewerPageFinished(WebViewController controller) async {
+    if (!mounted || _viewerReady) {
+      return;
+    }
+    try {
+      // Load the sibling document.pdf via PDF.js (same directory as viewer).
+      await controller.runJavaScript(
+        "window.openPdfFromUrl && window.openPdfFromUrl('document.pdf');",
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _viewerReady = true;
+        _status = null;
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = '启动 PDF.js 失败：$error';
+      });
+    }
+  }
+
+  Future<({Directory dir, File viewerHtml})> _prepareViewerSession(
+    File pdfFile,
+  ) async {
+    final root = await getTemporaryDirectory();
+    final dir = Directory(
+      '${root.path}/unraider_pdf_${DateTime.now().microsecondsSinceEpoch}',
+    );
+    await dir.create(recursive: true);
+
+    // Copy offline PDF.js assets next to the document.
+    const assets = <String>[
+      'assets/pdfjs/viewer.html',
+      'assets/pdfjs/pdf.min.js',
+      'assets/pdfjs/pdf.worker.min.js',
+    ];
+    for (final asset in assets) {
+      final data = await rootBundle.load(asset);
+      final name = asset.split('/').last;
+      final out = File('${dir.path}/$name');
+      await out.writeAsBytes(
+        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+        flush: true,
+      );
+    }
+
+    // Place PDF beside viewer so file:// relative loads work.
+    final targetPdf = File('${dir.path}/document.pdf');
+    try {
+      await pdfFile.copy(targetPdf.path);
+    } on Object {
+      // Fallback when source is on a content/fuse path that copy rejects.
+      await targetPdf.writeAsBytes(await pdfFile.readAsBytes(), flush: true);
+    }
+
+    return (dir: dir, viewerHtml: File('${dir.path}/viewer.html'));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final largeHint = widget.entry.sizeBytes > _maxPdfPreviewHintBytes;
+    return ColoredBox(
+      color: const Color(0xFF121212),
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: 52,
+              child: Row(
+                children: [
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      widget.entry.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (widget.entry.size.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Text(
+                        widget.entry.size,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  IconButton(
+                    tooltip: '关闭',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            if (largeHint && _loadingFile)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text(
+                  '文件较大，首次下载可能需要较长时间',
+                  style: TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+              ),
+            Expanded(
+              child: _error != null
+                  ? _PreviewMessage(message: _error!, color: AppTheme.danger)
+                  : _loadingFile || _webController == null
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircularProgressIndicator(
+                                value: _progress > 0 && _progress < 1
+                                    ? _progress
+                                    : null,
+                              ),
+                              const SizedBox(height: 14),
+                              Text(
+                                _status ?? '准备中…',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.white70),
+                              ),
+                            ],
+                          ),
+                        )
+                      : Stack(
+                          children: [
+                            WebViewWidget(controller: _webController!),
+                            if (!_viewerReady && _error == null)
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                top: 0,
+                                child: LinearProgressIndicator(
+                                  backgroundColor: Colors.white10,
+                                  color: AppTheme.primary,
+                                ),
+                              ),
+                          ],
+                        ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StateMessage extends StatelessWidget {
   const _StateMessage({
     required this.icon,

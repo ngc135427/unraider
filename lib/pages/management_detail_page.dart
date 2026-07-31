@@ -579,9 +579,11 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                               ? Icons.movie_outlined
                               : entry.isAudio
                                   ? Icons.audiotrack
-                                  : _isTextPreviewEntry(entry)
-                                      ? Icons.description_outlined
-                                      : Icons.insert_drive_file,
+                                  : _isPdfPreviewEntry(entry)
+                                      ? Icons.picture_as_pdf_outlined
+                                      : _isTextPreviewEntry(entry)
+                                          ? Icons.description_outlined
+                                          : Icons.insert_drive_file,
                   title: entry.name,
                   subtitle:
                       entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
@@ -594,6 +596,8 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                       _previewVideo(args, entry);
                     } else if (entry.isAudio) {
                       _previewAudio(args, entry);
+                    } else if (_isPdfPreviewEntry(entry)) {
+                      _previewPdf(args, entry);
                     } else if (_isTextPreviewEntry(entry)) {
                       _previewText(args, entry);
                     } else {
@@ -793,6 +797,27 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       context: context,
       builder: (context) => Dialog.fullscreen(
         child: _ShareVideoPreview(client: client, entry: entry),
+      ),
+    );
+  }
+
+  Future<void> _previewPdf(
+    ManagementDetailArgs args,
+    UnraidFileEntry entry,
+  ) async {
+    final client = args.unraidClient;
+    if (client == null) {
+      _showMessage('缺少服务器连接');
+      return;
+    }
+    await AppLogger.log(
+      'share_pdf_preview_tap path=${entry.path} name=${entry.name} '
+      'sizeBytes=${entry.sizeBytes}',
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog.fullscreen(
+        child: _SharePdfPreview(client: client, entry: entry),
       ),
     );
   }

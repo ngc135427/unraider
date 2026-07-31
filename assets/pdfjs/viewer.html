@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes" />
+  <title>PDF Preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #121212;
+      color: #eee;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      height: 100%;
+      overflow: hidden;
+    }
+    #toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #1e1e1e;
+      border-bottom: 1px solid #333;
+      min-height: 48px;
+    }
+    #toolbar button {
+      background: #2a2a2a;
+      color: #fff;
+      border: 1px solid #444;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 14px;
+      min-width: 36px;
+    }
+    #toolbar button:active { background: #3a3a3a; }
+    #toolbar button:disabled { opacity: 0.4; }
+    #pageInfo {
+      flex: 1;
+      text-align: center;
+      font-size: 13px;
+      color: #bbb;
+      white-space: nowrap;
+    }
+    #status {
+      position: absolute;
+      inset: 48px 0 0 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      color: #aaa;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    #status.error { color: #ff8a80; }
+    #viewer {
+      position: absolute;
+      top: 48px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 12px 0 24px;
+    }
+    .page {
+      display: block;
+      margin: 0 auto 12px;
+      max-width: 100%;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.45);
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="prev" type="button" disabled>上一页</button>
+    <button id="next" type="button" disabled>下一页</button>
+    <div id="pageInfo">加载中…</div>
+    <button id="zoomOut" type="button" disabled>−</button>
+    <button id="zoomIn" type="button" disabled>+</button>
+  </div>
+  <div id="status">正在准备 PDF 阅读器…</div>
+  <div id="viewer" hidden></div>
+
+  <script src="pdf.min.js"></script>
+  <script>
+    (function () {
+      var pdfDoc = null;
+      var pageNum = 1;
+      var scale = 1.15;
+      var rendering = false;
+      var pendingPage = null;
+      var statusEl = document.getElementById('status');
+      var viewerEl = document.getElementById('viewer');
+      var pageInfoEl = document.getElementById('pageInfo');
+      var prevBtn = document.getElementById('prev');
+      var nextBtn = document.getElementById('next');
+      var zoomInBtn = document.getElementById('zoomIn');
+      var zoomOutBtn = document.getElementById('zoomOut');
+
+      function setStatus(text, isError) {
+        statusEl.hidden = false;
+        viewerEl.hidden = true;
+        statusEl.textContent = text || '';
+        statusEl.className = isError ? 'error' : '';
+        pageInfoEl.textContent = isError ? '预览失败' : '加载中…';
+      }
+
+      function setReadyUi() {
+        statusEl.hidden = true;
+        viewerEl.hidden = false;
+        prevBtn.disabled = false;
+        nextBtn.disabled = false;
+        zoomInBtn.disabled = false;
+        zoomOutBtn.disabled = false;
+        updatePageInfo();
+      }
+
+      function updatePageInfo() {
+        if (!pdfDoc) {
+          pageInfoEl.textContent = '—';
+          return;
+        }
+        pageInfoEl.textContent = pageNum + ' / ' + pdfDoc.numPages +
+          '  ·  ' + Math.round(scale * 100) + '%';
+        prevBtn.disabled = pageNum <= 1;
+        nextBtn.disabled = pageNum >= pdfDoc.numPages;
+      }
+
+      function renderPage(num) {
+        rendering = true;
+        return pdfDoc.getPage(num).then(function (page) {
+          var viewport = page.getViewport({ scale: scale });
+          var canvas = document.createElement('canvas');
+          var ctx = canvas.getContext('2d', { alpha: false });
+          var outputScale = window.devicePixelRatio || 1;
+          canvas.width = Math.floor(viewport.width * outputScale);
+          canvas.height = Math.floor(viewport.height * outputScale);
+          canvas.style.width = Math.floor(viewport.width) + 'px';
+          canvas.style.height = Math.floor(viewport.height) + 'px';
+          canvas.className = 'page';
+          var transform = outputScale !== 1
+            ? [outputScale, 0, 0, outputScale, 0, 0]
+            : null;
+          viewerEl.innerHTML = '';
+          viewerEl.appendChild(canvas);
+          return page.render({
+            canvasContext: ctx,
+            viewport: viewport,
+            transform: transform
+          }).promise.then(function () {
+            rendering = false;
+            updatePageInfo();
+            if (pendingPage !== null) {
+              var p = pendingPage;
+              pendingPage = null;
+              queueRenderPage(p);
+            }
+          });
+        }).catch(function (err) {
+          rendering = false;
+          setStatus('渲染失败：' + (err && err.message ? err.message : err), true);
+        });
+      }
+
+      function queueRenderPage(num) {
+        if (rendering) {
+          pendingPage = num;
+          return;
+        }
+        renderPage(num);
+      }
+
+      function onPrev() {
+        if (pageNum <= 1) return;
+        pageNum -= 1;
+        queueRenderPage(pageNum);
+      }
+
+      function onNext() {
+        if (!pdfDoc || pageNum >= pdfDoc.numPages) return;
+        pageNum += 1;
+        queueRenderPage(pageNum);
+      }
+
+      function onZoomIn() {
+        scale = Math.min(3.0, scale + 0.2);
+        queueRenderPage(pageNum);
+      }
+
+      function onZoomOut() {
+        scale = Math.max(0.5, scale - 0.2);
+        queueRenderPage(pageNum);
+      }
+
+      prevBtn.addEventListener('click', onPrev);
+      nextBtn.addEventListener('click', onNext);
+      zoomInBtn.addEventListener('click', onZoomIn);
+      zoomOutBtn.addEventListener('click', onZoomOut);
+
+      // PDF.js worker (same folder as this HTML).
+      if (window.pdfjsLib) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+      }
+
+      /**
+       * Open a PDF from a same-directory relative path (e.g. document.pdf)
+       * or from a raw ArrayBuffer / Uint8Array injected by the host.
+       */
+      window.openPdfFromUrl = function (url) {
+        setStatus('正在加载 PDF…');
+        if (!window.pdfjsLib) {
+          setStatus('PDF.js 未加载', true);
+          return Promise.reject(new Error('pdfjs missing'));
+        }
+        return pdfjsLib.getDocument({
+          url: url,
+          // Disable range/stream for local file:// reliability.
+          disableRange: true,
+          disableStream: true,
+          disableAutoFetch: true
+        }).promise.then(function (doc) {
+          pdfDoc = doc;
+          pageNum = 1;
+          setReadyUi();
+          return renderPage(pageNum);
+        }).catch(function (err) {
+          setStatus('无法打开 PDF：' + (err && err.message ? err.message : err), true);
+          throw err;
+        });
+      };
+
+      window.openPdfFromBase64 = function (b64) {
+        setStatus('正在解码 PDF…');
+        if (!window.pdfjsLib) {
+          setStatus('PDF.js 未加载', true);
+          return Promise.reject(new Error('pdfjs missing'));
+        }
+        try {
+          var raw = atob(b64);
+          var len = raw.length;
+          var bytes = new Uint8Array(len);
+          for (var i = 0; i < len; i++) {
+            bytes[i] = raw.charCodeAt(i);
+          }
+          return pdfjsLib.getDocument({
+            data: bytes,
+            disableRange: true,
+            disableStream: true
+          }).promise.then(function (doc) {
+            pdfDoc = doc;
+            pageNum = 1;
+            setReadyUi();
+            return renderPage(pageNum);
+          }).catch(function (err) {
+            setStatus('无法打开 PDF：' + (err && err.message ? err.message : err), true);
+            throw err;
+          });
+        } catch (err) {
+          setStatus('Base64 解码失败：' + (err && err.message ? err.message : err), true);
+          return Promise.reject(err);
+        }
+      };
+
+      // Auto-open sibling document.pdf when hosted from a local folder.
+      window.addEventListener('DOMContentLoaded', function () {
+        if (!window.pdfjsLib) {
+          setStatus('PDF.js 脚本加载失败', true);
+          return;
+        }
+        // Host app may call openPdfFromUrl / openPdfFromBase64 after load.
+        if (window.UnraiderPdf && typeof window.UnraiderPdf.onReady === 'function') {
+          window.UnraiderPdf.onReady();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
