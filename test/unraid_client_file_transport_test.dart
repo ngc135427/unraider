@@ -114,7 +114,8 @@ void main() {
 
   test('dashboard overview parse returns stable row layout', () async {
     const html = '''
-<div class="icon-cpu"></div><div class="tile-header-main">Intel Core</div>
+<tbody><i class="icon-cpu"></i><h3 class="tile-header-main">Processor</h3>
+Intel&#174; Core&#8482; i3-10105F<span class="cpu-load">0%</span></tbody>
 <title>Tower | Unraid</title>
 Unraid OS 7.0.0
 <tbody id="array_list"><h3 class="tile-header-main">Started</h3><span>10 GB / 20 GB 50%</span></tbody>
@@ -123,7 +124,7 @@ Unraid OS 7.0.0
     expect(row.length, 7);
     expect(row[0], isA<String>());
     expect(row[1], contains('7.0.0'));
-    expect(row[2], isA<String>());
+    expect(row[2], 'Intel® Core™ i3-10105F');
     expect(row[6], isA<double>());
   });
 

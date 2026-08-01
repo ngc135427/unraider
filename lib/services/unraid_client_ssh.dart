@@ -784,6 +784,12 @@ String _decodeJsString(String value) {
 
 String _decodeHtml(String value) {
   return value
+      .replaceAllMapped(RegExp(r'&#(\d+);'), (match) {
+        final codePoint = int.tryParse(match.group(1) ?? '');
+        return codePoint == null || codePoint > 0x10ffff
+            ? match.group(0)!
+            : String.fromCharCode(codePoint);
+      })
       .replaceAll('&amp;', '&')
       .replaceAll('&lt;', '<')
       .replaceAll('&gt;', '>')
