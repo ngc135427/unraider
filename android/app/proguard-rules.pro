@@ -18,3 +18,4 @@
 -keep class com.hierynomus.smbj.** { *; }
 -keep class com.hierynomus.mssmb2.** { *; }
 -keep class com.hierynomus.protocol.** { *; }
+-keep class net.engio.mbassy.** { *; }
