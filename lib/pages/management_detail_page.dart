@@ -13,6 +13,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   /// Action busy flag is isolated so start/stop/restart do not rebuild details.
   final ValueNotifier<bool> _isSubmitting = ValueNotifier<bool>(false);
   bool _shareBrowserReady = false;
+
   /// Spinner-only flag so soft directory refresh does not rebuild the file list.
   final ValueNotifier<bool> _shareLoading = ValueNotifier<bool>(false);
   String? _sharePath;
@@ -21,6 +22,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   Object? _shareError;
   final TextEditingController _shareSearchController = TextEditingController();
   Timer? _shareSearchDebounce;
+
   /// Search query is isolated so typing does not rebuild the share header chrome.
   final ValueNotifier<String> _shareQuery = ValueNotifier<String>('');
   int _shareLoadGeneration = 0;
@@ -34,6 +36,8 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   List<String> _shareSearchHaystacks = const <String>[];
   List<UnraidFileEntry>? _shareImageEntriesRef;
   List<UnraidFileEntry> _shareImageEntriesCached = const <UnraidFileEntry>[];
+  List<UnraidFileEntry>? _shareVideoEntriesRef;
+  List<UnraidFileEntry> _shareVideoEntriesCached = const <UnraidFileEntry>[];
 
   @override
   void dispose() {
@@ -436,10 +440,19 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       return _shareImageEntriesCached;
     }
     _shareImageEntriesRef = _shareEntries;
-    _shareImageEntriesCached = _shareEntries
-        .where((entry) => entry.isImage)
-        .toList(growable: false);
+    _shareImageEntriesCached =
+        _shareEntries.where((entry) => entry.isImage).toList(growable: false);
     return _shareImageEntriesCached;
+  }
+
+  List<UnraidFileEntry> get _shareVideoEntries {
+    if (identical(_shareVideoEntriesRef, _shareEntries)) {
+      return _shareVideoEntriesCached;
+    }
+    _shareVideoEntriesRef = _shareEntries;
+    _shareVideoEntriesCached =
+        _shareEntries.where((entry) => entry.isVideo).toList(growable: false);
+    return _shareVideoEntriesCached;
   }
 
   void _ensureShareSearchHaystacks() {
@@ -463,8 +476,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     if (query.isEmpty) {
       _shareFilteredCached = _shareEntries;
       _shareFilteredIndexByPath = {
-        for (var i = 0; i < _shareEntries.length; i++)
-          _shareEntries[i].path: i,
+        for (var i = 0; i < _shareEntries.length; i++) _shareEntries[i].path: i,
       };
       return _shareFilteredCached;
     }
@@ -507,6 +519,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
 
     final allEntries = _shareEntries;
     final imageEntries = _shareImageEntries;
+    final videoEntries = _shareVideoEntries;
     if (!_shareLoading.value && allEntries.isEmpty && _shareError == null) {
       return RefreshIndicator(
         onRefresh: () async {
@@ -585,15 +598,14 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                                           ? Icons.description_outlined
                                           : Icons.insert_drive_file,
                   title: entry.name,
-                  subtitle:
-                      entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
+                  subtitle: entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
                   onTap: () {
                     if (entry.isDirectory) {
                       _openSharePath(entry.path);
                     } else if (entry.isImage) {
                       _previewImage(args, entry, imageEntries);
                     } else if (entry.isVideo) {
-                      _previewVideo(args, entry);
+                      _previewVideo(args, entry, videoEntries);
                     } else if (entry.isAudio) {
                       _previewAudio(args, entry);
                     } else if (_isPdfPreviewEntry(entry)) {
@@ -787,16 +799,24 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   Future<void> _previewVideo(
     ManagementDetailArgs args,
     UnraidFileEntry entry,
+    List<UnraidFileEntry> videoEntries,
   ) async {
     final client = args.unraidClient;
     if (client == null) {
       _showMessage('缺少服务器连接');
       return;
     }
+    final entries =
+        videoEntries.isEmpty ? <UnraidFileEntry>[entry] : videoEntries;
+    final initialIndex = entries.indexWhere((item) => item.path == entry.path);
     await showDialog<void>(
       context: context,
       builder: (context) => Dialog.fullscreen(
-        child: _ShareVideoPreview(client: client, entry: entry),
+        child: _ShareVideoPreview(
+          client: client,
+          entries: entries,
+          initialIndex: initialIndex,
+        ),
       ),
     );
   }
@@ -847,4 +867,3 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     );
   }
 }
-

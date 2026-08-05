@@ -641,80 +641,51 @@ class _TextPreviewState extends State<_TextPreview> {
 class _ShareVideoPreview extends StatefulWidget {
   const _ShareVideoPreview({
     required this.client,
-    required this.entry,
+    required this.entries,
+    required this.initialIndex,
   });
 
   final UnraidClient client;
-  final UnraidFileEntry entry;
+  final List<UnraidFileEntry> entries;
+  final int initialIndex;
 
   @override
   State<_ShareVideoPreview> createState() => _ShareVideoPreviewState();
 }
 
 class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
-  VideoPlayerController? _controller;
-  String? _error;
-  bool _loading = true;
+  late final PageController _controller;
+  late int _index;
 
   @override
   void initState() {
     super.initState();
-    unawaited(_start());
-  }
-
-  double _progress = 0;
-
-  Future<void> _start() async {
-    try {
-      final handle = await MediaCache.ensureProgressive(
-        client: widget.client,
-        remotePath: widget.entry.path,
-        expectedSizeBytes: widget.entry.sizeBytes,
-        fileName: widget.entry.name,
-      );
-      handle.progress.listen((value) {
-        if (!mounted) {
-          return;
-        }
-        setState(() => _progress = value);
-      });
-      await handle.ready;
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-      final controller = VideoPlayerController.file(handle.file);
-      await controller.initialize();
-      await controller.setLooping(true);
-      await controller.play();
-      if (!mounted) {
-        await controller.dispose();
-        return;
-      }
-      setState(() {
-        _controller = controller;
-        _loading = false;
-        _error = null;
-      });
-    } on Object catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _loading = false;
-        _error = error.toString();
-      });
-    }
+    _index = widget.initialIndex < 0 ? 0 : widget.initialIndex;
+    _index = _index.clamp(0, widget.entries.length - 1);
+    _controller = PageController(initialPage: _index);
   }
 
   @override
   void dispose() {
-    final controller = _controller;
-    _controller = null;
-    unawaited(controller?.dispose() ?? Future<void>.value());
+    _controller.dispose();
     super.dispose();
+  }
+
+  void _go(int delta) {
+    final next = (_index + delta).clamp(0, widget.entries.length - 1);
+    if (next == _index) {
+      return;
+    }
+    _controller.animateToPage(
+      next,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final controller = _controller;
+    final entry = widget.entries[_index];
     return ColoredBox(
       color: Colors.black,
       child: SafeArea(
@@ -728,7 +699,9 @@ class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
                   const SizedBox(width: 16),
                   Expanded(
                     child: Text(
-                      widget.entry.name,
+                      widget.entries.length > 1
+                          ? '${entry.name}  ${_index + 1}/${widget.entries.length}'
+                          : entry.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -739,6 +712,18 @@ class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
                     ),
                   ),
                   IconButton(
+                    tooltip: '上一个视频',
+                    onPressed: _index == 0 ? null : () => _go(-1),
+                    icon: const Icon(Icons.chevron_left, color: Colors.white),
+                  ),
+                  IconButton(
+                    tooltip: '下一个视频',
+                    onPressed: _index == widget.entries.length - 1
+                        ? null
+                        : () => _go(1),
+                    icon: const Icon(Icons.chevron_right, color: Colors.white),
+                  ),
+                  IconButton(
                     tooltip: '关闭',
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close, color: Colors.white),
@@ -747,30 +732,169 @@ class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
               ),
             ),
             Expanded(
-              child: _error != null
-                  ? _PreviewMessage(message: _error!, color: AppTheme.danger)
-                  : _loading ||
-                          controller == null ||
-                          !controller.value.isInitialized
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const CircularProgressIndicator(),
-                              const SizedBox(height: 14),
-                              Text(
-                                '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                                style: const TextStyle(color: Colors.white70),
-                              ),
-                            ],
-                          ),
-                        )
-                      : _ShareVideoPlayer(controller: controller),
+              child: PageView.builder(
+                controller: _controller,
+                itemCount: widget.entries.length,
+                allowImplicitScrolling: false,
+                onPageChanged: (value) => setState(() => _index = value),
+                itemBuilder: (context, index) {
+                  final item = widget.entries[index];
+                  return _ShareVideoPreviewPage(
+                    key: ValueKey<String>(item.path),
+                    client: widget.client,
+                    entry: item,
+                    active: index == _index,
+                  );
+                },
+              ),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+class _ShareVideoPreviewPage extends StatefulWidget {
+  const _ShareVideoPreviewPage({
+    super.key,
+    required this.client,
+    required this.entry,
+    required this.active,
+  });
+
+  final UnraidClient client;
+  final UnraidFileEntry entry;
+  final bool active;
+
+  @override
+  State<_ShareVideoPreviewPage> createState() => _ShareVideoPreviewPageState();
+}
+
+class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
+  VideoPlayerController? _controller;
+  Future<void>? _initFuture;
+  StreamSubscription<double>? _progressSubscription;
+  String? _error;
+  bool _started = false;
+  double _progress = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) {
+      unawaited(_start());
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _ShareVideoPreviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !_started) {
+      unawaited(_start());
+    } else if (!widget.active && _controller != null) {
+      unawaited(_controller!.pause());
+    }
+  }
+
+  Future<void> _start() async {
+    if (_started) {
+      return;
+    }
+    _started = true;
+    final future = _loadAndPlay();
+    setState(() {
+      _initFuture = future;
+      _error = null;
+    });
+    try {
+      await future;
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _error = error.toString();
+      });
+    }
+  }
+
+  Future<void> _loadAndPlay() async {
+    final handle = await MediaCache.ensureProgressive(
+      client: widget.client,
+      remotePath: widget.entry.path,
+      expectedSizeBytes: widget.entry.sizeBytes,
+      fileName: widget.entry.name,
+    );
+    _progressSubscription = handle.progress.listen((value) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _progress = value);
+    });
+    await handle.ready;
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    final controller = VideoPlayerController.file(handle.file);
+    await controller.initialize();
+    await controller.setLooping(true);
+    if (widget.active) {
+      await controller.play();
+    }
+    if (!mounted) {
+      await controller.dispose();
+      return;
+    }
+    setState(() {
+      _controller = controller;
+      _error = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_progressSubscription?.cancel() ?? Future<void>.value());
+    final controller = _controller;
+    _controller = null;
+    unawaited(controller?.dispose() ?? Future<void>.value());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return _PreviewMessage(message: _error!, color: AppTheme.danger);
+    }
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 14),
+            Text(
+              widget.active
+                  ? '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                  : '等待播放',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            if (_initFuture != null)
+              FutureBuilder<void>(
+                future: _initFuture,
+                builder: (_, __) => const SizedBox.shrink(),
+              ),
+            if (widget.entry.size.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                widget.entry.size,
+                style: const TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+    return _ShareVideoPlayer(controller: controller);
   }
 }
 
@@ -792,12 +916,44 @@ class _ShareVideoPlayer extends StatelessWidget {
             child: VideoPlayer(controller),
           ),
         ),
+        Positioned.fill(
+          child: ValueListenableBuilder<VideoPlayerValue>(
+            valueListenable: controller,
+            builder: (context, value, _) {
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () {
+                    if (value.isPlaying) {
+                      unawaited(controller.pause());
+                    } else {
+                      unawaited(controller.play());
+                    }
+                  },
+                  child: Center(
+                    child: AnimatedOpacity(
+                      opacity: value.isPlaying ? 0 : 1,
+                      duration: const Duration(milliseconds: 160),
+                      child: Icon(
+                        value.isPlaying
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_filled,
+                        color: Colors.white.withValues(alpha: 0.82),
+                        size: 66,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
         Positioned(
           left: 0,
           right: 0,
           bottom: 0,
           child: ColoredBox(
-            color: Colors.black.withValues(alpha: 0.45),
+            color: Colors.black.withValues(alpha: 0.52),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -814,29 +970,53 @@ class _ShareVideoPlayer extends StatelessWidget {
                     vertical: 8,
                   ),
                 ),
-                ValueListenableBuilder<VideoPlayerValue>(
-                  valueListenable: controller,
-                  builder: (context, value, _) {
-                    return IconButton(
-                      tooltip: value.isPlaying ? '暂停' : '播放',
-                      onPressed: () {
-                        if (value.isPlaying) {
-                          unawaited(controller.pause());
-                        } else {
-                          unawaited(controller.play());
-                        }
-                      },
-                      icon: Icon(
-                        value.isPlaying
-                            ? Icons.pause_circle_filled
-                            : Icons.play_circle_filled,
-                        color: Colors.white,
-                        size: 42,
-                      ),
-                    );
-                  },
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 16, 10),
+                  child: ValueListenableBuilder<VideoPlayerValue>(
+                    valueListenable: controller,
+                    builder: (context, value, _) {
+                      return Row(
+                        children: [
+                          IconButton(
+                            tooltip: value.isPlaying ? '暂停' : '播放',
+                            onPressed: () {
+                              if (value.isPlaying) {
+                                unawaited(controller.pause());
+                              } else {
+                                unawaited(controller.play());
+                              }
+                            },
+                            icon: Icon(
+                              value.isPlaying ? Icons.pause : Icons.play_arrow,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            '${_formatPreviewDuration(value.position)} / '
+                            '${_formatPreviewDuration(value.duration)}',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            tooltip: '从头播放',
+                            onPressed: () {
+                              unawaited(controller.seekTo(Duration.zero));
+                              unawaited(controller.play());
+                            },
+                            icon: const Icon(
+                              Icons.replay,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
-                const SizedBox(height: 8),
               ],
             ),
           ),
@@ -844,6 +1024,17 @@ class _ShareVideoPlayer extends StatelessWidget {
       ],
     );
   }
+}
+
+String _formatPreviewDuration(Duration value) {
+  final total = value.inSeconds;
+  final seconds = (total % 60).toString().padLeft(2, '0');
+  final minutes = ((total ~/ 60) % 60).toString().padLeft(2, '0');
+  final hours = total ~/ 3600;
+  if (hours > 0) {
+    return '$hours:$minutes:$seconds';
+  }
+  return '$minutes:$seconds';
 }
 
 const _textPreviewExtensions = <String>{
