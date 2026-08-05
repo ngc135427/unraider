@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 
+import '../services/lyrics_service.dart';
 import '../services/music_player_service.dart';
 import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
@@ -738,6 +739,12 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
           final error = service.error;
           final player = service.player;
 
+          final lyrics = service.lyrics;
+          final showCompactArt = lyrics.hasLines ||
+              lyrics.status == LyricsLoadStatus.loading ||
+              lyrics.status == LyricsLoadStatus.missing ||
+              lyrics.status == LyricsLoadStatus.error;
+
           return Column(
             children: [
               _PlayerTopBar(
@@ -745,92 +752,54 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
                 onQueue: service.queue.length > 1
                     ? () => _showQueueSheet(context, service)
                     : null,
+                onLyrics: () => unawaited(service.reloadLyrics()),
               ),
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(30, 20, 30, 34),
+                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
                   child: FadeSlide(
                     animate: false,
                     child: Column(
                       children: [
-                        Expanded(
-                          child: Center(
-                            child: Container(
-                              width: 240,
-                              height: 240,
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                  colors: [
-                                    Color(0xFF3498DB),
-                                    Color(0xFF52C41A)
-                                  ],
-                                ),
-                                borderRadius: BorderRadius.circular(28),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0xFF3498DB)
-                                        .withValues(alpha: 0.28),
-                                    blurRadius: 28,
-                                    offset: const Offset(0, 14),
-                                  ),
-                                ],
-                              ),
-                              child: loading
-                                  ? const Center(
-                                      child: CircularProgressIndicator(
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : Icon(
-                                      track.isAudio
-                                          ? Icons.music_note
-                                          : Icons.audio_file,
-                                      color: Colors.white,
-                                      size: 78,
-                                    ),
-                            ),
-                          ),
+                        _PlayerArtwork(
+                          compact: showCompactArt,
+                          loading: loading,
+                          isAudio: track.isAudio,
                         ),
+                        const SizedBox(height: 14),
                         Text(
                           title,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: Colors.white,
-                            fontSize: 24,
+                            fontSize: showCompactArt ? 20 : 24,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        const SizedBox(height: 6),
+                        const SizedBox(height: 4),
                         Text(
                           album,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.74),
-                            fontSize: 15,
+                            fontSize: 14,
                           ),
                         ),
-                        const SizedBox(height: 10),
-                        Text(
-                          track.size.isEmpty
-                              ? track.path
-                              : '${track.size} · ${track.path}',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.55),
-                            fontSize: 12,
+                        const SizedBox(height: 12),
+                        Expanded(
+                          child: _LyricsPanel(
+                            lyrics: lyrics,
+                            player: player,
+                            onRetry: () => unawaited(service.reloadLyrics()),
                           ),
                         ),
-                        const SizedBox(height: 26),
+                        const SizedBox(height: 12),
                         if (error != null)
                           Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
+                            padding: const EdgeInsets.only(bottom: 12),
                             child: Text(
                               error,
                               textAlign: TextAlign.center,
@@ -843,7 +812,7 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
                           )
                         else
                           _PlayerProgress(player: player),
-                        const SizedBox(height: 24),
+                        const SizedBox(height: 16),
                         _PlayerControls(
                           player: player,
                           enabled: !loading && error == null,
@@ -860,7 +829,7 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
                               ? null
                               : () => unawaited(service.retry()),
                         ),
-                        const SizedBox(height: 18),
+                        const SizedBox(height: 12),
                         Text(
                           loading
                               ? '正在按需流式缓冲…'
@@ -999,10 +968,12 @@ class _PlayerTopBar extends StatelessWidget {
   const _PlayerTopBar({
     required this.onClose,
     this.onQueue,
+    this.onLyrics,
   });
 
   final VoidCallback onClose;
   final VoidCallback? onQueue;
+  final VoidCallback? onLyrics;
 
   @override
   Widget build(BuildContext context) {
@@ -1025,16 +996,27 @@ class _PlayerTopBar extends StatelessWidget {
               ),
             ),
           ),
-          if (onQueue != null)
-            Positioned(
-              right: 12,
-              top: 10,
-              child: IconButton(
-                tooltip: '播放队列',
-                onPressed: onQueue,
-                icon: const Icon(Icons.queue_music, color: Colors.white),
-              ),
+          Positioned(
+            right: 8,
+            top: 10,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (onLyrics != null)
+                  IconButton(
+                    tooltip: '重新加载歌词',
+                    onPressed: onLyrics,
+                    icon: const Icon(Icons.lyrics_outlined, color: Colors.white),
+                  ),
+                if (onQueue != null)
+                  IconButton(
+                    tooltip: '播放队列',
+                    onPressed: onQueue,
+                    icon: const Icon(Icons.queue_music, color: Colors.white),
+                  ),
+              ],
             ),
+          ),
         ],
       ),
     );

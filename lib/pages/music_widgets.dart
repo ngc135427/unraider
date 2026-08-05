@@ -228,6 +228,262 @@ class _TrackSearchBox extends StatelessWidget {
   }
 }
 
+class _PlayerArtwork extends StatelessWidget {
+  const _PlayerArtwork({
+    required this.compact,
+    required this.loading,
+    required this.isAudio,
+  });
+
+  final bool compact;
+  final bool loading;
+  final bool isAudio;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = compact ? 96.0 : 220.0;
+    final iconSize = compact ? 40.0 : 78.0;
+    final radius = compact ? 18.0 : 28.0;
+    return Center(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFF3498DB), Color(0xFF52C41A)],
+          ),
+          borderRadius: BorderRadius.circular(radius),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF3498DB).withValues(alpha: 0.28),
+              blurRadius: compact ? 14 : 28,
+              offset: Offset(0, compact ? 8 : 14),
+            ),
+          ],
+        ),
+        child: loading
+            ? const Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              )
+            : Icon(
+                isAudio ? Icons.music_note : Icons.audio_file,
+                color: Colors.white,
+                size: iconSize,
+              ),
+      ),
+    );
+  }
+}
+
+/// Timed / plain lyrics list synced to [player] position.
+class _LyricsPanel extends StatefulWidget {
+  const _LyricsPanel({
+    required this.lyrics,
+    required this.player,
+    this.onRetry,
+  });
+
+  final LyricsLoadState lyrics;
+  final AudioPlayer player;
+  final VoidCallback? onRetry;
+
+  @override
+  State<_LyricsPanel> createState() => _LyricsPanelState();
+}
+
+class _LyricsPanelState extends State<_LyricsPanel> {
+  final ScrollController _scrollController = ScrollController();
+  int _lastActive = -2;
+  String? _lastSourcePath;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LyricsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextPath = widget.lyrics.document?.sourcePath;
+    if (nextPath != _lastSourcePath) {
+      _lastSourcePath = nextPath;
+      _lastActive = -2;
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+    }
+  }
+
+  void _ensureVisible(int index, int total) {
+    if (!_scrollController.hasClients || index < 0 || total <= 0) {
+      return;
+    }
+    // Approximate row height including padding; keep active line near center.
+    const rowExtent = 44.0;
+    final viewport = _scrollController.position.viewportDimension;
+    final target = (index * rowExtent) - (viewport / 2) + (rowExtent / 2);
+    final max = _scrollController.position.maxScrollExtent;
+    final clamped = target.clamp(0.0, max);
+    unawaited(
+      _scrollController.animateTo(
+        clamped,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.lyrics;
+    switch (state.status) {
+      case LyricsLoadStatus.idle:
+      case LyricsLoadStatus.loading:
+        return const Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white70,
+                ),
+              ),
+              SizedBox(height: 12),
+              Text(
+                '正在加载歌词…',
+                style: TextStyle(color: Colors.white54, fontSize: 13),
+              ),
+            ],
+          ),
+        );
+      case LyricsLoadStatus.missing:
+      case LyricsLoadStatus.error:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  state.status == LyricsLoadStatus.missing
+                      ? Icons.lyrics_outlined
+                      : Icons.error_outline,
+                  color: Colors.white38,
+                  size: 36,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  state.message ??
+                      (state.status == LyricsLoadStatus.missing
+                          ? '未找到内嵌歌词或同名 .lrc'
+                          : '歌词加载失败'),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '优先读取音轨内嵌歌词；也可放置同名 .lrc',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.35),
+                    fontSize: 11,
+                  ),
+                ),
+                if (widget.onRetry != null) ...[
+                  const SizedBox(height: 12),
+                  TextButton.icon(
+                    onPressed: widget.onRetry,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('重试'),
+                    style: TextButton.styleFrom(foregroundColor: Colors.white70),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      case LyricsLoadStatus.ready:
+        final document = state.document;
+        if (document == null || document.lines.isEmpty) {
+          return const Center(
+            child: Text(
+              '歌词为空',
+              style: TextStyle(color: Colors.white54),
+            ),
+          );
+        }
+        final lines = document.lines;
+        final timed = document.timed;
+        return StreamBuilder<Duration>(
+          stream: widget.player.positionStream,
+          builder: (context, snapshot) {
+            final position = snapshot.data ?? Duration.zero;
+            final active = timed
+                ? LyricsService.activeIndexAt(lines, position)
+                : -1;
+            if (timed && active != _lastActive) {
+              final previous = _lastActive;
+              _lastActive = active;
+              if (active >= 0 && previous != -2) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) {
+                    _ensureVisible(active, lines.length);
+                  }
+                });
+              }
+            }
+            return ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              itemCount: lines.length,
+              itemBuilder: (context, index) {
+                final line = lines[index];
+                final selected = timed && index == active;
+                return InkWell(
+                  onTap: !timed
+                      ? null
+                      : () => unawaited(widget.player.seek(line.time)),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 10,
+                    ),
+                    child: Text(
+                      line.text,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: selected
+                            ? Colors.white
+                            : Colors.white.withValues(
+                                alpha: timed ? 0.42 : 0.72,
+                              ),
+                        fontSize: selected ? 17 : 14,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w400,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+    }
+  }
+}
+
 class _PlayerProgress extends StatelessWidget {
   const _PlayerProgress({required this.player});
 

@@ -6,6 +6,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
+import 'lyrics_service.dart';
 import 'streaming_audio_source.dart';
 import 'unraid_client.dart';
 
@@ -64,6 +65,8 @@ class MusicPlayerService extends ChangeNotifier {
   int _fullPlayerDepth = 0;
   bool _shuffle = false;
   MusicRepeatMode _repeat = MusicRepeatMode.all;
+  int _lyricsGeneration = 0;
+  LyricsLoadState _lyrics = LyricsLoadState.idle;
 
   UnraidClient? get client => _client;
   List<UnraidFileEntry> get queue => _queue;
@@ -84,6 +87,7 @@ class MusicPlayerService extends ChangeNotifier {
   bool get playing => player.playing;
   bool get shuffle => _shuffle;
   MusicRepeatMode get repeatMode => _repeat;
+  LyricsLoadState get lyrics => _lyrics;
 
   /// True while at least one full-screen player route is mounted.
   bool get fullPlayerVisible => _fullPlayerDepth > 0;
@@ -268,6 +272,7 @@ class MusicPlayerService extends ChangeNotifier {
 
   Future<void> stopAndClear() async {
     _loadGeneration += 1;
+    _lyricsGeneration += 1;
     _loading = false;
     _error = null;
     _hasSession = false;
@@ -275,12 +280,23 @@ class MusicPlayerService extends ChangeNotifier {
     _orderPos = -1;
     _order = const <int>[];
     _queue = const <UnraidFileEntry>[];
+    _lyrics = LyricsLoadState.idle;
     try {
       await player.stop();
     } on Object {
       // Ignore stop failures while tearing down.
     }
     notifyListeners();
+  }
+
+  /// Reload sidecar lyrics for the current track (bypasses process cache).
+  Future<void> reloadLyrics() async {
+    final client = _client;
+    final track = _current;
+    if (client == null || track == null) {
+      return;
+    }
+    await _loadLyricsFor(client: client, track: track, forceRefresh: true);
   }
 
   Future<void> _onTrackCompleted() async {
@@ -338,7 +354,10 @@ class MusicPlayerService extends ChangeNotifier {
     final generation = ++_loadGeneration;
     _loading = true;
     _error = null;
+    _lyrics = LyricsLoadState.loading;
     notifyListeners();
+    // Lyrics load in parallel with audio source setup.
+    unawaited(_loadLyricsFor(client: client, track: track));
 
     try {
       await ensureSession();
@@ -381,6 +400,32 @@ class MusicPlayerService extends ChangeNotifier {
       _error = error.toString();
       notifyListeners();
     }
+  }
+
+  Future<void> _loadLyricsFor({
+    required UnraidClient client,
+    required UnraidFileEntry track,
+    bool forceRefresh = false,
+  }) async {
+    final generation = ++_lyricsGeneration;
+    if (_lyrics.status != LyricsLoadStatus.loading) {
+      _lyrics = LyricsLoadState.loading;
+      notifyListeners();
+    }
+    final result = await LyricsService.loadForTrack(
+      client: client,
+      track: track,
+      forceRefresh: forceRefresh,
+    );
+    if (_disposed || generation != _lyricsGeneration) {
+      return;
+    }
+    // Ignore stale results if the user already skipped to another track.
+    if (_current?.path != track.path) {
+      return;
+    }
+    _lyrics = result;
+    notifyListeners();
   }
 
   static String displayTitle(String fileName) {
