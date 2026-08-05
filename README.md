@@ -30,20 +30,30 @@ Unraider 是一个使用 Flutter 构建的 Unraid 移动端/桌面端管理客�
 ### 共享目录与媒体
 
 - 共享列表来自 `/mnt/user` 目录读取。
-- 共享详情页支持目录进入和文件预览。
+- 共享详情页支持目录进入、搜索、刷新和文件预览。
+- 支持图片、视频、音频、PDF 和常见文本文件预览。
+- 图片预览支持同目录翻页、缩放和流式缓存。
+- 视频预览支持同目录视频翻页、渐进式缓冲、播放/暂停、进度拖动、时长显示和从头播放。
+- PDF 预览使用内置 PDF.js 与 WebView 离线打开。
 - 相册、视频和备份目录选择使用 Unraid 文件接口。
 - Android 端可读取本机图片/视频列表、相册分组、缩略图和分片内容，为后续备份任务提供基础能力。
 
 ### 音乐页面
 
-- 提供音乐库、歌曲列表和播放器页面。
-- 当前音乐数据为前端静态示例，用于完善媒体应用体验。
+- 扫描 Unraid 远程音乐库并展示专辑、歌曲列表和播放器页面。
+- 支持远程音频播放、后台播放通知、迷你播放器和播放队列。
+- 支持内嵌歌词与同目录歌词文件解析。
 
 ## 技术栈
 
 - Flutter / Dart
 - Material Design
+- `dartssh2`：SSH/SFTP 目录浏览、文件传输与管理操作
 - `http`：访问 Unraid WebGUI 与文件接口
+- `just_audio` / `just_audio_background`：音乐播放与后台播放通知
+- `video_player`：本机与远程缓存视频预览
+- `webview_flutter`：PDF.js 阅读器承载
+- `path_provider`：媒体与 PDF 临时缓存目录
 - `permission_handler`：Android 媒体权限检测
 - Android MethodChannel：登录偏好、相册偏好、本地媒体读取
 - Flutter Widget Test：登录页基础行为测试
@@ -62,6 +72,11 @@ lib/
     register_page.dart              注册页 UI
   services/
     unraid_client.dart              Unraid WebGUI 访问层、HTML/接口解析和数据模型
+    unraid_client_ssh.dart          SSH 命令构建、目录解析和文件传输辅助
+    media_cache.dart                图片、视频、PDF 等媒体临时缓存与渐进式下载
+    music_player_service.dart       音乐播放队列、后台播放和当前曲目状态
+    lyrics_service.dart             LRC/文本歌词发现与解析
+    embedded_lyrics.dart            音频文件内嵌歌词解析
     login_preferences.dart          登录偏好跨平台封装
     album_preferences.dart          相册备份偏好跨平台封装
     local_media_store.dart          Android 本地媒体 MethodChannel 封装
@@ -157,7 +172,7 @@ flutter analyze
 flutter test
 ```
 
-版本号来自 `pubspec.yaml` 的 `version: 1.0.0+1`，也可以在发布命令里显式指定：
+版本号来自 `pubspec.yaml` 的 `version: 0.0.1+1`，也可以在发布命令里显式指定：
 
 ```bash
 flutter build <platform> --release --build-name 1.0.0 --build-number 1
@@ -175,10 +190,10 @@ flutter build apk --release --split-per-abi --build-name 1.0.0 --build-number 1
 
 | Android 架构 | 适用设备 | 产物 |
 |--------------|----------|------|
-| `armeabi-v7a` | 32 位 ARM Android 设备 | `build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk` |
-| `arm64-v8a` | 主流 64 位 ARM Android 手机、平板 | `build/app/outputs/flutter-apk/app-arm64-v8a-release.apk` |
-| `x86_64` | Android 模拟器、部分 ChromeOS / x86_64 设备 | `build/app/outputs/flutter-apk/app-x86_64-release.apk` |
-| universal | 包含所有 Android ABI 的通用包 | `build/app/outputs/flutter-apk/app-release.apk` |
+| `armeabi-v7a` | 32 位 ARM Android 设备 | `build/app/outputs/flutter-apk/unraider-armeabi-v7a-release.apk` |
+| `arm64-v8a` | 主流 64 位 ARM Android 手机、平板 | `build/app/outputs/flutter-apk/unraider-arm64-v8a-release.apk` |
+| `x86_64` | Android 模拟器、部分 ChromeOS / x86_64 设备 | `build/app/outputs/flutter-apk/unraider-x86_64-release.apk` |
+| universal | 包含所有 Android ABI 的通用包 | `build/app/outputs/flutter-apk/unraider-release.apk` |
 
 如果只需要某一个架构，可以使用 `--target-platform`：
 
@@ -320,6 +335,11 @@ dart format lib test
 
 - 登录页基础渲染。
 - 已保存登录信息恢复。
+- 登录表单校验和“记住我”偏好保存/清除。
+- SSH 目录列表、媒体扫描、路径引用和危险路径识别。
+- Dashboard、Docker、虚拟机等 WebGUI 解析。
+- 音乐歌词候选路径、LRC/纯文本歌词和内嵌歌词解析。
+- AppLogger 基础格式化与刷新行为。
 
 ## API 与权限说明
 
@@ -339,8 +359,8 @@ dart format lib test
 ## 路线图
 
 - 将 Android 本机媒体备份从 UI/能力层推进到真实上传任务。
-- 将音乐页面接入真实媒体库。
 - 补充 Web/桌面端偏好持久化能力。
+- 补充共享目录媒体预览的 widget/集成测试。
 - 完善桌面端和 Android 端自动化发布流水线与签名配置。
 
 ## License

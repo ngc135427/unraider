@@ -65,6 +65,37 @@ android {
     }
 }
 
+android.applicationVariants.all {
+    val variantName = name
+    outputs.all {
+        val output = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+        val abi = output.filters.firstOrNull()?.identifier
+        val abiSuffix = abi?.let { "-$it" } ?: ""
+        output.outputFileName = "unraider$abiSuffix-$variantName.apk"
+    }
+}
+
+val renameFlutterApks = tasks.register("renameFlutterApks") {
+    doLast {
+        val flutterApkDirectory = layout.buildDirectory
+            .dir("outputs/flutter-apk")
+            .get()
+            .asFile
+        flutterApkDirectory.listFiles { file ->
+            file.isFile && file.name.startsWith("app") && file.name.endsWith(".apk")
+        }?.forEach { source ->
+            val targetName = source.name.replaceFirst(Regex("^app"), "unraider")
+            source.copyTo(flutterApkDirectory.resolve(targetName), overwrite = true)
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith("assemble")) {
+        finalizedBy(renameFlutterApks)
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
