@@ -6,7 +6,9 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
+import 'app_logger.dart';
 import 'lyrics_service.dart';
+import 'media_cache.dart';
 import 'streaming_audio_source.dart';
 import 'unraid_client.dart';
 
@@ -363,21 +365,46 @@ class MusicPlayerService extends ChangeNotifier {
       await ensureSession();
       final title = displayTitle(track.name);
       final album = albumLabel(track.path, _rootPath);
+      final mediaItem = MediaItem(
+        id: track.path,
+        title: title,
+        album: album,
+        artist: album,
+        extras: <String, dynamic>{
+          'path': track.path,
+          'size': track.size,
+        },
+      );
       final source = UnraidStreamingAudioSource(
         client: client,
         entry: track,
-        tag: MediaItem(
-          id: track.path,
-          title: title,
-          album: album,
-          artist: album,
-          extras: <String, dynamic>{
-            'path': track.path,
-            'size': track.size,
-          },
-        ),
+        tag: mediaItem,
       );
-      await player.setAudioSource(source, preload: true);
+      try {
+        await player.setAudioSource(source, preload: true);
+      } on PlayerException catch (error, stackTrace) {
+        // The Android proxy can report a generic source error when a remote
+        // range transport fails. Fall back to a complete local cache so the
+        // decoder can read a normal file without the proxy in the loop.
+        await AppLogger.log(
+          'music_stream_source_failed_fallback_to_cache path=${track.path}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        final localFile = await MediaCache.ensureLocalFile(
+          client: client,
+          remotePath: track.path,
+          expectedSizeBytes: track.sizeBytes > 0 ? track.sizeBytes : null,
+          fileName: track.name,
+        );
+        if (generation != _loadGeneration) {
+          return;
+        }
+        await player.setAudioSource(
+          AudioSource.file(localFile.path, tag: mediaItem),
+          preload: true,
+        );
+      }
       if (generation != _loadGeneration) {
         return;
       }

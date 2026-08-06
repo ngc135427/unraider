@@ -130,6 +130,10 @@ class UnraidWebGuiClient {
   /// In-flight byte-range reads for progressive media streaming.
   final Map<String, Future<Uint8List>> _fileRangeInflight =
       <String, Future<Uint8List>>{};
+
+  /// Shares whose Android SMB transport failed during this session. Further
+  /// reads use SFTP directly instead of repeating the same failing handshake.
+  final Set<String> _androidSmbUnavailableShares = <String>{};
   String? _csrfToken;
   Future<void>? _csrfTokenFuture;
   SSHClient? _sshClient;
@@ -612,12 +616,24 @@ class UnraidWebGuiClient {
   Future<Uint8List> _loadFileBytes(String normalized) async {
     final stopwatch = Stopwatch()..start();
     final smbPath = smbSharePathFromUnraidPath(normalized);
-    if (defaultTargetPlatform == TargetPlatform.android && smbPath != null) {
-      return _fetchFileBytesViaAndroidSmb(
-        normalizedPath: normalized,
-        smbPath: smbPath,
-        stopwatch: stopwatch,
-      );
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        smbPath != null &&
+        !_androidSmbUnavailableShares.contains(smbPath.share)) {
+      try {
+        return await _fetchFileBytesViaAndroidSmb(
+          normalizedPath: normalized,
+          smbPath: smbPath,
+          stopwatch: stopwatch,
+        );
+      } on Object catch (error, stackTrace) {
+        _androidSmbUnavailableShares.add(smbPath.share);
+        await AppLogger.log(
+          'fetch_file_bytes_smb_fallback_to_sftp share=${smbPath.share} '
+          'path=$normalized',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
     }
 
     try {
@@ -674,14 +690,26 @@ class UnraidWebGuiClient {
   }) async {
     final stopwatch = Stopwatch()..start();
     final smbPath = smbSharePathFromUnraidPath(normalized);
-    if (defaultTargetPlatform == TargetPlatform.android && smbPath != null) {
-      return _fetchFileRangeViaAndroidSmb(
-        normalizedPath: normalized,
-        smbPath: smbPath,
-        offset: offset,
-        length: length,
-        stopwatch: stopwatch,
-      );
+    if (defaultTargetPlatform == TargetPlatform.android &&
+        smbPath != null &&
+        !_androidSmbUnavailableShares.contains(smbPath.share)) {
+      try {
+        return await _fetchFileRangeViaAndroidSmb(
+          normalizedPath: normalized,
+          smbPath: smbPath,
+          offset: offset,
+          length: length,
+          stopwatch: stopwatch,
+        );
+      } on Object catch (error, stackTrace) {
+        _androidSmbUnavailableShares.add(smbPath.share);
+        await AppLogger.log(
+          'fetch_file_range_smb_fallback_to_sftp share=${smbPath.share} '
+          'path=$normalized offset=$offset',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
     }
 
     try {
@@ -1298,6 +1326,7 @@ class UnraidWebGuiClient {
     _fileBytesCache.clear();
     _fileBytesInflight.clear();
     _fileRangeInflight.clear();
+    _androidSmbUnavailableShares.clear();
     _cookies.clear();
     _cookieHeaderCache = null;
     _dashboardSegmentCache = null;
@@ -2019,4 +2048,3 @@ query UnraiderSshConfig {
     }
   }
 }
-

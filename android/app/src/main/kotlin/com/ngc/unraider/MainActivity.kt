@@ -555,23 +555,11 @@ class MainActivity : AudioServiceActivity() {
             .withSoTimeout(30, TimeUnit.SECONDS)
             .build()
 
-        val authContexts = mutableListOf<AuthenticationContext>()
-        if (username.isNotBlank()) {
-            authContexts.add(AuthenticationContext(username, password.toCharArray(), null))
+        if (username.isBlank()) {
+            throw IllegalArgumentException("SMB 用户名为空")
         }
-        authContexts.add(AuthenticationContext.guest())
-        authContexts.add(AuthenticationContext.anonymous())
-
-        var lastError: Exception? = null
-        for (auth in authContexts) {
-            try {
-                return readSmbFileBytesWithAuth(config, host, auth, shareName, smbPath)
-            } catch (error: Exception) {
-                lastError = error
-            }
-        }
-
-        throw lastError ?: IllegalStateException("SMB 读取失败")
+        val auth = AuthenticationContext(username, password.toCharArray(), null)
+        return readSmbFileBytesWithAuth(config, host, auth, shareName, smbPath)
     }
 
     private fun readSmbFileBytesWithAuth(
@@ -626,31 +614,19 @@ class MainActivity : AudioServiceActivity() {
             .withSoTimeout(30, TimeUnit.SECONDS)
             .build()
 
-        val authContexts = mutableListOf<AuthenticationContext>()
-        if (username.isNotBlank()) {
-            authContexts.add(AuthenticationContext(username, password.toCharArray(), null))
+        if (username.isBlank()) {
+            throw IllegalArgumentException("SMB 用户名为空")
         }
-        authContexts.add(AuthenticationContext.guest())
-        authContexts.add(AuthenticationContext.anonymous())
-
-        var lastError: Exception? = null
-        for (auth in authContexts) {
-            try {
-                return readSmbFileRangeWithAuth(
-                    config = config,
-                    host = host,
-                    auth = auth,
-                    shareName = shareName,
-                    smbPath = smbPath,
-                    offset = offset,
-                    length = length,
-                )
-            } catch (error: Exception) {
-                lastError = error
-            }
-        }
-
-        throw lastError ?: IllegalStateException("SMB range 读取失败")
+        val auth = AuthenticationContext(username, password.toCharArray(), null)
+        return readSmbFileRangeWithAuth(
+            config = config,
+            host = host,
+            auth = auth,
+            shareName = shareName,
+            smbPath = smbPath,
+            offset = offset,
+            length = length,
+        )
     }
 
     private fun readSmbFileRangeWithAuth(
