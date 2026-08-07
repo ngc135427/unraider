@@ -147,7 +147,11 @@ class _AlbumTabs extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final items = <(_PhoAlbumTab, IconData, String)>[
-      (_PhoAlbumTab.local, videosOnly ? Icons.video_library : Icons.photo_library, '本机'),
+      (
+        _PhoAlbumTab.local,
+        videosOnly ? Icons.video_library : Icons.photo_library,
+        '本机'
+      ),
       (_PhoAlbumTab.remote, Icons.cloud_outlined, '云端'),
       (_PhoAlbumTab.sync, Icons.sync, '同步'),
       (_PhoAlbumTab.settings, Icons.tune, '设置'),
@@ -249,6 +253,7 @@ class _LocalTimeline extends StatefulWidget {
 
   final bool loading;
   final List<LocalMediaAsset> media;
+
   /// Full visible gallery used for swipe navigation (may exceed section caps).
   final List<LocalMediaAsset> gallery;
   final bool videosOnly;
@@ -359,6 +364,7 @@ class _RemoteTimeline extends StatefulWidget {
   final String? error;
   final UnraidClient? client;
   final List<UnraidFileEntry> entries;
+
   /// Full remote gallery used for swipe navigation.
   final List<UnraidFileEntry> gallery;
   final VoidCallback? onRetry;
@@ -497,9 +503,8 @@ class _SyncPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final total = uploadedCount + pendingCount;
-    final progress = total == 0
-        ? null
-        : (uploadedCount / total).clamp(0.0, 1.0);
+    final progress =
+        total == 0 ? null : (uploadedCount / total).clamp(0.0, 1.0);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -601,7 +606,8 @@ class _SettingsPanelState extends State<_SettingsPanel> {
 
   Future<void> _save({bool? autoBackup}) async {
     final target = _normalizeLocalPath(_targetController.text);
-    if (target.isEmpty || (!target.startsWith('/mnt/') && !target.startsWith('/boot'))) {
+    if (target.isEmpty ||
+        (!target.startsWith('/mnt/') && !target.startsWith('/boot'))) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('目标目录必须位于 /mnt 或 /boot 下')),
       );
@@ -1973,8 +1979,10 @@ class _RemoteVideoPreviewPage extends StatefulWidget {
 class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
   VideoPlayerController? _controller;
   Future<void>? _initFuture;
+  StreamSubscription<double>? _progressSubscription;
   String? _error;
   bool _started = false;
+  bool _usingFallback = false;
   double _progress = 0;
 
   @override
@@ -1988,8 +1996,12 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
   @override
   void didUpdateWidget(covariant _RemoteVideoPreviewPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.active && !_started) {
-      unawaited(_ensurePlayer());
+    if (widget.active) {
+      if (!_started) {
+        unawaited(_ensurePlayer());
+      } else if (_controller != null) {
+        unawaited(_controller!.play());
+      }
     } else if (!widget.active && _controller != null) {
       unawaited(_controller!.pause());
     }
@@ -2001,6 +2013,28 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
     }
     _started = true;
     final future = () async {
+      final directController = await RemoteVideoStream.tryOpen(
+        client: widget.client,
+        entry: widget.entry,
+      );
+      if (directController != null) {
+        await directController.setLooping(true);
+        if (widget.active) {
+          await directController.play();
+        }
+        if (!mounted) {
+          await directController.dispose();
+          return;
+        }
+        setState(() {
+          _controller = directController;
+          _error = null;
+        });
+        return;
+      }
+      if (mounted) {
+        setState(() => _usingFallback = true);
+      }
       // Progressive range download with no size ceiling: start after ~1 MB and
       // keep filling so later seeks work as more bytes land on disk.
       final handle = await MediaCache.ensureProgressive(
@@ -2009,7 +2043,7 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
         expectedSizeBytes: widget.entry.sizeBytes,
         fileName: widget.entry.name,
       );
-      handle.progress.listen((value) {
+      _progressSubscription = handle.progress.listen((value) {
         if (!mounted) {
           return;
         }
@@ -2020,7 +2054,9 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
       final controller = VideoPlayerController.file(handle.file);
       await controller.initialize();
       await controller.setLooping(true);
-      await controller.play();
+      if (widget.active) {
+        await controller.play();
+      }
       if (!mounted) {
         await controller.dispose();
         return;
@@ -2048,6 +2084,7 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
 
   @override
   void dispose() {
+    unawaited(_progressSubscription?.cancel() ?? Future<void>.value());
     final controller = _controller;
     _controller = null;
     unawaited(controller?.dispose() ?? Future<void>.value());
@@ -2069,7 +2106,9 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
             const SizedBox(height: 14),
             Text(
               widget.active
-                  ? '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                  ? _usingFallback
+                      ? 'WebDAV 不可用，正在流式缓冲… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                      : '正在连接 WebDAV 视频流…'
                   : '等待播放',
               style: const TextStyle(color: Colors.white70),
             ),

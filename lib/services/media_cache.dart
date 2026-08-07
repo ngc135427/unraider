@@ -15,7 +15,7 @@ import 'unraid_client.dart';
 class MediaCache {
   MediaCache._();
 
-  static const defaultChunkBytes = 512 * 1024;
+  static const defaultChunkBytes = 4 * 1024 * 1024;
   /// How many completed cache files to keep indexed in-process.
   static const _maxIndexEntries = 32;
 
@@ -102,9 +102,23 @@ class MediaCache {
       return 1024 * 1024;
     }
     if (size < 200 * 1024 * 1024) {
+      return 1024 * 1024;
+    }
+    return 2 * 1024 * 1024;
+  }
+
+  /// Larger background chunks amortize SMB/SFTP round trips for big videos.
+  /// [ProgressiveMediaFile] still limits the first request to [readyBytes], so
+  /// increasing this value does not delay initial playback.
+  static int adaptiveChunkBytes(int? expectedSizeBytes) {
+    final size = expectedSizeBytes ?? 0;
+    if (size > 0 && size < 32 * 1024 * 1024) {
       return 2 * 1024 * 1024;
     }
-    return 4 * 1024 * 1024;
+    if (size > 0 && size < 200 * 1024 * 1024) {
+      return 4 * 1024 * 1024;
+    }
+    return 8 * 1024 * 1024;
   }
 
   static Future<ProgressiveMediaHandle> ensureProgressive({
@@ -147,6 +161,7 @@ class MediaCache {
       targetFile: target,
       expectedSizeBytes: expectedSizeBytes ?? 0,
       readyBytes: resolvedReady,
+      chunkBytes: adaptiveChunkBytes(expectedSizeBytes),
     );
     _progressive[key] = progressive;
     unawaited(

@@ -16,6 +16,7 @@ import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.share.DiskShare
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -36,6 +37,12 @@ class MainActivity : AudioServiceActivity() {
         @Volatile private var uncaughtHandlerInstalled = false
     }
 
+    private val smbCacheLock = Any()
+    private var cachedSmbKey: String? = null
+    private var cachedSmbClient: SMBClient? = null
+    private var cachedSmbConnection: Connection? = null
+    private var cachedSmbShare: DiskShare? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         installUncaughtHandler()
@@ -55,6 +62,9 @@ class MainActivity : AudioServiceActivity() {
                             "username" to preferences.getString("username", "root"),
                             "password" to preferences.getString("password", ""),
                             "useHttps" to preferences.getBoolean("useHttps", false),
+                            "webDavUrl" to preferences.getString("webDavUrl", ""),
+                            "webDavPathPrefix" to preferences.getString("webDavPathPrefix", "/mnt/user"),
+                            "webDavToken" to preferences.getString("webDavToken", ""),
                         )
                     )
                 }
@@ -68,12 +78,18 @@ class MainActivity : AudioServiceActivity() {
                             .putString("username", call.argument<String>("username") ?: "root")
                             .putString("password", call.argument<String>("password") ?: "")
                             .putBoolean("useHttps", call.argument<Boolean>("useHttps") ?: false)
+                            .putString("webDavUrl", call.argument<String>("webDavUrl") ?: "")
+                            .putString("webDavPathPrefix", call.argument<String>("webDavPathPrefix") ?: "/mnt/user")
+                            .putString("webDavToken", call.argument<String>("webDavToken") ?: "")
                     } else {
                         editor
                             .remove("domain")
                             .remove("username")
                             .remove("password")
                             .remove("useHttps")
+                            .remove("webDavUrl")
+                            .remove("webDavPathPrefix")
+                            .remove("webDavToken")
                     }
 
                     editor.apply()
@@ -297,6 +313,11 @@ class MainActivity : AudioServiceActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        resetCachedSmbConnection()
+        super.onDestroy()
     }
 
     private fun installUncaughtHandler() {
@@ -626,6 +647,7 @@ class MainActivity : AudioServiceActivity() {
             smbPath = smbPath,
             offset = offset,
             length = length,
+            cacheKey = "$host\u0000$username\u0000${password.hashCode()}\u0000$shareName",
         )
     }
 
@@ -636,12 +658,20 @@ class MainActivity : AudioServiceActivity() {
         shareName: String,
         smbPath: String,
         offset: Long,
-        length: Int
+        length: Int,
+        cacheKey: String,
     ): ByteArray {
-        SMBClient(config).use { client ->
-            client.connect(host).use { connection ->
-                val session = connection.authenticate(auth)
-                (session.connectShare(shareName) as DiskShare).use { share ->
+        var lastError: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                synchronized(smbCacheLock) {
+                    val share = getCachedSmbShare(
+                        config = config,
+                        host = host,
+                        auth = auth,
+                        shareName = shareName,
+                        cacheKey = cacheKey,
+                    )
                     share.openFile(
                         smbPath,
                         EnumSet.of(AccessMask.GENERIC_READ),
@@ -651,15 +681,93 @@ class MainActivity : AudioServiceActivity() {
                         EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE)
                     ).use { remoteFile ->
                         val buffer = ByteArray(length)
-                        // SMBJ File.read returns the number of bytes copied into buffer.
-                        val read = remoteFile.read(buffer, offset, 0, length)
-                        if (read <= 0) {
+                        var totalRead = 0
+                        while (totalRead < length) {
+                            // Keep each protocol read below the common SMB max-read
+                            // size while reusing one authenticated connection.
+                            val requestLength = minOf(length - totalRead, 512 * 1024)
+                            val read = remoteFile.read(
+                                buffer,
+                                offset + totalRead,
+                                totalRead,
+                                requestLength,
+                            )
+                            if (read <= 0) break
+                            totalRead += read
+                        }
+                        if (totalRead <= 0) {
                             return ByteArray(0)
                         }
-                        return if (read == buffer.size) buffer else buffer.copyOf(read)
+                        return if (totalRead == buffer.size) buffer else buffer.copyOf(totalRead)
                     }
                 }
+            } catch (error: Exception) {
+                lastError = error
+                resetCachedSmbConnection()
+                if (attempt == 1) throw error
             }
         }
+        throw lastError ?: IllegalStateException("SMB range 读取失败")
+    }
+
+    private fun getCachedSmbShare(
+        config: SmbConfig,
+        host: String,
+        auth: AuthenticationContext,
+        shareName: String,
+        cacheKey: String,
+    ): DiskShare {
+        val existing = cachedSmbShare
+        if (cachedSmbKey == cacheKey && existing != null) {
+            return existing
+        }
+        resetCachedSmbConnectionLocked()
+
+        val client = SMBClient(config)
+        try {
+            val connection = client.connect(host)
+            val session = connection.authenticate(auth)
+            val share = session.connectShare(shareName) as DiskShare
+            cachedSmbKey = cacheKey
+            cachedSmbClient = client
+            cachedSmbConnection = connection
+            cachedSmbShare = share
+            return share
+        } catch (error: Exception) {
+            try {
+                client.close()
+            } catch (_: Exception) {
+                // Preserve the original connection error.
+            }
+            throw error
+        }
+    }
+
+    private fun resetCachedSmbConnection() {
+        synchronized(smbCacheLock) {
+            resetCachedSmbConnectionLocked()
+        }
+    }
+
+    private fun resetCachedSmbConnectionLocked() {
+        try {
+            cachedSmbShare?.close()
+        } catch (_: Exception) {
+            // Best-effort transport cleanup.
+        }
+        try {
+            cachedSmbConnection?.close()
+        } catch (_: Exception) {
+            // Best-effort transport cleanup.
+        }
+        try {
+            cachedSmbClient?.close()
+        } catch (_: Exception) {
+            // Best-effort transport cleanup.
+        }
+        cachedSmbShare = null
+        cachedSmbConnection = null
+        cachedSmbClient = null
+        cachedSmbKey = null
     }
 }

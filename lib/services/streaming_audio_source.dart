@@ -114,6 +114,8 @@ class ProgressiveMediaFile {
   bool _readyCompleted = false;
   final Completer<void> _ready = Completer<void>();
 
+  static const _maxChunkAttempts = 3;
+
   Future<void> get ready => _ready.future;
   Future<void>? get done => _downloadFuture;
   int get writtenBytes => _written;
@@ -158,15 +160,18 @@ class ProgressiveMediaFile {
       try {
         final total = expectedSizeBytes > 0 ? expectedSizeBytes : null;
         while (true) {
-          final remaining = total == null ? chunkBytes : total - offset;
+          final startupRemaining = readyBytes - offset;
+          final requestBytes = !_readyCompleted && startupRemaining > 0
+              ? (startupRemaining < chunkBytes ? startupRemaining : chunkBytes)
+              : chunkBytes;
+          final remaining = total == null ? requestBytes : total - offset;
           if (total != null && remaining <= 0) {
             break;
           }
           final length = total == null
-              ? chunkBytes
-              : (remaining < chunkBytes ? remaining : chunkBytes);
-          final chunk = await client.fetchFileRange(
-            remotePath,
+              ? requestBytes
+              : (remaining < requestBytes ? remaining : requestBytes);
+          final chunk = await _fetchChunkWithRetry(
             offset: offset,
             length: length,
           );
@@ -181,7 +186,7 @@ class ProgressiveMediaFile {
           }
           if (offset >= readyBytes ||
               (total != null && offset >= total) ||
-              (total == null && chunk.length < chunkBytes)) {
+              (total == null && chunk.length < length)) {
             _markReady();
           }
           if (total != null && offset >= total) {
@@ -190,7 +195,7 @@ class ProgressiveMediaFile {
           if (total != null && chunk.length < length) {
             break;
           }
-          if (total == null && chunk.length < chunkBytes) {
+          if (total == null && chunk.length < length) {
             break;
           }
         }
@@ -209,5 +214,30 @@ class ProgressiveMediaFile {
     } finally {
       await _progress.close();
     }
+  }
+
+  Future<List<int>> _fetchChunkWithRetry({
+    required int offset,
+    required int length,
+  }) async {
+    Object? lastError;
+    StackTrace? lastStackTrace;
+    for (var attempt = 1; attempt <= _maxChunkAttempts; attempt++) {
+      try {
+        return await client.fetchFileRange(
+          remotePath,
+          offset: offset,
+          length: length,
+        );
+      } on Object catch (error, stackTrace) {
+        lastError = error;
+        lastStackTrace = stackTrace;
+        if (attempt == _maxChunkAttempts) {
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+        await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
+      }
+    }
+    Error.throwWithStackTrace(lastError!, lastStackTrace!);
   }
 }

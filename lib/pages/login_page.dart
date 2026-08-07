@@ -25,6 +25,9 @@ class _LoginPageState extends State<LoginPage> {
   final _domainController = TextEditingController();
   final _usernameController = TextEditingController(text: 'root');
   final _passwordController = TextEditingController();
+  final _webDavUrlController = TextEditingController();
+  final _webDavPathPrefixController = TextEditingController(text: '/mnt/user');
+  final _webDavTokenController = TextEditingController();
   final _domainFocusNode = FocusNode();
   final _usernameFocusNode = FocusNode();
   final _passwordFocusNode = FocusNode();
@@ -32,14 +35,19 @@ class _LoginPageState extends State<LoginPage> {
   bool _rememberMe = false;
   bool _useHttps = false;
   bool _loginSucceeded = false;
+
   /// Header compact mode only — avoids rebuilding the whole login form on focus.
   final ValueNotifier<bool> _hasInputFocus = ValueNotifier<bool>(false);
+
   /// Submit busy + status/error strip are isolated from the rest of the form.
   final ValueNotifier<bool> _isSubmitting = ValueNotifier<bool>(false);
   final ValueNotifier<_LoginFeedback?> _feedback =
       ValueNotifier<_LoginFeedback?>(null);
+
   /// Password visibility is isolated so toggles do not rebuild the full form.
   final ValueNotifier<bool> _showPassword = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _showWebDavToken = ValueNotifier<bool>(false);
+  bool _webDavExpanded = false;
   bool _loadingPreferences = true;
   Timer? _navigateHomeTimer;
 
@@ -64,10 +72,14 @@ class _LoginPageState extends State<LoginPage> {
     _domainController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _webDavUrlController.dispose();
+    _webDavPathPrefixController.dispose();
+    _webDavTokenController.dispose();
     _hasInputFocus.dispose();
     _isSubmitting.dispose();
     _feedback.dispose();
     _showPassword.dispose();
+    _showWebDavToken.dispose();
     super.dispose();
   }
 
@@ -103,6 +115,9 @@ class _LoginPageState extends State<LoginPage> {
       baseUrl: _buildBaseUrl(),
       username: _usernameController.text,
       password: _passwordController.text,
+      webDavUrl: _webDavUrlController.text,
+      webDavPathPrefix: _webDavPathPrefixController.text,
+      webDavToken: _webDavTokenController.text,
     );
 
     _isSubmitting.value = true;
@@ -171,6 +186,11 @@ class _LoginPageState extends State<LoginPage> {
           _usernameController.text = rememberedLogin.username;
           _passwordController.text = rememberedLogin.password;
           _useHttps = rememberedLogin.useHttps;
+          _webDavUrlController.text = rememberedLogin.webDavUrl;
+          _webDavPathPrefixController.text = rememberedLogin.webDavPathPrefix;
+          _webDavTokenController.text = rememberedLogin.webDavToken;
+          _webDavExpanded = rememberedLogin.webDavUrl.isNotEmpty ||
+              rememberedLogin.webDavToken.isNotEmpty;
         }
         _loadingPreferences = false;
       });
@@ -195,6 +215,9 @@ class _LoginPageState extends State<LoginPage> {
           : _usernameController.text.trim(),
       password: _passwordController.text,
       useHttps: _useHttps,
+      webDavUrl: _webDavUrlController.text.trim(),
+      webDavPathPrefix: _webDavPathPrefixController.text.trim(),
+      webDavToken: _webDavTokenController.text.trim(),
     );
   }
 
@@ -260,8 +283,7 @@ class _LoginPageState extends State<LoginPage> {
                             setState(() => _useHttps = !_useHttps);
                             _clearErrorOnEdit();
                           },
-                          onSubmitted: (_) =>
-                              _usernameFocusNode.requestFocus(),
+                          onSubmitted: (_) => _usernameFocusNode.requestFocus(),
                         ),
                         const SizedBox(height: 21),
                         AppTextField(
@@ -307,11 +329,12 @@ class _LoginPageState extends State<LoginPage> {
                               onFieldSubmitted: (_) => unawaited(_submit()),
                               suffixIcon: IconButton(
                                 tooltip: showPassword ? '隐藏密码' : '显示密码',
-                                onPressed: _isSubmitting.value || _loginSucceeded
-                                    ? null
-                                    : () {
-                                        _showPassword.value = !showPassword;
-                                      },
+                                onPressed:
+                                    _isSubmitting.value || _loginSucceeded
+                                        ? null
+                                        : () {
+                                            _showPassword.value = !showPassword;
+                                          },
                                 icon: Icon(
                                   showPassword
                                       ? Icons.visibility_off
@@ -329,6 +352,146 @@ class _LoginPageState extends State<LoginPage> {
                           },
                         ),
                         const SizedBox(height: 18),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: _isSubmitting.value || _loginSucceeded
+                              ? null
+                              : () => setState(
+                                    () => _webDavExpanded = !_webDavExpanded,
+                                  ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.video_settings_outlined,
+                                  color: AppTheme.textMedium,
+                                  size: 20,
+                                ),
+                                const SizedBox(width: 9),
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'FileBrowser Quantum 视频加速',
+                                        style: TextStyle(
+                                          color: AppTheme.textMedium,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      SizedBox(height: 2),
+                                      Text(
+                                        '可选 · WebDAV 直连，失败自动回退',
+                                        style: TextStyle(
+                                          color: AppTheme.textLight,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Icon(
+                                  _webDavExpanded
+                                      ? Icons.expand_less
+                                      : Icons.expand_more,
+                                  color: AppTheme.textLight,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (_webDavExpanded) ...[
+                          const SizedBox(height: 14),
+                          AppTextField(
+                            label: 'WebDAV 根地址',
+                            controller: _webDavUrlController,
+                            hint: '如 https://files.example.com/dav/data/',
+                            keyboardType: TextInputType.url,
+                            textInputAction: TextInputAction.next,
+                            enabled: !_isSubmitting.value && !_loginSucceeded,
+                            onChanged: (_) => _clearErrorOnEdit(),
+                            validator: (value) {
+                              final url = (value ?? '').trim();
+                              final token = _webDavTokenController.text.trim();
+                              if (url.isEmpty && token.isEmpty) {
+                                return null;
+                              }
+                              final uri = Uri.tryParse(url);
+                              if (url.isEmpty ||
+                                  uri == null ||
+                                  (uri.scheme != 'http' &&
+                                      uri.scheme != 'https') ||
+                                  uri.host.isEmpty) {
+                                return '请输入完整的 http(s) WebDAV 根地址';
+                              }
+                              return null;
+                            },
+                            suffixIcon: const Icon(
+                              Icons.link,
+                              color: Color(0xFFA0A8B9),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          AppTextField(
+                            label: 'Unraid 路径前缀',
+                            controller: _webDavPathPrefixController,
+                            hint: '/mnt/user',
+                            textInputAction: TextInputAction.next,
+                            enabled: !_isSubmitting.value && !_loginSucceeded,
+                            onChanged: (_) => _clearErrorOnEdit(),
+                            validator: (value) {
+                              if (_webDavUrlController.text.trim().isNotEmpty &&
+                                  (value ?? '').trim().isEmpty) {
+                                return '请输入 FileBrowser 数据源对应的 Unraid 路径';
+                              }
+                              return null;
+                            },
+                            suffixIcon: const Icon(
+                              Icons.folder_outlined,
+                              color: Color(0xFFA0A8B9),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          ValueListenableBuilder<bool>(
+                            valueListenable: _showWebDavToken,
+                            builder: (context, showToken, _) => AppTextField(
+                              label: 'FileBrowser API Token',
+                              controller: _webDavTokenController,
+                              hint: '粘贴完整、未定制的 API Token',
+                              obscureText: !showToken,
+                              textInputAction: TextInputAction.done,
+                              enabled: !_isSubmitting.value && !_loginSucceeded,
+                              onChanged: (_) => _clearErrorOnEdit(),
+                              onFieldSubmitted: (_) => unawaited(_submit()),
+                              validator: (value) {
+                                if (_webDavUrlController.text
+                                        .trim()
+                                        .isNotEmpty &&
+                                    (value ?? '').trim().isEmpty) {
+                                  return '请输入 FileBrowser API Token';
+                                }
+                                return null;
+                              },
+                              suffixIcon: IconButton(
+                                tooltip: showToken ? '隐藏 Token' : '显示 Token',
+                                onPressed: _isSubmitting.value ||
+                                        _loginSucceeded
+                                    ? null
+                                    : () => _showWebDavToken.value = !showToken,
+                                icon: Icon(
+                                  showToken
+                                      ? Icons.visibility_off
+                                      : Icons.visibility,
+                                  color: const Color(0xFFA0A8B9),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         Row(
                           children: [
                             Checkbox(
@@ -375,14 +538,17 @@ class _LoginPageState extends State<LoginPage> {
                                     vertical: 10,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: AppTheme.danger.withValues(alpha: 0.08),
+                                    color:
+                                        AppTheme.danger.withValues(alpha: 0.08),
                                     borderRadius: BorderRadius.circular(8),
                                     border: Border.all(
-                                      color: AppTheme.danger.withValues(alpha: 0.28),
+                                      color: AppTheme.danger
+                                          .withValues(alpha: 0.28),
                                     ),
                                   ),
                                   child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       const Icon(
                                         Icons.error_outline,

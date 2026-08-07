@@ -107,7 +107,8 @@ void main() {
     ].join('\u0000');
 
     final sync = parseSshDirectoryListing(output, '/mnt/user/media');
-    final async = await parseSshDirectoryListingAsync(output, '/mnt/user/media');
+    final async =
+        await parseSshDirectoryListingAsync(output, '/mnt/user/media');
     expect(async.map((e) => e.name).toList(), sync.map((e) => e.name).toList());
     expect(async.map((e) => e.path).toList(), sync.map((e) => e.path).toList());
   });
@@ -183,7 +184,8 @@ Unraid OS 7.0.0
       '',
     ].join('\u0000');
     final bytes = Uint8List.fromList(utf8.encode(output));
-    final fromString = await parseSshDirectoryListingAsync(output, '/mnt/user/media');
+    final fromString =
+        await parseSshDirectoryListingAsync(output, '/mnt/user/media');
     final fromBytes =
         await parseSshDirectoryListingBytesAsync(bytes, '/mnt/user/media');
     expect(
@@ -265,6 +267,24 @@ Unraid OS 7.0.0
     expect(uri.scheme, 'http');
     expect(uri.host, 'tower.local');
     expect(uri.path, '/mnt/user/photos/a%20b.jpg');
+  });
+
+  test('maps Unraid paths to FileBrowser Quantum WebDAV', () {
+    final client = UnraidWebGuiClient(
+      baseUrl: 'http://tower.local',
+      username: 'root',
+      password: 'secret',
+      webDavUrl: 'https://files.example.com/proxy/dav/data/',
+      webDavPathPrefix: '/mnt/user/',
+      webDavToken: 'token',
+    );
+    addTearDown(client.close);
+
+    final uri = client.webDavFileUri('/mnt/user/movies/A B/clip.mp4');
+    expect(uri.toString(),
+        'https://files.example.com/proxy/dav/data/movies/A%20B/clip.mp4');
+    expect(client.webDavHeaders['Authorization'], 'Basic dW5yYWlkZXI6dG9rZW4=');
+    expect(client.webDavFileUri('/mnt/disk1/movies/clip.mp4'), isNull);
   });
 
   test('builds modified time command from source timestamp', () {

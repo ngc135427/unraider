@@ -63,15 +63,35 @@ class _DashboardSegmentCache {
 const _remoteFileChannel = MethodChannel('unraider/remote_file');
 const _localMediaChannel = MethodChannel('unraider/local_media');
 
+String _normalizeRemotePathPrefix(String value) {
+  var normalized = value.trim().replaceAll('\\', '/');
+  if (normalized.isEmpty) {
+    return '/mnt/user';
+  }
+  if (!normalized.startsWith('/')) {
+    normalized = '/$normalized';
+  }
+  while (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.substring(0, normalized.length - 1);
+  }
+  return normalized;
+}
+
 class UnraidWebGuiClient {
   UnraidWebGuiClient({
     required String baseUrl,
     required String username,
     required String password,
+    String webDavUrl = '',
+    String webDavPathPrefix = '/mnt/user',
+    String webDavToken = '',
     http.Client? httpClient,
   })  : baseUrl = _normalizeBaseUrl(baseUrl),
         username = username.trim().isEmpty ? 'root' : username.trim(),
         _password = password,
+        _webDavUrl = webDavUrl.trim(),
+        _webDavPathPrefix = _normalizeRemotePathPrefix(webDavPathPrefix),
+        _webDavToken = webDavToken.trim(),
         _httpClient = httpClient ?? http.Client();
 
   static const _directoryCacheTtl = Duration(seconds: 20);
@@ -105,16 +125,22 @@ class UnraidWebGuiClient {
   final String baseUrl;
   final String username;
   final String _password;
+  final String _webDavUrl;
+  final String _webDavPathPrefix;
+  final String _webDavToken;
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
+
   /// Cached Cookie header so every HTTP request does not re-join the map.
   String? _cookieHeaderCache;
   final Map<String, _DirectoryCacheEntry> _directoryCache =
       <String, _DirectoryCacheEntry>{};
+
   /// In-flight directory reads keyed by normalized path, so concurrent
   /// callers (share list + dashboard shares, double-taps) share one SSH call.
   final Map<String, Future<List<UnraidFileEntry>>> _directoryInflight =
       <String, Future<List<UnraidFileEntry>>>{};
+
   /// Monotonic generation so a slower soft fetch cannot overwrite a newer
   /// force-refresh result in the directory cache.
   final Map<String, int> _directoryLoadGeneration = <String, int>{};
@@ -127,6 +153,7 @@ class UnraidWebGuiClient {
       <String, _FileBytesCacheEntry>{};
   final Map<String, Future<Uint8List>> _fileBytesInflight =
       <String, Future<Uint8List>>{};
+
   /// In-flight byte-range reads for progressive media streaming.
   final Map<String, Future<Uint8List>> _fileRangeInflight =
       <String, Future<Uint8List>>{};
@@ -356,14 +383,11 @@ class UnraidWebGuiClient {
     final previousTimestamps = cache;
     _dashboardSegmentCache = _DashboardSegmentCache(
       dashboard: dashboard,
-      overviewFetchedAt: needOverview
-          ? now
-          : previousTimestamps!.overviewFetchedAt,
-      dockerFetchedAt:
-          needDocker ? now : previousTimestamps!.dockerFetchedAt,
+      overviewFetchedAt:
+          needOverview ? now : previousTimestamps!.overviewFetchedAt,
+      dockerFetchedAt: needDocker ? now : previousTimestamps!.dockerFetchedAt,
       vmFetchedAt: needVm ? now : previousTimestamps!.vmFetchedAt,
-      shareFetchedAt:
-          needShare ? now : previousTimestamps!.shareFetchedAt,
+      shareFetchedAt: needShare ? now : previousTimestamps!.shareFetchedAt,
     );
     return dashboard;
   }
@@ -614,9 +638,8 @@ class UnraidWebGuiClient {
       if (offset >= cached.length) {
         return Uint8List(0);
       }
-      final end = offset + length > cached.length
-          ? cached.length
-          : offset + length;
+      final end =
+          offset + length > cached.length ? cached.length : offset + length;
       return Uint8List.sublistView(cached, offset, end);
     }
 
@@ -789,6 +812,7 @@ class UnraidWebGuiClient {
       );
       return bytes;
     } on TimeoutException catch (error, stackTrace) {
+      _resetSftpTransport();
       await AppLogger.log(
         'fetch_file_range_timeout path=$normalized offset=$offset '
         'elapsedMs=${stopwatch.elapsedMilliseconds}',
@@ -1376,6 +1400,45 @@ class UnraidWebGuiClient {
     };
   }
 
+  bool get hasWebDavVideoStream =>
+      _webDavUrl.isNotEmpty && _webDavToken.isNotEmpty;
+
+  /// Maps an Unraid path to a FileBrowser Quantum WebDAV source root.
+  /// The configured prefix is the filesystem directory exposed by that source.
+  Uri? webDavFileUri(String path) {
+    if (!hasWebDavVideoStream) {
+      return null;
+    }
+    final normalizedPath = _normalizeRemotePathPrefix(path);
+    final prefix = _webDavPathPrefix;
+    final relative = normalizedPath == prefix
+        ? ''
+        : normalizedPath.startsWith('$prefix/')
+            ? normalizedPath.substring(prefix.length + 1)
+            : null;
+    if (relative == null || relative.isEmpty) {
+      return null;
+    }
+    final base = Uri.tryParse(_webDavUrl);
+    if (base == null || !base.hasScheme || base.host.isEmpty) {
+      return null;
+    }
+    return base.replace(
+      pathSegments: <String>[
+        ...base.pathSegments.where((part) => part.isNotEmpty),
+        ...relative.split('/').where((part) => part.isNotEmpty),
+      ],
+      query: null,
+      fragment: null,
+    );
+  }
+
+  Map<String, String> get webDavHeaders => <String, String>{
+        'Accept': '*/*',
+        'Authorization':
+            'Basic ${base64Encode(utf8.encode('unraider:$_webDavToken'))}',
+      };
+
   /// Maps an Unraid filesystem path onto the WebGUI base URL path segments.
   Uri _fileUri(String path) {
     final normalized = path.startsWith('/') ? path : '/$path';
@@ -1511,6 +1574,18 @@ class UnraidWebGuiClient {
     }
   }
 
+  void _resetSftpTransport() {
+    _sftpClient?.close();
+    _sftpClient = null;
+    _sftpConnectFuture = null;
+    _sshClient?.close();
+    _sshClient = null;
+    _sshConnectFuture = null;
+    // Do not leave later retries queued behind a transfer that timed out but
+    // whose underlying future has not observed the closed connection yet.
+    _sftpTransferQueue = Future<void>.value();
+  }
+
   Future<int> _resolveSshPort() {
     return _sshPortFuture ??= _loadSshPort();
   }
@@ -1589,8 +1664,7 @@ query UnraiderSshConfig {
       '/Settings',
     ]) {
       try {
-        final response =
-            await _send('GET', path).timeout(probeTimeout);
+        final response = await _send('GET', path).timeout(probeTimeout);
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
         }
@@ -1930,7 +2004,8 @@ query UnraiderSshConfig {
 
     try {
       final streamed = await _httpClient.send(request).timeout(timeout);
-      final response = await http.Response.fromStream(streamed).timeout(timeout);
+      final response =
+          await http.Response.fromStream(streamed).timeout(timeout);
       _storeCookies(response);
 
       if (_isRedirect(response.statusCode)) {

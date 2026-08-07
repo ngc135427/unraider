@@ -7,6 +7,9 @@ class RememberedLogin {
     this.username = 'root',
     this.password = '',
     this.useHttps = false,
+    this.webDavUrl = '',
+    this.webDavPathPrefix = '/mnt/user',
+    this.webDavToken = '',
   });
 
   final bool rememberMe;
@@ -14,6 +17,9 @@ class RememberedLogin {
   final String username;
   final String password;
   final bool useHttps;
+  final String webDavUrl;
+  final String webDavPathPrefix;
+  final String webDavToken;
 }
 
 class LoginPreferences {
@@ -35,6 +41,11 @@ class LoginPreferences {
             : _asString(result['username']),
         password: _asString(result['password']),
         useHttps: result['useHttps'] == true,
+        webDavUrl: _asString(result['webDavUrl']),
+        webDavPathPrefix: _asString(result['webDavPathPrefix']).isEmpty
+            ? '/mnt/user'
+            : _asString(result['webDavPathPrefix']),
+        webDavToken: _asString(result['webDavToken']),
       );
     } on MissingPluginException {
       return const RememberedLogin();
@@ -47,6 +58,9 @@ class LoginPreferences {
     required String username,
     required String password,
     required bool useHttps,
+    String webDavUrl = '',
+    String webDavPathPrefix = '/mnt/user',
+    String webDavToken = '',
   }) async {
     try {
       // Never persist credentials when "remember me" is off.
@@ -56,6 +70,9 @@ class LoginPreferences {
         'username': rememberMe ? username : 'root',
         'password': rememberMe ? password : '',
         'useHttps': rememberMe ? useHttps : false,
+        'webDavUrl': rememberMe ? webDavUrl : '',
+        'webDavPathPrefix': rememberMe ? webDavPathPrefix : '/mnt/user',
+        'webDavToken': rememberMe ? webDavToken : '',
       });
     } on MissingPluginException {
       return;
@@ -70,6 +87,9 @@ class LoginPreferences {
       username: 'root',
       password: '',
       useHttps: false,
+      webDavUrl: '',
+      webDavPathPrefix: '/mnt/user',
+      webDavToken: '',
     );
   }
 

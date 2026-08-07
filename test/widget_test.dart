@@ -107,6 +107,9 @@ void main() {
       username: 'root',
       password: 'secret',
       useHttps: true,
+      webDavUrl: 'https://files.example.com/dav/data/',
+      webDavPathPrefix: '/mnt/user',
+      webDavToken: 'api-token',
     );
 
     expect(savedPayload, isNotNull);
@@ -115,6 +118,9 @@ void main() {
     expect(savedPayload?['username'], 'root');
     expect(savedPayload?['password'], 'secret');
     expect(savedPayload?['useHttps'], isTrue);
+    expect(savedPayload?['webDavUrl'], 'https://files.example.com/dav/data/');
+    expect(savedPayload?['webDavPathPrefix'], '/mnt/user');
+    expect(savedPayload?['webDavToken'], 'api-token');
   });
 
   test('clears stored credentials when remember me is off', () async {
@@ -140,5 +146,7 @@ void main() {
     expect(savedPayload?['domain'], '');
     expect(savedPayload?['password'], '');
     expect(savedPayload?['useHttps'], isFalse);
+    expect(savedPayload?['webDavUrl'], '');
+    expect(savedPayload?['webDavToken'], '');
   });
 }

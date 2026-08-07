@@ -780,6 +780,7 @@ class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
   StreamSubscription<double>? _progressSubscription;
   String? _error;
   bool _started = false;
+  bool _usingFallback = false;
   double _progress = 0;
 
   @override
@@ -793,8 +794,12 @@ class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
   @override
   void didUpdateWidget(covariant _ShareVideoPreviewPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.active && !_started) {
-      unawaited(_start());
+    if (widget.active) {
+      if (!_started) {
+        unawaited(_start());
+      } else if (_controller != null) {
+        unawaited(_controller!.play());
+      }
     } else if (!widget.active && _controller != null) {
       unawaited(_controller!.pause());
     }
@@ -823,6 +828,28 @@ class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
   }
 
   Future<void> _loadAndPlay() async {
+    final directController = await RemoteVideoStream.tryOpen(
+      client: widget.client,
+      entry: widget.entry,
+    );
+    if (directController != null) {
+      await directController.setLooping(true);
+      if (widget.active) {
+        await directController.play();
+      }
+      if (!mounted) {
+        await directController.dispose();
+        return;
+      }
+      setState(() {
+        _controller = directController;
+        _error = null;
+      });
+      return;
+    }
+    if (mounted) {
+      setState(() => _usingFallback = true);
+    }
     final handle = await MediaCache.ensureProgressive(
       client: widget.client,
       remotePath: widget.entry.path,
@@ -877,7 +904,9 @@ class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
             const SizedBox(height: 14),
             Text(
               widget.active
-                  ? '正在流式缓冲视频… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                  ? _usingFallback
+                      ? 'WebDAV 不可用，正在流式缓冲… ${(_progress * 100).clamp(0, 100).toStringAsFixed(0)}%'
+                      : '正在连接 WebDAV 视频流…'
                   : '等待播放',
               style: const TextStyle(color: Colors.white70),
             ),
