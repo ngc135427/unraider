@@ -62,9 +62,6 @@ class MainActivity : AudioServiceActivity() {
                             "username" to preferences.getString("username", "root"),
                             "password" to preferences.getString("password", ""),
                             "useHttps" to preferences.getBoolean("useHttps", false),
-                            "webDavUrl" to preferences.getString("webDavUrl", ""),
-                            "webDavPathPrefix" to preferences.getString("webDavPathPrefix", "/mnt/user"),
-                            "webDavToken" to preferences.getString("webDavToken", ""),
                         )
                     )
                 }
@@ -78,18 +75,12 @@ class MainActivity : AudioServiceActivity() {
                             .putString("username", call.argument<String>("username") ?: "root")
                             .putString("password", call.argument<String>("password") ?: "")
                             .putBoolean("useHttps", call.argument<Boolean>("useHttps") ?: false)
-                            .putString("webDavUrl", call.argument<String>("webDavUrl") ?: "")
-                            .putString("webDavPathPrefix", call.argument<String>("webDavPathPrefix") ?: "/mnt/user")
-                            .putString("webDavToken", call.argument<String>("webDavToken") ?: "")
                     } else {
                         editor
                             .remove("domain")
                             .remove("username")
                             .remove("password")
                             .remove("useHttps")
-                            .remove("webDavUrl")
-                            .remove("webDavPathPrefix")
-                            .remove("webDavToken")
                     }
 
                     editor.apply()
@@ -127,6 +118,63 @@ class MainActivity : AudioServiceActivity() {
                             call.argument<List<String>>("sourceIds")?.toSet() ?: emptySet()
                         )
                         .putString("sourceName", call.argument<String>("sourceName") ?: "本机所有照片")
+                        .apply()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "unraider/video_stream_preferences"
+        ).setMethodCallHandler { call, result ->
+            val preferences = getSharedPreferences("video_stream_preferences", Context.MODE_PRIVATE)
+            val legacy = getSharedPreferences("login_preferences", Context.MODE_PRIVATE)
+
+            when (call.method) {
+                "load" -> {
+                    val hasCurrentConfig = preferences.contains("webDavUrl") ||
+                        preferences.contains("apiToken")
+                    val webDavUrl = if (hasCurrentConfig) {
+                        preferences.getString("webDavUrl", "") ?: ""
+                    } else {
+                        legacy.getString("webDavUrl", "") ?: ""
+                    }
+                    val apiToken = if (hasCurrentConfig) {
+                        preferences.getString("apiToken", "") ?: ""
+                    } else {
+                        legacy.getString("webDavToken", "") ?: ""
+                    }
+                    val pathPrefix = if (hasCurrentConfig) {
+                        preferences.getString("unraidPathPrefix", "/mnt/user") ?: "/mnt/user"
+                    } else {
+                        legacy.getString("webDavPathPrefix", "/mnt/user") ?: "/mnt/user"
+                    }
+                    result.success(
+                        mapOf(
+                            "enabled" to if (hasCurrentConfig) {
+                                preferences.getBoolean("enabled", false)
+                            } else {
+                                webDavUrl.isNotBlank() && apiToken.isNotBlank()
+                            },
+                            "webDavUrl" to webDavUrl,
+                            "unraidPathPrefix" to pathPrefix,
+                            "apiToken" to apiToken,
+                        )
+                    )
+                }
+                "save" -> {
+                    preferences.edit()
+                        .putBoolean("enabled", call.argument<Boolean>("enabled") ?: false)
+                        .putString("webDavUrl", call.argument<String>("webDavUrl") ?: "")
+                        .putString("unraidPathPrefix", call.argument<String>("unraidPathPrefix") ?: "/mnt/user")
+                        .putString("apiToken", call.argument<String>("apiToken") ?: "")
+                        .apply()
+                    legacy.edit()
+                        .remove("webDavUrl")
+                        .remove("webDavPathPrefix")
+                        .remove("webDavToken")
                         .apply()
                     result.success(null)
                 }

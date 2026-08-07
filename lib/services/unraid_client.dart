@@ -125,9 +125,9 @@ class UnraidWebGuiClient {
   final String baseUrl;
   final String username;
   final String _password;
-  final String _webDavUrl;
-  final String _webDavPathPrefix;
-  final String _webDavToken;
+  String _webDavUrl;
+  String _webDavPathPrefix;
+  String _webDavToken;
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
 
@@ -1402,6 +1402,18 @@ class UnraidWebGuiClient {
 
   bool get hasWebDavVideoStream =>
       _webDavUrl.isNotEmpty && _webDavToken.isNotEmpty;
+
+  /// Applies video-stream settings immediately without reconnecting WebGUI.
+  void configureWebDav({
+    required bool enabled,
+    required String webDavUrl,
+    required String unraidPathPrefix,
+    required String apiToken,
+  }) {
+    _webDavUrl = enabled ? webDavUrl.trim() : '';
+    _webDavPathPrefix = _normalizeRemotePathPrefix(unraidPathPrefix);
+    _webDavToken = enabled ? apiToken.trim() : '';
+  }
 
   /// Maps an Unraid path to a FileBrowser Quantum WebDAV source root.
   /// The configured prefix is the filesystem directory exposed by that source.

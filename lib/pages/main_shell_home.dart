@@ -823,6 +823,26 @@ class _HomeAppShortcuts extends StatelessWidget {
             );
           },
         ),
+        const SizedBox(width: 20),
+        _HomeAppShortcut(
+          label: '配置',
+          icon: Icons.video_settings_outlined,
+          colors: const [Color(0xFF8E44AD), Color(0xFF3498DB)],
+          onTap: () {
+            final client = unraidClient;
+            if (client == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('请先连接服务器')),
+              );
+              return;
+            }
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => VideoStreamSettingsPage(client: client),
+              ),
+            );
+          },
+        ),
       ],
     );
   }
@@ -891,4 +911,3 @@ class _HomeAppShortcut extends StatelessWidget {
     );
   }
 }
-

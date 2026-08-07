@@ -287,6 +287,36 @@ Unraid OS 7.0.0
     expect(client.webDavFileUri('/mnt/disk1/movies/clip.mp4'), isNull);
   });
 
+  test('applies WebDAV configuration without reconnecting', () {
+    final client = UnraidWebGuiClient(
+      baseUrl: 'http://tower.local',
+      username: 'root',
+      password: 'secret',
+    );
+    addTearDown(client.close);
+
+    expect(client.hasWebDavVideoStream, isFalse);
+    client.configureWebDav(
+      enabled: true,
+      webDavUrl: 'https://files.example.com/dav/data/',
+      unraidPathPrefix: '/mnt/user',
+      apiToken: 'token',
+    );
+    expect(client.hasWebDavVideoStream, isTrue);
+    expect(
+      client.webDavFileUri('/mnt/user/movies/clip.mp4').toString(),
+      'https://files.example.com/dav/data/movies/clip.mp4',
+    );
+
+    client.configureWebDav(
+      enabled: false,
+      webDavUrl: 'https://files.example.com/dav/data/',
+      unraidPathPrefix: '/mnt/user',
+      apiToken: 'token',
+    );
+    expect(client.hasWebDavVideoStream, isFalse);
+  });
+
   test('builds modified time command from source timestamp', () {
     final command = buildSetModifiedTimeCommand(
       "/mnt/user/media/it's here.jpg",

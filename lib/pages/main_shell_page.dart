@@ -15,6 +15,7 @@ import '../services/media_cache.dart';
 import '../services/music_player_service.dart';
 import '../services/remote_video_stream.dart';
 import '../services/unraid_client.dart';
+import '../services/video_stream_preferences.dart';
 import '../theme/app_theme.dart';
 import '../widgets/bottom_nav.dart';
 import '../widgets/fade_slide.dart';
@@ -26,6 +27,7 @@ import '../widgets/video_wake_lock.dart';
 import 'album_page.dart';
 import 'detail_page.dart';
 import 'music_page.dart';
+import 'video_stream_settings_page.dart';
 
 part 'main_shell_home.dart';
 part 'management_page.dart';
@@ -34,6 +36,7 @@ part 'management_detail_widgets.dart';
 
 const _maxImagePreviewDecodeExtent = 2400;
 const _maxTextPreviewBytes = 1024 * 1024;
+
 /// Soft guidance only — PDF still streams to disk; very large docs may be slow.
 const _maxPdfPreviewHintBytes = 80 * 1024 * 1024;
 
@@ -60,15 +63,18 @@ class MainShellPage extends StatefulWidget {
 class _MainShellPageState extends State<MainShellPage>
     with WidgetsBindingObserver {
   static const _dashboardMinRefreshInterval = Duration(seconds: 8);
+
   /// Soft re-fetch after returning from background so CPU/array stats feel live
   /// without hammering WebGUI on every brief app switch.
   static const _resumeSoftRefreshMinInterval = Duration(seconds: 20);
 
   /// Bottom-nav index is isolated so tab switches do not rebuild PhoneFrame chrome.
   final ValueNotifier<int> _currentIndex = ValueNotifier<int>(0);
+
   /// Only build bottom-nav pages after first visit so Docker/VM/share lists
   /// are not constructed while the user stays on Home.
   final Set<int> _visitedTabs = <int>{0};
+
   /// Bumped when a lazy tab is first visited so IndexedStack children update.
   final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
   ServerIconVariant _serverIcon = ServerIconVariant.defaultIcon;
@@ -76,10 +82,12 @@ class _MainShellPageState extends State<MainShellPage>
   UnraidDashboard? _lastDashboard;
   DateTime? _lastDashboardFetchAt;
   Object? _dashboardError;
+
   /// Published dashboard data — soft refreshes that return the same instance
   /// do not rebuild tab trees.
   final ValueNotifier<UnraidDashboard?> _dashboard =
       ValueNotifier<UnraidDashboard?>(null);
+
   /// Spinner-only notifier so soft refresh flags do not rebuild every tab page.
   final ValueNotifier<bool> _dashboardRefreshing = ValueNotifier<bool>(false);
 
@@ -144,11 +152,22 @@ class _MainShellPageState extends State<MainShellPage>
     final args = ModalRoute.of(context)?.settings.arguments;
     if (args is UnraidClient) {
       _unraidClient = args;
+      unawaited(_applySavedVideoStreamConfiguration(args));
       // Join any login-time prewarm (SSH + dashboard) instead of starting
       // cold; force still coalesces with an in-flight forced fetch.
       unawaited(args.warmSsh());
       unawaited(_loadDashboard(force: true));
     }
+  }
+
+  Future<void> _applySavedVideoStreamConfiguration(UnraidClient client) async {
+    final configuration = await VideoStreamPreferences.load();
+    client.configureWebDav(
+      enabled: configuration.enabled,
+      webDavUrl: configuration.webDavUrl,
+      unraidPathPrefix: configuration.unraidPathPrefix,
+      apiToken: configuration.apiToken,
+    );
   }
 
   @override
