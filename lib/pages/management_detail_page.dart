@@ -22,6 +22,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   String? _sharePath;
   Future<List<UnraidFileEntry>>? _shareFuture;
   List<UnraidFileEntry> _shareEntries = const <UnraidFileEntry>[];
+  FileEntrySort _shareSort = FileEntrySort.nameAscending;
   Object? _shareError;
   final TextEditingController _shareSearchController = TextEditingController();
   Timer? _shareSearchDebounce;
@@ -41,6 +42,9 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   List<UnraidFileEntry> _shareImageEntriesCached = const <UnraidFileEntry>[];
   List<UnraidFileEntry>? _shareVideoEntriesRef;
   List<UnraidFileEntry> _shareVideoEntriesCached = const <UnraidFileEntry>[];
+  List<UnraidFileEntry>? _shareSortEntriesRef;
+  FileEntrySort? _shareSortRef;
+  List<UnraidFileEntry> _shareSortedCached = const <UnraidFileEntry>[];
 
   @override
   void dispose() {
@@ -296,6 +300,25 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                     label: const Text('返回'),
                   ),
                   const Spacer(),
+                  PopupMenuButton<FileEntrySort>(
+                    tooltip: '排序',
+                    initialValue: _shareSort,
+                    onSelected: (value) {
+                      if (value == _shareSort) {
+                        return;
+                      }
+                      setState(() => _shareSort = value);
+                    },
+                    itemBuilder: (context) => [
+                      for (final option in FileEntrySort.values)
+                        CheckedPopupMenuItem<FileEntrySort>(
+                          value: option,
+                          checked: option == _shareSort,
+                          child: Text(_shareSortLabel(option)),
+                        ),
+                    ],
+                    icon: const Icon(Icons.sort),
+                  ),
                   IconButton(
                     tooltip: '刷新',
                     onPressed: () =>
@@ -454,56 +477,71 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   }
 
   List<UnraidFileEntry> get _shareImageEntries {
-    if (identical(_shareImageEntriesRef, _shareEntries)) {
+    final sortedEntries = _shareSortedEntries;
+    if (identical(_shareImageEntriesRef, sortedEntries)) {
       return _shareImageEntriesCached;
     }
-    _shareImageEntriesRef = _shareEntries;
+    _shareImageEntriesRef = sortedEntries;
     _shareImageEntriesCached =
-        _shareEntries.where((entry) => entry.isImage).toList(growable: false);
+        sortedEntries.where((entry) => entry.isImage).toList(growable: false);
     return _shareImageEntriesCached;
   }
 
   List<UnraidFileEntry> get _shareVideoEntries {
-    if (identical(_shareVideoEntriesRef, _shareEntries)) {
+    final sortedEntries = _shareSortedEntries;
+    if (identical(_shareVideoEntriesRef, sortedEntries)) {
       return _shareVideoEntriesCached;
     }
-    _shareVideoEntriesRef = _shareEntries;
+    _shareVideoEntriesRef = sortedEntries;
     _shareVideoEntriesCached =
-        _shareEntries.where((entry) => entry.isVideo).toList(growable: false);
+        sortedEntries.where((entry) => entry.isVideo).toList(growable: false);
     return _shareVideoEntriesCached;
   }
 
+  List<UnraidFileEntry> get _shareSortedEntries {
+    if (identical(_shareSortEntriesRef, _shareEntries) &&
+        _shareSortRef == _shareSort) {
+      return _shareSortedCached;
+    }
+    _shareSortEntriesRef = _shareEntries;
+    _shareSortRef = _shareSort;
+    _shareSortedCached = sortFileEntries(_shareEntries, _shareSort);
+    return _shareSortedCached;
+  }
+
   void _ensureShareSearchHaystacks() {
-    if (identical(_shareHaystackEntriesRef, _shareEntries)) {
+    final sortedEntries = _shareSortedEntries;
+    if (identical(_shareHaystackEntriesRef, sortedEntries)) {
       return;
     }
-    _shareHaystackEntriesRef = _shareEntries;
+    _shareHaystackEntriesRef = sortedEntries;
     _shareSearchHaystacks = [
-      for (final entry in _shareEntries) entry.nameLower,
+      for (final entry in sortedEntries) entry.nameLower,
     ];
   }
 
   List<UnraidFileEntry> get _shareFilteredEntries {
+    final sortedEntries = _shareSortedEntries;
     final query = _shareQuery.value;
-    if (identical(_shareFilterEntriesRef, _shareEntries) &&
+    if (identical(_shareFilterEntriesRef, sortedEntries) &&
         _shareFilterQueryRef == query) {
       return _shareFilteredCached;
     }
-    _shareFilterEntriesRef = _shareEntries;
+    _shareFilterEntriesRef = sortedEntries;
     _shareFilterQueryRef = query;
     if (query.isEmpty) {
-      _shareFilteredCached = _shareEntries;
+      _shareFilteredCached = sortedEntries;
       _shareFilteredIndexByPath = {
-        for (var i = 0; i < _shareEntries.length; i++) _shareEntries[i].path: i,
+        for (var i = 0; i < sortedEntries.length; i++) sortedEntries[i].path: i,
       };
       return _shareFilteredCached;
     }
     _ensureShareSearchHaystacks();
     final filtered = <UnraidFileEntry>[];
     final indexByPath = <String, int>{};
-    for (var i = 0; i < _shareEntries.length; i++) {
+    for (var i = 0; i < sortedEntries.length; i++) {
       if (_shareSearchHaystacks[i].contains(query)) {
-        final entry = _shareEntries[i];
+        final entry = sortedEntries[i];
         indexByPath[entry.path] = filtered.length;
         filtered.add(entry);
       }
@@ -512,6 +550,15 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     _shareFilteredIndexByPath = indexByPath;
     return _shareFilteredCached;
   }
+
+  String _shareSortLabel(FileEntrySort sort) => switch (sort) {
+        FileEntrySort.nameAscending => '名称：A → Z',
+        FileEntrySort.nameDescending => '名称：Z → A',
+        FileEntrySort.modifiedNewest => '修改时间：最新优先',
+        FileEntrySort.modifiedOldest => '修改时间：最早优先',
+        FileEntrySort.sizeLargest => '文件大小：大到小',
+        FileEntrySort.sizeSmallest => '文件大小：小到大',
+      };
 
   Widget _buildShareEntriesBody(
     ManagementDetailArgs args,
