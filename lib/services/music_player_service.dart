@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'app_logger.dart';
 import 'lyrics_service.dart';
@@ -42,6 +45,8 @@ class MusicPlayerService extends ChangeNotifier {
       // Keep mini-player play/pause icons in sync without full rebuild storms.
       notifyListeners();
     });
+    _sequenceStateSub = player.sequenceStateStream.listen(_syncCurrentSource);
+    _playerErrorSub = player.errorStream.listen(_handlePlaybackError);
   }
 
   static final MusicPlayerService instance = MusicPlayerService._();
@@ -50,12 +55,17 @@ class MusicPlayerService extends ChangeNotifier {
   final Random _random = Random();
   StreamSubscription<ProcessingState>? _completionSub;
   StreamSubscription<PlayerState>? _playerEventSub;
+  StreamSubscription<SequenceState?>? _sequenceStateSub;
+  StreamSubscription<PlayerException>? _playerErrorSub;
   bool _sessionReady = false;
   bool _disposed = false;
   int _loadGeneration = 0;
 
   UnraidClient? _client;
   List<UnraidFileEntry> _queue = const <UnraidFileEntry>[];
+  List<UnraidFileEntry> _artworks = const <UnraidFileEntry>[];
+  Uri? _defaultArtworkUri;
+
   /// Playback order indices into [_queue]. Identity order when shuffle is off.
   List<int> _order = const <int>[];
   String _rootPath = '/mnt/user/music';
@@ -80,22 +90,27 @@ class MusicPlayerService extends ChangeNotifier {
     return _order[_orderPos];
   }
 
-  UnraidFileEntry? get current => _current;
+  UnraidFileEntry? get current => _activeQueueTrack ?? _current;
   bool get loading => _loading;
   String? get error => _error;
   bool get hasSession => _hasSession;
-  bool get canSkip =>
-      _queue.length > 1 || _repeat == MusicRepeatMode.all;
+  bool get canSkip => _queue.length > 1 || _repeat == MusicRepeatMode.all;
   bool get playing => player.playing;
   bool get shuffle => _shuffle;
   MusicRepeatMode get repeatMode => _repeat;
   LyricsLoadState get lyrics => _lyrics;
 
+  LoopMode get _loopMode => switch (_repeat) {
+        MusicRepeatMode.off => LoopMode.off,
+        MusicRepeatMode.all => LoopMode.all,
+        MusicRepeatMode.one => LoopMode.one,
+      };
+
   /// True while at least one full-screen player route is mounted.
   bool get fullPlayerVisible => _fullPlayerDepth > 0;
 
   String get currentTitle {
-    final track = _current;
+    final track = current;
     if (track == null) {
       return '';
     }
@@ -103,11 +118,74 @@ class MusicPlayerService extends ChangeNotifier {
   }
 
   String get currentAlbum {
-    final track = _current;
+    final track = current;
     if (track == null) {
       return '';
     }
     return albumLabel(track.path, _rootPath);
+  }
+
+  /// Resolve the queue entry the audio engine is actually presenting. This
+  /// keeps all player surfaces aligned even when source replacement completes
+  /// asynchronously after a previous/next action.
+  UnraidFileEntry? get _activeQueueTrack {
+    if (_loading) {
+      return null;
+    }
+    final tag = player.sequenceState.currentSource?.tag;
+    if (tag is! MediaItem) {
+      return null;
+    }
+    final queueIndex = _queue.indexWhere((track) => track.path == tag.id);
+    return queueIndex < 0 ? null : _queue[queueIndex];
+  }
+
+  void _syncCurrentSource(SequenceState? state) {
+    if (_disposed) {
+      return;
+    }
+    final tag = state?.currentSource?.tag;
+    if (!_loading && tag is MediaItem) {
+      final queueIndex = _queue.indexWhere((track) => track.path == tag.id);
+      if (queueIndex >= 0 && _current?.path != tag.id) {
+        _current = _queue[queueIndex];
+        final playlistIndex = state?.currentIndex;
+        if (playlistIndex != null &&
+            playlistIndex >= 0 &&
+            playlistIndex < _order.length) {
+          _orderPos = playlistIndex;
+        } else {
+          final orderPos = _order.indexOf(queueIndex);
+          if (orderPos >= 0) {
+            _orderPos = orderPos;
+          }
+        }
+        final client = _client;
+        if (client != null) {
+          _lyrics = LyricsLoadState.loading;
+          unawaited(_loadLyricsFor(client: client, track: _current!));
+        }
+      }
+    }
+    notifyListeners();
+  }
+
+  void _handlePlaybackError(PlayerException error) {
+    if (_disposed || !_hasSession || _loading) {
+      return;
+    }
+    final playlistIndex = error.index;
+    if (playlistIndex != null &&
+        playlistIndex >= 0 &&
+        playlistIndex < _order.length) {
+      _orderPos = playlistIndex;
+      _current = _queue[_order[playlistIndex]];
+    }
+    _error = error.message ?? error.code.toString();
+    notifyListeners();
+    // A queue item may fail only when Android advances to it. Rebuilding with
+    // the failed item as the initial source reuses the local-cache fallback.
+    unawaited(_loadCurrent(autoplay: true));
   }
 
   void enterFullPlayer() {
@@ -138,11 +216,13 @@ class MusicPlayerService extends ChangeNotifier {
     required List<UnraidFileEntry> tracks,
     required UnraidFileEntry initial,
     required String rootPath,
+    List<UnraidFileEntry> artworks = const <UnraidFileEntry>[],
   }) async {
     await ensureSession();
     _client = client;
     _rootPath = rootPath;
     _queue = List<UnraidFileEntry>.unmodifiable(tracks);
+    _artworks = List<UnraidFileEntry>.unmodifiable(artworks);
     var queueIndex = _queue.indexWhere((item) => item.path == initial.path);
     if (queueIndex < 0) {
       _queue = List<UnraidFileEntry>.unmodifiable(
@@ -172,7 +252,18 @@ class MusicPlayerService extends ChangeNotifier {
     _current = _queue[queueIndex];
     _error = null;
     notifyListeners();
-    await _loadCurrent(autoplay: autoplay);
+    if (player.sequence.length != _order.length) {
+      await _loadCurrent(autoplay: autoplay);
+      return;
+    }
+    await player.seek(Duration.zero, index: _orderPos);
+    final client = _client;
+    if (client != null) {
+      unawaited(_loadLyricsFor(client: client, track: _current!));
+    }
+    if (autoplay) {
+      unawaited(player.play());
+    }
   }
 
   /// Skip relative to the shuffle/order list.
@@ -223,7 +314,14 @@ class MusicPlayerService extends ChangeNotifier {
     _current = _queue[_order[_orderPos]];
     _error = null;
     notifyListeners();
-    await _loadCurrent(autoplay: true);
+    await player.seek(Duration.zero, index: _orderPos);
+    final client = _client;
+    if (client != null) {
+      unawaited(_loadLyricsFor(client: client, track: _current!));
+    }
+    if (!player.playing) {
+      unawaited(player.play());
+    }
   }
 
   /// Playback-order snapshot for the queue panel (respects shuffle).
@@ -255,10 +353,13 @@ class MusicPlayerService extends ChangeNotifier {
   }
 
   void toggleShuffle() {
+    final wasPlaying = player.playing;
     final currentQueueIndex = index;
     _shuffle = !_shuffle;
-    _rebuildOrder(startQueueIndex: currentQueueIndex < 0 ? 0 : currentQueueIndex);
+    _rebuildOrder(
+        startQueueIndex: currentQueueIndex < 0 ? 0 : currentQueueIndex);
     notifyListeners();
+    unawaited(_loadCurrent(autoplay: wasPlaying));
   }
 
   void cycleRepeatMode() {
@@ -268,6 +369,7 @@ class MusicPlayerService extends ChangeNotifier {
       MusicRepeatMode.one => MusicRepeatMode.off,
     };
     notifyListeners();
+    unawaited(player.setLoopMode(_loopMode));
   }
 
   Future<void> retry() => _loadCurrent(autoplay: true);
@@ -282,6 +384,7 @@ class MusicPlayerService extends ChangeNotifier {
     _orderPos = -1;
     _order = const <int>[];
     _queue = const <UnraidFileEntry>[];
+    _artworks = const <UnraidFileEntry>[];
     _lyrics = LyricsLoadState.idle;
     try {
       await player.stop();
@@ -349,7 +452,7 @@ class MusicPlayerService extends ChangeNotifier {
   Future<void> _loadCurrent({required bool autoplay}) async {
     final client = _client;
     final track = _current;
-    if (client == null || track == null) {
+    if (client == null || track == null || _order.isEmpty) {
       return;
     }
 
@@ -363,25 +466,29 @@ class MusicPlayerService extends ChangeNotifier {
 
     try {
       await ensureSession();
-      final title = displayTitle(track.name);
-      final album = albumLabel(track.path, _rootPath);
-      final mediaItem = MediaItem(
-        id: track.path,
-        title: title,
-        album: album,
-        artist: album,
-        extras: <String, dynamic>{
-          'path': track.path,
-          'size': track.size,
-        },
-      );
-      final source = UnraidStreamingAudioSource(
-        client: client,
-        entry: track,
-        tag: mediaItem,
-      );
+      final defaultArtworkUri = await _ensureDefaultArtworkUri();
+      final artworkByDirectory = _buildArtworkMap();
+      final orderedTracks = orderedQueue;
+      final sources = <AudioSource>[
+        for (final item in orderedTracks)
+          UnraidStreamingAudioSource(
+            client: client,
+            entry: item,
+            tag: _mediaItemFor(
+              client: client,
+              track: item,
+              artwork: artworkByDirectory[_parentPath(item.path)],
+              defaultArtworkUri: defaultArtworkUri,
+            ),
+          ),
+      ];
       try {
-        await player.setAudioSource(source, preload: true);
+        await player.setAudioSources(
+          sources,
+          initialIndex: _orderPos,
+          initialPosition: Duration.zero,
+          preload: true,
+        );
       } on PlayerException catch (error, stackTrace) {
         // The Android proxy can report a generic source error when a remote
         // range transport fails. Fall back to a complete local cache so the
@@ -400,16 +507,26 @@ class MusicPlayerService extends ChangeNotifier {
         if (generation != _loadGeneration) {
           return;
         }
-        await player.setAudioSource(
-          AudioSource.file(localFile.path, tag: mediaItem),
+        sources[_orderPos] = AudioSource.file(
+          localFile.path,
+          tag: _mediaItemFor(
+            client: client,
+            track: track,
+            artwork: artworkByDirectory[_parentPath(track.path)],
+            defaultArtworkUri: defaultArtworkUri,
+          ),
+        );
+        await player.setAudioSources(
+          sources,
+          initialIndex: _orderPos,
+          initialPosition: Duration.zero,
           preload: true,
         );
       }
       if (generation != _loadGeneration) {
         return;
       }
-      // Single-track loop is handled in Dart so shuffle/order stay consistent.
-      await player.setLoopMode(LoopMode.off);
+      await player.setLoopMode(_loopMode);
       if (generation != _loadGeneration) {
         return;
       }
@@ -426,6 +543,95 @@ class MusicPlayerService extends ChangeNotifier {
       _loading = false;
       _error = error.toString();
       notifyListeners();
+    }
+  }
+
+  MediaItem _mediaItemFor({
+    required UnraidClient client,
+    required UnraidFileEntry track,
+    required UnraidFileEntry? artwork,
+    required Uri? defaultArtworkUri,
+  }) {
+    final album = albumLabel(track.path, _rootPath);
+    return MediaItem(
+      id: track.path,
+      title: displayTitle(track.name),
+      album: album,
+      artist: album,
+      artUri: artwork == null
+          ? defaultArtworkUri
+          : client.fileStreamUri(artwork.path),
+      artHeaders: artwork == null ? null : client.sessionHeaders,
+      extras: <String, dynamic>{
+        'path': track.path,
+        'size': track.size,
+      },
+    );
+  }
+
+  Map<String, UnraidFileEntry> _buildArtworkMap() {
+    final result = <String, UnraidFileEntry>{};
+    final scores = <String, int>{};
+    for (final artwork in _artworks) {
+      final directory = _parentPath(artwork.path);
+      final score = _artworkScore(artwork.name);
+      if (!scores.containsKey(directory) || score < scores[directory]!) {
+        result[directory] = artwork;
+        scores[directory] = score;
+      }
+    }
+    return result;
+  }
+
+  static int _artworkScore(String fileName) {
+    final base = fileName.toLowerCase().replaceFirst(RegExp(r'\.[^.]+$'), '');
+    const preferred = <String>['cover', 'folder', 'front', 'album'];
+    final exact = preferred.indexOf(base);
+    if (exact >= 0) {
+      return exact;
+    }
+    for (var i = 0; i < preferred.length; i++) {
+      if (base.contains(preferred[i])) {
+        return 10 + i;
+      }
+    }
+    return 100;
+  }
+
+  static String _parentPath(String path) {
+    final normalized = path.replaceAll(r'\', '/');
+    final slash = normalized.lastIndexOf('/');
+    return slash <= 0 ? '/' : normalized.substring(0, slash);
+  }
+
+  Future<Uri?> _ensureDefaultArtworkUri() async {
+    if (kIsWeb) {
+      return null;
+    }
+    final cached = _defaultArtworkUri;
+    if (cached != null) {
+      return cached;
+    }
+    try {
+      final directory = await getApplicationSupportDirectory();
+      final file = File('${directory.path}/music_notification_cover.png');
+      if (!await file.exists()) {
+        final data = await rootBundle.load(
+          'assets/images/music_notification_cover.png',
+        );
+        await file.writeAsBytes(
+          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          flush: true,
+        );
+      }
+      return _defaultArtworkUri = Uri.file(file.path);
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'music_default_artwork_prepare_failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return null;
     }
   }
 
@@ -489,6 +695,8 @@ class MusicPlayerService extends ChangeNotifier {
     _disposed = true;
     unawaited(_completionSub?.cancel() ?? Future<void>.value());
     unawaited(_playerEventSub?.cancel() ?? Future<void>.value());
+    unawaited(_sequenceStateSub?.cancel() ?? Future<void>.value());
+    unawaited(_playerErrorSub?.cancel() ?? Future<void>.value());
     unawaited(player.dispose());
     super.dispose();
   }

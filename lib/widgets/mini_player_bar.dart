@@ -8,7 +8,15 @@ import '../services/music_player_service.dart';
 
 /// Persistent mini player shown above bottom navigation while a session is live.
 class MiniPlayerBar extends StatelessWidget {
-  const MiniPlayerBar({super.key, this.bottomOffset = 0});
+  const MiniPlayerBar({
+    required this.navigatorKey,
+    super.key,
+    this.bottomOffset = 0,
+  });
+
+  /// The mini player is built above [MaterialApp]'s navigator, so its local
+  /// build context cannot be used for route operations.
+  final GlobalKey<NavigatorState> navigatorKey;
 
   /// Extra bottom padding so the bar can sit above bottom navigation.
   final double bottomOffset;
@@ -26,8 +34,7 @@ class MiniPlayerBar extends StatelessWidget {
             service.fullPlayerVisible) {
           return const SizedBox.shrink();
         }
-        final track = service.current!;
-        final title = MusicPlayerService.displayTitle(track.name);
+        final title = service.currentTitle;
         final subtitle = service.error ??
             (service.loading
                 ? '正在流式缓冲…'
@@ -46,7 +53,7 @@ class MiniPlayerBar extends StatelessWidget {
               children: [
                 InkWell(
                   onTap: () {
-                    Navigator.of(context).push(
+                    navigatorKey.currentState?.push(
                       MaterialPageRoute<void>(
                         builder: (_) => const MusicPlayerPage(),
                       ),
@@ -119,8 +126,7 @@ class MiniPlayerBar extends StatelessWidget {
                         IconButton(
                           tooltip: service.playing ? '暂停' : '播放',
                           visualDensity: VisualDensity.compact,
-                          onPressed: () =>
-                              unawaited(service.togglePlayPause()),
+                          onPressed: () => unawaited(service.togglePlayPause()),
                           icon: Icon(
                             service.loading
                                 ? Icons.hourglass_empty
@@ -145,8 +151,7 @@ class MiniPlayerBar extends StatelessWidget {
                         IconButton(
                           tooltip: '关闭播放器',
                           visualDensity: VisualDensity.compact,
-                          onPressed: () =>
-                              unawaited(service.stopAndClear()),
+                          onPressed: () => unawaited(service.stopAndClear()),
                           icon: const Icon(
                             Icons.close,
                             color: Colors.white70,

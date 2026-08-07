@@ -26,6 +26,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/images/music_notification_cover.png
     - assets/pdfjs/viewer.html
     - assets/pdfjs/pdf.min.js
     - assets/pdfjs/pdf.worker.min.js

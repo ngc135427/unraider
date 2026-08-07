@@ -18,11 +18,13 @@ class _MusicLibraryCacheEntry {
   const _MusicLibraryCacheEntry({
     required this.rootPath,
     required this.tracks,
+    required this.artworks,
     required this.fetchedAt,
   });
 
   final String rootPath;
   final List<UnraidFileEntry> tracks;
+  final List<UnraidFileEntry> artworks;
   final DateTime fetchedAt;
 }
 
@@ -98,11 +100,14 @@ class _MusicPageState extends State<MusicPage> {
   UnraidClient? _client;
   String _rootPath = '/mnt/user/music';
   List<UnraidFileEntry> _tracks = const <UnraidFileEntry>[];
+  List<UnraidFileEntry> _artworks = const <UnraidFileEntry>[];
   bool _loadingTracks = false;
   int _loadGeneration = 0;
+
   /// Loading/error strip is isolated so search typing does not rebuild summary.
   final ValueNotifier<_MusicLoadState> _loadState =
       ValueNotifier<_MusicLoadState>(const _MusicLoadState());
+
   /// Search query is isolated so typing does not rebuild summary/now-playing.
   final ValueNotifier<String> _query = ValueNotifier<String>('');
   Timer? _searchDebounce;
@@ -118,6 +123,7 @@ class _MusicPageState extends State<MusicPage> {
   List<UnraidFileEntry>? _filterTracksRef;
   String? _filterRootRef;
   List<UnraidFileEntry> _filteredTracksCached = const <UnraidFileEntry>[];
+
   /// Pre-lowercased name+album haystacks so typing does not re-walk paths.
   List<UnraidFileEntry>? _haystackTracksRef;
   String? _haystackRootRef;
@@ -239,6 +245,7 @@ class _MusicPageState extends State<MusicPage> {
         setState(() {
           _rootPath = cached.rootPath;
           _tracks = cached.tracks;
+          _artworks = cached.artworks;
           _currentTrack ??= cached.tracks.isEmpty ? null : cached.tracks.first;
         });
         _loadState.value = const _MusicLoadState(loading: false);
@@ -256,6 +263,7 @@ class _MusicPageState extends State<MusicPage> {
     try {
       final roots = _candidateMusicRoots(_rootPath);
       List<UnraidFileEntry> tracks = const <UnraidFileEntry>[];
+      List<UnraidFileEntry> artworks = const <UnraidFileEntry>[];
       var usedRoot = _rootPath;
 
       // Prefer the configured root first; only fall through to candidates when
@@ -265,7 +273,7 @@ class _MusicPageState extends State<MusicPage> {
         final found = await client.fetchMediaFiles(
           root,
           maxDepth: 8,
-          includeImages: false,
+          includeImages: true,
           includeVideos: false,
           includeAudio: true,
           // Only force-refresh the preferred root; candidate fallthroughs can
@@ -275,8 +283,10 @@ class _MusicPageState extends State<MusicPage> {
         if (!mounted || generation != _loadGeneration) {
           return;
         }
-        if (found.isNotEmpty) {
-          tracks = found;
+        final foundTracks = found.where((entry) => entry.isAudio).toList();
+        if (foundTracks.isNotEmpty) {
+          tracks = foundTracks;
+          artworks = found.where((entry) => entry.isImage).toList();
           usedRoot = root;
           break;
         }
@@ -293,6 +303,7 @@ class _MusicPageState extends State<MusicPage> {
       final entry = _MusicLibraryCacheEntry(
         rootPath: usedRoot,
         tracks: tracks,
+        artworks: artworks,
         fetchedAt: DateTime.now(),
       );
       _storeMusicLibraryCache(cacheKey, entry);
@@ -304,6 +315,7 @@ class _MusicPageState extends State<MusicPage> {
       setState(() {
         _rootPath = usedRoot;
         _tracks = tracks;
+        _artworks = artworks;
         _currentTrack ??= tracks.isEmpty ? null : tracks.first;
       });
       _loadState.value = const _MusicLoadState(loading: false);
@@ -361,6 +373,7 @@ class _MusicPageState extends State<MusicPage> {
     await MusicPlayerService.instance.playQueue(
       client: client,
       tracks: _tracks,
+      artworks: _artworks,
       initial: track,
       rootPath: _rootPath,
     );
@@ -376,9 +389,8 @@ class _MusicPageState extends State<MusicPage> {
 
   void _openPlayer([UnraidFileEntry? track]) {
     final client = _client;
-    final selected = track ??
-        _currentTrack ??
-        MusicPlayerService.instance.current;
+    final selected =
+        track ?? _currentTrack ?? MusicPlayerService.instance.current;
     if (client == null || selected == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('音乐库中暂无歌曲')),
@@ -732,8 +744,8 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
             );
           }
 
-          final title = _displayTitle(track.name);
-          final album = _albumName(track.path, service.rootPath);
+          final title = service.currentTitle;
+          final album = service.currentAlbum;
           final canSkip = service.canSkip;
           final loading = service.loading;
           final error = service.error;
@@ -1006,7 +1018,8 @@ class _PlayerTopBar extends StatelessWidget {
                   IconButton(
                     tooltip: '重新加载歌词',
                     onPressed: onLyrics,
-                    icon: const Icon(Icons.lyrics_outlined, color: Colors.white),
+                    icon:
+                        const Icon(Icons.lyrics_outlined, color: Colors.white),
                   ),
                 if (onQueue != null)
                   IconButton(
@@ -1022,4 +1035,3 @@ class _PlayerTopBar extends StatelessWidget {
     );
   }
 }
-

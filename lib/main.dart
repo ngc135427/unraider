@@ -14,50 +14,54 @@ import 'services/app_logger.dart';
 import 'theme/app_theme.dart';
 import 'widgets/mini_player_bar.dart';
 
+final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
+
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  await runZonedGuarded<Future<void>>(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-  // Keep decoded image memory bounded when scrolling large photo grids.
-  final imageCache = PaintingBinding.instance.imageCache;
-  imageCache.maximumSize = 120;
-  imageCache.maximumSizeBytes = 48 << 20; // 48 MB
+      // Keep decoded image memory bounded when scrolling large photo grids.
+      final imageCache = PaintingBinding.instance.imageCache;
+      imageCache.maximumSize = 120;
+      imageCache.maximumSizeBytes = 48 << 20; // 48 MB
 
-  if (!kIsWeb) {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.ngc.unraider.channel.audio',
-      androidNotificationChannelName: '音乐播放',
-      androidNotificationOngoing: true,
-      androidStopForegroundOnPause: true,
-      preloadArtwork: false,
-    );
-  }
+      if (!kIsWeb) {
+        await JustAudioBackground.init(
+          androidNotificationChannelId: 'com.ngc.unraider.channel.audio',
+          androidNotificationChannelName: '音乐播放',
+          androidNotificationOngoing: true,
+          androidStopForegroundOnPause: true,
+          preloadArtwork: false,
+        );
+      }
 
-  await AppLogger.initialize();
+      await AppLogger.initialize();
 
-  FlutterError.onError = (details) {
-    FlutterError.presentError(details);
-    unawaited(
-      AppLogger.log(
-        'flutter_error',
-        error: details.exception,
-        stackTrace: details.stack,
-      ),
-    );
-  };
+      FlutterError.onError = (details) {
+        FlutterError.presentError(details);
+        unawaited(
+          AppLogger.log(
+            'flutter_error',
+            error: details.exception,
+            stackTrace: details.stack,
+          ),
+        );
+      };
 
-  PlatformDispatcher.instance.onError = (error, stackTrace) {
-    unawaited(
-      AppLogger.log(
-        'platform_error',
-        error: error,
-        stackTrace: stackTrace,
-      ),
-    );
-    return true;
-  };
+      PlatformDispatcher.instance.onError = (error, stackTrace) {
+        unawaited(
+          AppLogger.log(
+            'platform_error',
+            error: error,
+            stackTrace: stackTrace,
+          ),
+        );
+        return true;
+      };
 
-  runZonedGuarded(
-    () => runApp(const UnraiderApp()),
+      runApp(const UnraiderApp());
+    },
     (error, stackTrace) {
       unawaited(
         AppLogger.log(
@@ -76,6 +80,7 @@ class UnraiderApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _rootNavigatorKey,
       title: 'Unraider',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
@@ -86,7 +91,7 @@ class UnraiderApp extends StatelessWidget {
           fit: StackFit.expand,
           children: [
             child ?? const SizedBox.shrink(),
-            const Positioned(
+            Positioned(
               left: 0,
               right: 0,
               bottom: 0,
@@ -94,7 +99,10 @@ class UnraiderApp extends StatelessWidget {
                 top: false,
                 // Sit above the 58px shell bottom nav; other routes just get
                 // a little extra bottom inset which is fine.
-                child: MiniPlayerBar(bottomOffset: 58),
+                child: MiniPlayerBar(
+                  navigatorKey: _rootNavigatorKey,
+                  bottomOffset: 58,
+                ),
               ),
             ),
           ],
