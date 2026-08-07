@@ -471,7 +471,7 @@ class MusicPlayerService extends ChangeNotifier {
       final orderedTracks = orderedQueue;
       final sources = <AudioSource>[
         for (final item in orderedTracks)
-          UnraidStreamingAudioSource(
+          _audioSourceFor(
             client: client,
             entry: item,
             tag: _mediaItemFor(
@@ -546,6 +546,26 @@ class MusicPlayerService extends ChangeNotifier {
     }
   }
 
+  AudioSource _audioSourceFor({
+    required UnraidClient client,
+    required UnraidFileEntry entry,
+    required MediaItem tag,
+  }) {
+    final webDavUri = client.webDavFileUri(entry.path);
+    if (webDavUri != null) {
+      return AudioSource.uri(
+        webDavUri,
+        headers: client.webDavHeaders,
+        tag: tag,
+      );
+    }
+    return UnraidStreamingAudioSource(
+      client: client,
+      entry: entry,
+      tag: tag,
+    );
+  }
+
   MediaItem _mediaItemFor({
     required UnraidClient client,
     required UnraidFileEntry track,
@@ -553,6 +573,8 @@ class MusicPlayerService extends ChangeNotifier {
     required Uri? defaultArtworkUri,
   }) {
     final album = albumLabel(track.path, _rootPath);
+    final webDavArtworkUri =
+        artwork == null ? null : client.webDavFileUri(artwork.path);
     return MediaItem(
       id: track.path,
       title: displayTitle(track.name),
@@ -560,8 +582,12 @@ class MusicPlayerService extends ChangeNotifier {
       artist: album,
       artUri: artwork == null
           ? defaultArtworkUri
-          : client.fileStreamUri(artwork.path),
-      artHeaders: artwork == null ? null : client.sessionHeaders,
+          : webDavArtworkUri ?? client.fileStreamUri(artwork.path),
+      artHeaders: artwork == null
+          ? null
+          : webDavArtworkUri == null
+              ? client.sessionHeaders
+              : client.webDavHeaders,
       extras: <String, dynamic>{
         'path': track.path,
         'size': track.size,

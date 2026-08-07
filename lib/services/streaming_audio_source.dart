@@ -5,7 +5,8 @@ import 'package:just_audio/just_audio.dart';
 
 import 'unraid_client.dart';
 
-/// Progressive Unraid audio source that serves byte ranges over SFTP/SMB.
+/// Progressive Unraid audio source that prefers WebDAV byte ranges and falls
+/// back to SMB/SFTP when direct HTTP streaming is unavailable.
 ///
 /// just_audio's local proxy issues range requests while decoding; each request
 /// maps onto [UnraidClient.fetchFileRange] so playback can start without a

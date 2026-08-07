@@ -22,6 +22,19 @@ class UnraidClientException implements Exception {
   String toString() => message;
 }
 
+class _WebDavReadException implements Exception {
+  const _WebDavReadException(
+    this.message, {
+    this.pauseTransport = false,
+  });
+
+  final String message;
+  final bool pauseTransport;
+
+  @override
+  String toString() => message;
+}
+
 typedef UnraidClient = UnraidWebGuiClient;
 
 class _DirectoryCacheEntry {
@@ -111,6 +124,11 @@ class UnraidWebGuiClient {
   /// Generous timeout so album/video/music previews can pull larger media.
   static const fileTransferTimeout = Duration(minutes: 3);
 
+  /// WebDAV previews should fail over quickly instead of stalling on a broken
+  /// endpoint before the SMB/SFTP compatibility path gets a chance.
+  static const webDavTransferTimeout = Duration(seconds: 45);
+  static const _webDavRetryDelay = Duration(seconds: 30);
+
   /// Short probes (SSH port discovery, directory existence).
   static const probeTimeout = Duration(seconds: 10);
 
@@ -128,6 +146,7 @@ class UnraidWebGuiClient {
   String _webDavUrl;
   String _webDavPathPrefix;
   String _webDavToken;
+  DateTime? _webDavRetryAfter;
   final http.Client _httpClient;
   final Map<String, String> _cookies = <String, String>{};
 
@@ -576,7 +595,7 @@ class UnraidWebGuiClient {
     String path, {
     bool forceRefresh = false,
   }) async {
-    if (kIsWeb) {
+    if (kIsWeb && !hasWebDavPreview) {
       throw const UnraidClientException('Web 端暂不支持直接读取 Unraid 文件');
     }
 
@@ -621,7 +640,7 @@ class UnraidWebGuiClient {
     required int offset,
     required int length,
   }) async {
-    if (kIsWeb) {
+    if (kIsWeb && !hasWebDavPreview) {
       throw const UnraidClientException('Web 端暂不支持直接读取 Unraid 文件');
     }
     if (offset < 0) {
@@ -692,6 +711,24 @@ class UnraidWebGuiClient {
 
   Future<Uint8List> _loadFileBytes(String normalized) async {
     final stopwatch = Stopwatch()..start();
+    if (_canAttemptWebDav(normalized)) {
+      try {
+        return await _fetchFileBytesViaWebDav(
+          normalizedPath: normalized,
+          stopwatch: stopwatch,
+        );
+      } on Object catch (error, stackTrace) {
+        _handleWebDavFailure(error);
+        await AppLogger.log(
+          'fetch_file_bytes_webdav_fallback path=$normalized',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    if (kIsWeb) {
+      throw const UnraidClientException('WebDAV 无法读取此文件');
+    }
     final smbPath = smbSharePathFromUnraidPath(normalized);
     if (defaultTargetPlatform == TargetPlatform.android &&
         smbPath != null &&
@@ -766,6 +803,26 @@ class UnraidWebGuiClient {
     required int length,
   }) async {
     final stopwatch = Stopwatch()..start();
+    if (_canAttemptWebDav(normalized)) {
+      try {
+        return await _fetchFileRangeViaWebDav(
+          normalizedPath: normalized,
+          offset: offset,
+          length: length,
+          stopwatch: stopwatch,
+        );
+      } on Object catch (error, stackTrace) {
+        _handleWebDavFailure(error);
+        await AppLogger.log(
+          'fetch_file_range_webdav_fallback path=$normalized offset=$offset',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    if (kIsWeb) {
+      throw const UnraidClientException('WebDAV 无法流式读取此文件');
+    }
     final smbPath = smbSharePathFromUnraidPath(normalized);
     if (defaultTargetPlatform == TargetPlatform.android &&
         smbPath != null &&
@@ -830,6 +887,94 @@ class UnraidWebGuiClient {
       );
       throw UnraidClientException('无法流式读取文件：$error');
     }
+  }
+
+  bool _canAttemptWebDav(String path) {
+    if (webDavFileUri(path) == null) {
+      return false;
+    }
+    final retryAfter = _webDavRetryAfter;
+    return retryAfter == null || !DateTime.now().isBefore(retryAfter);
+  }
+
+  void _handleWebDavFailure(Object error) {
+    if (error is _WebDavReadException && !error.pauseTransport) {
+      return;
+    }
+    _webDavRetryAfter = DateTime.now().add(_webDavRetryDelay);
+  }
+
+  Future<Uint8List> _fetchFileBytesViaWebDav({
+    required String normalizedPath,
+    required Stopwatch stopwatch,
+  }) async {
+    final uri = webDavFileUri(normalizedPath);
+    if (uri == null) {
+      throw const _WebDavReadException('文件不在 WebDAV 映射范围内');
+    }
+    await AppLogger.log('fetch_file_bytes_webdav_start path=$normalizedPath');
+    final response = await _httpClient
+        .get(uri, headers: webDavHeaders)
+        .timeout(webDavTransferTimeout);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _WebDavReadException(
+        'WebDAV 返回 HTTP ${response.statusCode}',
+        pauseTransport: response.statusCode == 401 ||
+            response.statusCode == 403 ||
+            response.statusCode >= 500,
+      );
+    }
+    final bytes = response.bodyBytes;
+    await AppLogger.log(
+      'fetch_file_bytes_webdav_success path=$normalizedPath '
+      'bytes=${bytes.length} elapsedMs=${stopwatch.elapsedMilliseconds}',
+    );
+    return bytes;
+  }
+
+  Future<Uint8List> _fetchFileRangeViaWebDav({
+    required String normalizedPath,
+    required int offset,
+    required int length,
+    required Stopwatch stopwatch,
+  }) async {
+    final uri = webDavFileUri(normalizedPath);
+    if (uri == null) {
+      throw const _WebDavReadException('文件不在 WebDAV 映射范围内');
+    }
+    final end = offset + length - 1;
+    await AppLogger.log(
+      'fetch_file_range_webdav_start path=$normalizedPath '
+      'offset=$offset length=$length',
+    );
+    final response = await _httpClient.get(
+      uri,
+      headers: <String, String>{
+        ...webDavHeaders,
+        'Range': 'bytes=$offset-$end',
+      },
+    ).timeout(webDavTransferTimeout);
+    if (response.statusCode == 416) {
+      return Uint8List(0);
+    }
+    if (response.statusCode != 206 &&
+        !(response.statusCode == 200 && offset == 0)) {
+      throw _WebDavReadException(
+        'WebDAV Range 返回 HTTP ${response.statusCode}',
+        pauseTransport: response.statusCode == 401 ||
+            response.statusCode == 403 ||
+            response.statusCode >= 500,
+      );
+    }
+    final body = response.bodyBytes;
+    final bytes =
+        body.length <= length ? body : Uint8List.sublistView(body, 0, length);
+    await AppLogger.log(
+      'fetch_file_range_webdav_success path=$normalizedPath '
+      'offset=$offset bytes=${bytes.length} '
+      'elapsedMs=${stopwatch.elapsedMilliseconds}',
+    );
+    return bytes;
   }
 
   Future<Uint8List> _fetchFileBytesViaAndroidSmb({
@@ -1400,10 +1545,11 @@ class UnraidWebGuiClient {
     };
   }
 
-  bool get hasWebDavVideoStream =>
-      _webDavUrl.isNotEmpty && _webDavToken.isNotEmpty;
+  bool get hasWebDavPreview => _webDavUrl.isNotEmpty && _webDavToken.isNotEmpty;
 
-  /// Applies video-stream settings immediately without reconnecting WebGUI.
+  bool get hasWebDavVideoStream => hasWebDavPreview;
+
+  /// Applies remote-preview settings immediately without reconnecting WebGUI.
   void configureWebDav({
     required bool enabled,
     required String webDavUrl,
@@ -1413,12 +1559,13 @@ class UnraidWebGuiClient {
     _webDavUrl = enabled ? webDavUrl.trim() : '';
     _webDavPathPrefix = _normalizeRemotePathPrefix(unraidPathPrefix);
     _webDavToken = enabled ? apiToken.trim() : '';
+    _webDavRetryAfter = null;
   }
 
   /// Maps an Unraid path to a FileBrowser Quantum WebDAV source root.
   /// The configured prefix is the filesystem directory exposed by that source.
   Uri? webDavFileUri(String path) {
-    if (!hasWebDavVideoStream) {
+    if (!hasWebDavPreview) {
       return null;
     }
     final normalizedPath = _normalizeRemotePathPrefix(path);
@@ -1447,6 +1594,7 @@ class UnraidWebGuiClient {
 
   Map<String, String> get webDavHeaders => <String, String>{
         'Accept': '*/*',
+        'Accept-Encoding': 'identity',
         'Authorization':
             'Basic ${base64Encode(utf8.encode('unraider:$_webDavToken'))}',
       };

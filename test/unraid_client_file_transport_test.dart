@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:unraider/services/app_logger.dart';
 import 'package:unraider/services/unraid_client.dart';
 
@@ -315,6 +317,47 @@ Unraid OS 7.0.0
       apiToken: 'token',
     );
     expect(client.hasWebDavVideoStream, isFalse);
+  });
+
+  test('prefers WebDAV for complete and ranged preview reads', () async {
+    final requests = <http.Request>[];
+    final httpClient = MockClient((request) async {
+      requests.add(request);
+      expect(request.headers['authorization'], 'Basic dW5yYWlkZXI6dG9rZW4=');
+      final range = request.headers['range'];
+      if (range != null) {
+        expect(range, 'bytes=4-6');
+        return http.Response.bytes(
+          <int>[4, 5, 6],
+          206,
+          headers: <String, String>{'content-range': 'bytes 4-6/10'},
+        );
+      }
+      return http.Response.bytes(<int>[1, 2, 3], 200);
+    });
+    final client = UnraidWebGuiClient(
+      baseUrl: 'http://tower.local',
+      username: 'root',
+      password: 'secret',
+      webDavUrl: 'https://files.example.com/dav/data/',
+      webDavPathPrefix: '/mnt/user',
+      webDavToken: 'token',
+      httpClient: httpClient,
+    );
+    addTearDown(client.close);
+
+    final range = await client.fetchFileRange(
+      '/mnt/user/media/video.mp4',
+      offset: 4,
+      length: 3,
+    );
+    final bytes = await client.fetchFileBytes('/mnt/user/media/preview.jpg');
+
+    expect(range, <int>[4, 5, 6]);
+    expect(bytes, <int>[1, 2, 3]);
+    expect(requests, hasLength(2));
+    expect(requests.first.url.path, '/dav/data/media/video.mp4');
+    expect(requests.last.url.path, '/dav/data/media/preview.jpg');
   });
 
   test('builds modified time command from source timestamp', () {

@@ -73,7 +73,7 @@ class _VideoStreamSettingsPageState extends State<VideoStreamSettingsPage> {
     }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(_enabled ? '视频流配置已保存并启用' : 'WebDAV 视频直连已停用'),
+        content: Text(_enabled ? '远程预览配置已保存并启用' : 'WebDAV 远程预览已停用'),
       ),
     );
     Navigator.of(context).pop();
@@ -105,7 +105,7 @@ class _VideoStreamSettingsPageState extends State<VideoStreamSettingsPage> {
                 ),
                 const SizedBox(width: 4),
                 const Text(
-                  '视频流配置',
+                  '远程预览配置',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -142,7 +142,7 @@ class _VideoStreamSettingsPageState extends State<VideoStreamSettingsPage> {
                                 ),
                               ),
                               child: const Text(
-                                '视频会优先通过 FileBrowser Quantum WebDAV 直连播放；连接失败时自动回退到 SMB/SFTP 渐进缓冲。',
+                                '图片、视频、音频、PDF 和文本等远程预览会优先通过 FileBrowser Quantum WebDAV 读取；连接失败时才回退到 SMB/SFTP。',
                                 style: TextStyle(
                                   color: AppTheme.textMedium,
                                   fontSize: 13,
@@ -156,13 +156,13 @@ class _VideoStreamSettingsPageState extends State<VideoStreamSettingsPage> {
                               value: _enabled,
                               activeTrackColor: AppTheme.secondary,
                               title: const Text(
-                                '启用 WebDAV 视频直连',
+                                '启用 WebDAV 远程预览',
                                 style: TextStyle(
                                   color: AppTheme.textDark,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              subtitle: const Text('停用后仍可使用 SMB/SFTP 播放'),
+                              subtitle: const Text('停用后仍可使用 SMB/SFTP 预览'),
                               onChanged: _saving
                                   ? null
                                   : (value) => setState(() => _enabled = value),
