@@ -104,12 +104,14 @@ class _FileEntryTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.onLongPress,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -118,6 +120,7 @@ class _FileEntryTile extends StatelessWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Container(
           margin: const EdgeInsets.only(bottom: 10),
           padding: const EdgeInsets.all(14),
@@ -913,7 +916,10 @@ class _ShareVideoPlayer extends StatelessWidget {
             aspectRatio: controller.value.aspectRatio == 0
                 ? 16 / 9
                 : controller.value.aspectRatio,
-            child: VideoPlayer(controller),
+            child: VideoWakeLock(
+              controller: controller,
+              child: VideoPlayer(controller),
+            ),
           ),
         ),
         Positioned.fill(
@@ -975,44 +981,9 @@ class _ShareVideoPlayer extends StatelessWidget {
                   child: ValueListenableBuilder<VideoPlayerValue>(
                     valueListenable: controller,
                     builder: (context, value, _) {
-                      return Row(
-                        children: [
-                          IconButton(
-                            tooltip: value.isPlaying ? '暂停' : '播放',
-                            onPressed: () {
-                              if (value.isPlaying) {
-                                unawaited(controller.pause());
-                              } else {
-                                unawaited(controller.play());
-                              }
-                            },
-                            icon: Icon(
-                              value.isPlaying ? Icons.pause : Icons.play_arrow,
-                              color: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '${_formatPreviewDuration(value.position)} / '
-                            '${_formatPreviewDuration(value.duration)}',
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 13,
-                            ),
-                          ),
-                          const Spacer(),
-                          IconButton(
-                            tooltip: '从头播放',
-                            onPressed: () {
-                              unawaited(controller.seekTo(Duration.zero));
-                              unawaited(controller.play());
-                            },
-                            icon: const Icon(
-                              Icons.replay,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
+                      return VideoPlaybackControls(
+                        controller: controller,
+                        value: value,
                       );
                     },
                   ),
@@ -1024,17 +995,6 @@ class _ShareVideoPlayer extends StatelessWidget {
       ],
     );
   }
-}
-
-String _formatPreviewDuration(Duration value) {
-  final total = value.inSeconds;
-  final seconds = (total % 60).toString().padLeft(2, '0');
-  final minutes = ((total ~/ 60) % 60).toString().padLeft(2, '0');
-  final hours = total ~/ 3600;
-  if (hours > 0) {
-    return '$hours:$minutes:$seconds';
-  }
-  return '$minutes:$seconds';
 }
 
 const _textPreviewExtensions = <String>{

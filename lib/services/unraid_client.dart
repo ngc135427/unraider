@@ -494,6 +494,60 @@ class UnraidWebGuiClient {
     _invalidateDirectoryCache(_parentPath(normalized));
   }
 
+  Future<void> createDirectory({
+    required String parentPath,
+    required String name,
+  }) async {
+    if (kIsWeb) {
+      throw const UnraidClientException('Web 端暂不支持创建 Unraid 目录');
+    }
+
+    final trimmedName = name.trim();
+    if (!_isValidRemoteName(trimmedName)) {
+      throw const UnraidClientException('文件夹名称无效');
+    }
+    final parent = _normalizeUnraidPath(parentPath);
+    if (!_isWritableDirectoryPath(parent)) {
+      throw const UnraidClientException('目录必须位于 /mnt 或 /boot 下');
+    }
+    final target = _joinPath(parent, trimmedName);
+    await _runSshCommand(
+      '创建目录',
+      'mkdir -- ${shellQuote(target)}',
+      timeout: httpTimeout,
+    );
+    _invalidateDirectoryCache(parent);
+    _invalidateDirectoryCache(target);
+  }
+
+  Future<void> createFile({
+    required String parentPath,
+    required String name,
+  }) async {
+    if (kIsWeb) {
+      throw const UnraidClientException('Web 端暂不支持创建 Unraid 文件');
+    }
+
+    final trimmedName = name.trim();
+    if (!_isValidRemoteName(trimmedName)) {
+      throw const UnraidClientException('文件名称无效');
+    }
+    final parent = _normalizeUnraidPath(parentPath);
+    if (!_isWritableDirectoryPath(parent)) {
+      throw const UnraidClientException('目录必须位于 /mnt 或 /boot 下');
+    }
+    final target = _joinPath(parent, trimmedName);
+    await _runSshCommand(
+      '创建文件',
+      'if [ -e ${shellQuote(target)} ]; then '
+          "printf '%s\\n' '目标已存在' >&2; exit 17; fi; "
+          ': > ${shellQuote(target)}',
+      timeout: httpTimeout,
+    );
+    _invalidateDirectoryCache(parent);
+    _invalidateDirectoryCache(target);
+  }
+
   Future<Uint8List> fetchFileBytes(
     String path, {
     bool forceRefresh = false,
@@ -1067,11 +1121,25 @@ class UnraidWebGuiClient {
     if (!_isValidRemoteName(trimmedName)) {
       throw const UnraidClientException('新名称无效');
     }
-    final normalized = _normalizeUnraidPath(path);
-    await movePath(
-      sourcePath: normalized,
-      targetPath: _joinPath(_parentPath(normalized), trimmedName),
+    final source = _normalizeUnraidPath(path);
+    final target = _joinPath(_parentPath(source), trimmedName);
+    if (source == target) {
+      return;
+    }
+    if (!_isWritableDirectoryPath(source) || !_isWritableFilePath(target)) {
+      throw const UnraidClientException('重命名路径必须位于 /mnt 或 /boot 下');
+    }
+    _throwIfUnsafeDestructivePath(source, '源路径');
+    await _runSshCommand(
+      '重命名文件',
+      'if [ -e ${shellQuote(target)} ]; then '
+          "printf '%s\\n' '目标已存在' >&2; exit 17; fi; "
+          'mv -- ${shellQuote(source)} ${shellQuote(target)}',
+      timeout: const Duration(minutes: 2),
     );
+    _invalidateDirectoryCache(source);
+    _invalidateDirectoryCache(_parentPath(source));
+    _invalidateDirectoryCache(target);
   }
 
   Future<void> deletePath(String path) async {

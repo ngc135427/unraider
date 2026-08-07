@@ -528,28 +528,8 @@ class _ManagementCard extends StatelessWidget {
                     ],
                   ),
                 ],
-                const SizedBox(height: 12),
-                if (onAction == null)
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _CompactActionButton(
-                          icon: Icons.folder_open,
-                          label: '浏览',
-                          onPressed: onTap,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _CompactActionButton(
-                          icon: Icons.tune,
-                          label: '设置',
-                          onPressed: onTap,
-                        ),
-                      ),
-                    ],
-                  )
-                else
+                if (onAction != null) ...[
+                  const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
@@ -586,6 +566,7 @@ class _ManagementCard extends StatelessWidget {
                       ),
                     ],
                   ),
+                ],
               ],
             ),
           ),

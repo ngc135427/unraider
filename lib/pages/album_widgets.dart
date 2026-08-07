@@ -2101,7 +2101,10 @@ class _VideoPlayerScaffold extends StatelessWidget {
             aspectRatio: controller.value.aspectRatio == 0
                 ? 16 / 9
                 : controller.value.aspectRatio,
-            child: VideoPlayer(controller),
+            child: VideoWakeLock(
+              controller: controller,
+              child: VideoPlayer(controller),
+            ),
           ),
         ),
         Positioned(
@@ -2129,36 +2132,12 @@ class _VideoPlayerScaffold extends StatelessWidget {
                 ValueListenableBuilder<VideoPlayerValue>(
                   valueListenable: controller,
                   builder: (context, value, _) {
-                    return Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(
-                          tooltip: value.isPlaying ? '暂停' : '播放',
-                          onPressed: () {
-                            if (value.isPlaying) {
-                              unawaited(controller.pause());
-                            } else {
-                              unawaited(controller.play());
-                            }
-                          },
-                          icon: Icon(
-                            value.isPlaying
-                                ? Icons.pause_circle_filled
-                                : Icons.play_circle_filled,
-                            color: Colors.white,
-                            size: 40,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          '${_formatDuration(value.position)} / '
-                          '${_formatDuration(value.duration)}',
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ],
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: VideoPlaybackControls(
+                        controller: controller,
+                        value: value,
+                      ),
                     );
                   },
                 ),
@@ -2171,15 +2150,3 @@ class _VideoPlayerScaffold extends StatelessWidget {
     );
   }
 }
-
-String _formatDuration(Duration value) {
-  final total = value.inSeconds;
-  final minutes = (total ~/ 60).toString().padLeft(2, '0');
-  final seconds = (total % 60).toString().padLeft(2, '0');
-  final hours = value.inHours;
-  if (hours > 0) {
-    return '$hours:$minutes:$seconds';
-  }
-  return '$minutes:$seconds';
-}
-

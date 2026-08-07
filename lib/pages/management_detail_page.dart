@@ -1,5 +1,7 @@
 part of 'main_shell_page.dart';
 
+enum _ShareEntryAction { createFolder, createFile, rename, delete }
+
 class ManagementDetailPage extends StatefulWidget {
   const ManagementDetailPage({super.key});
 
@@ -13,6 +15,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   /// Action busy flag is isolated so start/stop/restart do not rebuild details.
   final ValueNotifier<bool> _isSubmitting = ValueNotifier<bool>(false);
   bool _shareBrowserReady = false;
+  bool _shareMutationRunning = false;
 
   /// Spinner-only flag so soft directory refresh does not rebuild the file list.
   final ValueNotifier<bool> _shareLoading = ValueNotifier<bool>(false);
@@ -307,50 +310,65 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: 52,
-                        height: 52,
-                        decoration: BoxDecoration(
-                          color: AppTheme.primary.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12),
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onLongPress: () => _showShareEntryActions(
+                      args,
+                      currentPath: currentPath,
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 52,
+                          height: 52,
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(
+                            Icons.folder_shared,
+                            color: AppTheme.primary,
+                            size: 28,
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.folder_shared,
-                          color: AppTheme.primary,
-                          size: 28,
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              args.data.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppTheme.textDark,
-                                fontSize: 22,
-                                fontWeight: FontWeight.w600,
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                args.data.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppTheme.textDark,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              currentPath,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppTheme.textMedium,
-                                fontSize: 13,
+                              const SizedBox(height: 4),
+                              Text(
+                                currentPath,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppTheme.textMedium,
+                                  fontSize: 13,
+                                ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 2),
+                              const Text(
+                                '长按文件或文件夹可管理',
+                                style: TextStyle(
+                                  color: AppTheme.textLight,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 12),
                   ValueListenableBuilder<String>(
@@ -599,6 +617,11 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                                           : Icons.insert_drive_file,
                   title: entry.name,
                   subtitle: entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
+                  onLongPress: () => _showShareEntryActions(
+                    args,
+                    currentPath: currentPath,
+                    entry: entry,
+                  ),
                   onTap: () {
                     if (entry.isDirectory) {
                       _openSharePath(entry.path);
@@ -740,6 +763,279 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
       return normalized;
     }
     return normalized.substring(0, index);
+  }
+
+  Future<void> _showShareEntryActions(
+    ManagementDetailArgs args, {
+    required String currentPath,
+    UnraidFileEntry? entry,
+  }) async {
+    if (_shareMutationRunning) {
+      _showMessage('正在处理文件操作，请稍候');
+      return;
+    }
+
+    final createParent =
+        entry != null && entry.isDirectory ? entry.path : currentPath;
+    final action = await showModalBottomSheet<_ShareEntryAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        final targetLabel = entry == null ? '当前目录' : entry.name;
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: Text(
+                  targetLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: Text(
+                  entry == null
+                      ? currentPath
+                      : entry.isDirectory
+                          ? '文件夹'
+                          : '文件',
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.create_new_folder_outlined),
+                title: const Text('新建文件夹'),
+                subtitle: Text('创建于 $createParent'),
+                onTap: () => Navigator.of(sheetContext).pop(
+                  _ShareEntryAction.createFolder,
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.note_add_outlined),
+                title: const Text('新建空文件'),
+                subtitle: Text('创建于 $createParent'),
+                onTap: () => Navigator.of(sheetContext).pop(
+                  _ShareEntryAction.createFile,
+                ),
+              ),
+              if (entry != null) ...[
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.drive_file_rename_outline),
+                  title: const Text('重命名'),
+                  onTap: () => Navigator.of(sheetContext).pop(
+                    _ShareEntryAction.rename,
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.delete_outline),
+                  title: const Text('删除'),
+                  textColor: AppTheme.danger,
+                  iconColor: AppTheme.danger,
+                  onTap: () => Navigator.of(sheetContext).pop(
+                    _ShareEntryAction.delete,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted || action == null) {
+      return;
+    }
+
+    switch (action) {
+      case _ShareEntryAction.createFolder:
+        final name = await _promptShareEntryName(
+          title: '新建文件夹',
+          fieldLabel: '文件夹名称',
+        );
+        if (name == null || !mounted) {
+          return;
+        }
+        await _runShareMutation(
+          args,
+          currentPath: currentPath,
+          successMessage: '文件夹“$name”已创建',
+          operation: (client) => client.createDirectory(
+            parentPath: createParent,
+            name: name,
+          ),
+        );
+      case _ShareEntryAction.createFile:
+        final name = await _promptShareEntryName(
+          title: '新建空文件',
+          fieldLabel: '文件名称',
+        );
+        if (name == null || !mounted) {
+          return;
+        }
+        await _runShareMutation(
+          args,
+          currentPath: currentPath,
+          successMessage: '文件“$name”已创建',
+          operation: (client) => client.createFile(
+            parentPath: createParent,
+            name: name,
+          ),
+        );
+      case _ShareEntryAction.rename:
+        if (entry == null) {
+          return;
+        }
+        final name = await _promptShareEntryName(
+          title: '重命名',
+          fieldLabel: '新名称',
+          initialValue: entry.name,
+        );
+        if (name == null || name == entry.name || !mounted) {
+          return;
+        }
+        await _runShareMutation(
+          args,
+          currentPath: currentPath,
+          successMessage: '已重命名为“$name”',
+          operation: (client) => client.renamePath(
+            path: entry.path,
+            newName: name,
+          ),
+        );
+      case _ShareEntryAction.delete:
+        if (entry == null ||
+            !await _confirmDeleteShareEntry(entry) ||
+            !mounted) {
+          return;
+        }
+        await _runShareMutation(
+          args,
+          currentPath: currentPath,
+          successMessage: '“${entry.name}”已删除',
+          operation: (client) => client.deletePath(entry.path),
+        );
+    }
+  }
+
+  Future<String?> _promptShareEntryName({
+    required String title,
+    required String fieldLabel,
+    String initialValue = '',
+  }) async {
+    final controller = TextEditingController(text: initialValue);
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: initialValue.length,
+    );
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          decoration: InputDecoration(labelText: fieldLabel),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final name = result?.trim();
+    if (name == null) {
+      return null;
+    }
+    if (!_isValidShareEntryName(name)) {
+      _showMessage('名称不能为空，且不能包含 / 或 \\');
+      return null;
+    }
+    return name;
+  }
+
+  bool _isValidShareEntryName(String name) {
+    return name.isNotEmpty &&
+        name != '.' &&
+        name != '..' &&
+        !name.contains('/') &&
+        !name.contains(r'\') &&
+        !name.contains('\u0000');
+  }
+
+  Future<bool> _confirmDeleteShareEntry(UnraidFileEntry entry) async {
+    final isDirectory = entry.isDirectory;
+    return await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text('删除${isDirectory ? '文件夹' : '文件'}？'),
+            content: Text(
+              isDirectory
+                  ? '确定删除“${entry.name}”吗？文件夹内的所有文件和子文件夹都会被永久删除，此操作无法撤销。'
+                  : '确定删除“${entry.name}”吗？此操作无法撤销。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('确认删除'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _runShareMutation(
+    ManagementDetailArgs args, {
+    required String currentPath,
+    required String successMessage,
+    required Future<void> Function(UnraidClient client) operation,
+  }) async {
+    final client = args.unraidClient;
+    if (client == null) {
+      _showMessage('缺少服务器连接');
+      return;
+    }
+    if (_shareMutationRunning) {
+      _showMessage('正在处理文件操作，请稍候');
+      return;
+    }
+
+    _shareMutationRunning = true;
+    _shareLoading.value = true;
+    try {
+      await operation(client);
+      if (!mounted) {
+        return;
+      }
+      _showMessage(successMessage);
+      _openSharePath(currentPath, forceRefresh: true);
+    } on UnraidClientException catch (error) {
+      if (mounted) {
+        _shareLoading.value = false;
+        _showMessage(error.message);
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        _shareLoading.value = false;
+        _showMessage('文件操作失败：$error');
+      }
+    } finally {
+      _shareMutationRunning = false;
+    }
   }
 
   String _fileSubtitle(UnraidFileEntry entry) {

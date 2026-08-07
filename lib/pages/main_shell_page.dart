@@ -20,6 +20,8 @@ import '../widgets/fade_slide.dart';
 import '../widgets/gradient_button.dart';
 import '../widgets/phone_frame.dart';
 import '../widgets/server_icon.dart';
+import '../widgets/video_playback_controls.dart';
+import '../widgets/video_wake_lock.dart';
 import 'album_page.dart';
 import 'detail_page.dart';
 import 'music_page.dart';
@@ -484,4 +486,3 @@ class _MainShellPageState extends State<MainShellPage>
     );
   }
 }
-

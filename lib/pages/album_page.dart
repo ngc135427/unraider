@@ -13,6 +13,8 @@ import '../services/unraid_client.dart';
 import '../theme/app_theme.dart';
 import '../widgets/fade_slide.dart';
 import '../widgets/phone_frame.dart';
+import '../widgets/video_playback_controls.dart';
+import '../widgets/video_wake_lock.dart';
 
 part 'album_widgets.dart';
 part 'album_utils.dart';
@@ -947,4 +949,3 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     };
   }
 }
-
