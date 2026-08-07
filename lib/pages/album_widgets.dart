@@ -2140,9 +2140,19 @@ class _VideoPlayerScaffold extends StatelessWidget {
             aspectRatio: controller.value.aspectRatio == 0
                 ? 16 / 9
                 : controller.value.aspectRatio,
-            child: VideoWakeLock(
-              controller: controller,
-              child: VideoPlayer(controller),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onDoubleTap: () {
+                if (controller.value.isPlaying) {
+                  unawaited(controller.pause());
+                } else {
+                  unawaited(controller.play());
+                }
+              },
+              child: VideoWakeLock(
+                controller: controller,
+                child: VideoPlayer(controller),
+              ),
             ),
           ),
         ),

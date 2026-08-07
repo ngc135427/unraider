@@ -958,7 +958,7 @@ class _ShareVideoPlayer extends StatelessWidget {
               return Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: () {
+                  onDoubleTap: () {
                     if (value.isPlaying) {
                       unawaited(controller.pause());
                     } else {
