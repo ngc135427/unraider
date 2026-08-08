@@ -3,7 +3,7 @@
   "name": "photo-preview-gallery",
   "title": "远端图库预览与大图库浏览",
   "description": "缩略图、视频封面、磁盘缓存、时间线和文件夹浏览",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,8 +11,8 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-08-09",
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "已实现版本化 sidecar、图片/视频预览、磁盘 LRU 缓存、限流补图与持久索引分页。",
   "meta": {}
 }

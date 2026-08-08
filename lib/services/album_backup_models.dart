@@ -402,6 +402,34 @@ class AlbumDiscoveryCheckpoint {
   final String lastMediaStoreId;
 }
 
+class AlbumLogicalAlbum {
+  const AlbumLogicalAlbum({
+    required this.id,
+    required this.name,
+    required this.itemCount,
+    required this.createdAtMs,
+    required this.updatedAtMs,
+  });
+
+  final String id;
+  final String name;
+  final int itemCount;
+  final int createdAtMs;
+  final int updatedAtMs;
+}
+
+class AlbumDuplicateGroup {
+  const AlbumDuplicateGroup({
+    required this.sha256,
+    required this.sizeBytes,
+    required this.assets,
+  });
+
+  final String sha256;
+  final int sizeBytes;
+  final List<AlbumMediaAsset> assets;
+}
+
 class AlbumBackupException implements Exception {
   const AlbumBackupException(this.message);
 

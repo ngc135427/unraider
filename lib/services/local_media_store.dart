@@ -247,35 +247,70 @@ class LocalMediaStore {
     }
   }
 
-  static Future<Uint8List?> loadThumbnail(String uri) {
+  static Future<Uint8List?> loadThumbnail(String uri, {int size = 320}) {
     if (uri.isEmpty) {
       return Future<Uint8List?>.value();
     }
-    final cached = _thumbnailCache.remove(uri);
+    final cacheKey = '$uri|$size';
+    final cached = _thumbnailCache.remove(cacheKey);
     if (cached != null) {
       // LRU touch so hot local tiles outlive cold ones under the cap.
-      _thumbnailCache[uri] = cached;
+      _thumbnailCache[cacheKey] = cached;
       return cached;
     }
 
-    final future = _loadThumbnailUncached(uri);
+    final future = _loadThumbnailUncached(uri, size);
     if (_thumbnailCache.length >= _maxThumbnailCacheEntries) {
       _thumbnailCache.remove(_thumbnailCache.keys.first);
     }
-    _thumbnailCache[uri] = future;
+    _thumbnailCache[cacheKey] = future;
     return future;
   }
 
-  static Future<Uint8List?> _loadThumbnailUncached(String uri) async {
+  static Future<Uint8List?> _loadThumbnailUncached(String uri, int size) async {
     try {
       return await _channel.invokeMethod<Uint8List>('loadThumbnail', {
         'uri': uri,
-        'size': 320,
+        'size': size.clamp(64, 2048),
       });
     } on MissingPluginException {
       return null;
     } on PlatformException {
       return null;
+    }
+  }
+
+  static Future<String> sha256(String uri) async {
+    if (uri.isEmpty) throw const LocalMediaException('媒体 URI 为空');
+    try {
+      final value = await _channel.invokeMethod<String>('sha256', {'uri': uri});
+      if (value == null || value.isEmpty) {
+        throw const LocalMediaException('媒体哈希为空');
+      }
+      return value;
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '计算媒体哈希失败');
+    }
+  }
+
+  static Future<LocalMediaDeleteResult> deleteMedia(List<String> uris) async {
+    final unique = uris.where((uri) => uri.isNotEmpty).toSet().toList();
+    if (unique.isEmpty) {
+      return const LocalMediaDeleteResult(requested: 0, deleted: 0);
+    }
+    try {
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'deleteMedia',
+        {'uris': unique},
+      );
+      invalidateCaches();
+      return LocalMediaDeleteResult(
+        requested: (result?['requested'] as num?)?.toInt() ?? unique.length,
+        deleted: (result?['deleted'] as num?)?.toInt() ?? 0,
+        cancelled: result?['cancelled'] == true,
+      );
+    } on PlatformException catch (error) {
+      throw LocalMediaException(error.message ?? '删除媒体失败');
     }
   }
 
@@ -330,6 +365,18 @@ class LocalMediaStore {
       throw LocalMediaException(error.message ?? '读取媒体文件失败');
     }
   }
+}
+
+class LocalMediaDeleteResult {
+  const LocalMediaDeleteResult({
+    required this.requested,
+    required this.deleted,
+    this.cancelled = false,
+  });
+
+  final int requested;
+  final int deleted;
+  final bool cancelled;
 }
 
 String _mediaStoreIdFromStableId(String id) {

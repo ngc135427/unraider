@@ -3,7 +3,7 @@
   "name": "photo-management-basics",
   "title": "基础相册管理",
   "description": "逻辑相册、基础搜索、重复项复核与安全释放空间",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,8 +11,8 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-08-09",
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "已实现搜索筛选、逻辑相册、SHA-256 精确重复项复核及仅远端已验证原件的安全空间释放。",
   "meta": {}
 }

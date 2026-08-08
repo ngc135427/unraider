@@ -3,7 +3,7 @@
   "name": "photo-transfer-engine",
   "title": "高吞吐安全传输引擎",
   "description": "SMB/WebDAV 一级上传、SFTP 兼容与统一传输状态机",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,8 +11,8 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-08-09",
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "已实现 WebDAV/SMB 原生安全流式上传、SFTP 兜底、受控并发、退避、暂停/继续/取消和阶段指标。",
   "meta": {}
 }

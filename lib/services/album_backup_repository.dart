@@ -5,7 +5,7 @@ import 'album_backup_models.dart';
 import 'album_backup_path.dart';
 
 const albumBackupDatabaseName = 'album_backup_v1.db';
-const albumBackupDatabaseVersion = 1;
+const albumBackupDatabaseVersion = 2;
 
 class AlbumBackupRepository {
   AlbumBackupRepository._(this._database);
@@ -27,6 +27,7 @@ class AlbumBackupRepository {
         version: albumBackupDatabaseVersion,
         onConfigure: (database) => database.execute('PRAGMA foreign_keys = ON'),
         onCreate: _createSchema,
+        onUpgrade: _upgradeSchema,
       ),
     );
     return AlbumBackupRepository._(database);
@@ -165,6 +166,61 @@ class AlbumBackupRepository {
         last_media_store_id TEXT NOT NULL DEFAULT '',
         FOREIGN KEY(source_folder_id) REFERENCES source_folders(id)
       )
+    ''');
+    await _createManagementSchema(database);
+  }
+
+  static Future<void> _upgradeSchema(
+    Database database,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    if (oldVersion < 2) await _createManagementSchema(database);
+  }
+
+  static Future<void> _createManagementSchema(Database database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS logical_albums (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS logical_album_items (
+        album_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        added_at_ms INTEGER NOT NULL,
+        PRIMARY KEY(album_id, asset_id),
+        FOREIGN KEY(album_id) REFERENCES logical_albums(id) ON DELETE CASCADE,
+        FOREIGN KEY(asset_id) REFERENCES media_assets(id) ON DELETE CASCADE
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS asset_metadata (
+        asset_id TEXT PRIMARY KEY,
+        favorite INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        tags TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        rating INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER NOT NULL,
+        FOREIGN KEY(asset_id) REFERENCES media_assets(id) ON DELETE CASCADE
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS asset_hashes (
+        asset_id TEXT PRIMARY KEY,
+        version_key TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        FOREIGN KEY(asset_id) REFERENCES media_assets(id) ON DELETE CASCADE
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS asset_hashes_duplicates
+      ON asset_hashes(sha256)
     ''');
   }
 
@@ -596,6 +652,7 @@ class AlbumBackupRepository {
 
   Future<List<AlbumBackupRecord>> claimQueued({
     required String leaseOwner,
+    String? destinationId,
     int limit = 10,
     Duration leaseDuration = const Duration(minutes: 10),
     DateTime? now,
@@ -606,13 +663,16 @@ class AlbumBackupRepository {
     final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
     final expires = timestamp + leaseDuration.inMilliseconds;
     return _database.transaction((transaction) async {
+      final destinationClause =
+          destinationId == null ? '' : 'destination_id = ? AND ';
       final rows = await transaction.query(
         'backup_records',
-        where: '(state = ? OR '
+        where: '$destinationClause(state = ? OR '
             '(state = ? AND (next_retry_ms IS NULL OR next_retry_ms <= ?)) OR '
             '(state IN (?, ?) AND lease_expires_ms IS NOT NULL AND lease_expires_ms <= ?)) '
             'AND (lease_expires_ms IS NULL OR lease_expires_ms <= ?)',
         whereArgs: <Object?>[
+          if (destinationId != null) destinationId,
           AlbumBackupState.queued.name,
           AlbumBackupState.failed.name,
           timestamp,
@@ -709,6 +769,33 @@ class AlbumBackupRepository {
     });
   }
 
+  Future<int> requeueRetryable({
+    required String destinationId,
+    String? assetId,
+    DateTime? now,
+  }) {
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final assetClause = assetId == null ? '' : ' AND asset_id = ?';
+    return _database.update(
+      'backup_records',
+      <String, Object?>{
+        'state': AlbumBackupState.queued.name,
+        'next_retry_ms': null,
+        'last_error': null,
+        'lease_owner': null,
+        'lease_expires_ms': null,
+        'updated_at_ms': timestamp,
+      },
+      where: 'destination_id = ? AND state IN (?, ?)$assetClause',
+      whereArgs: <Object?>[
+        destinationId,
+        AlbumBackupState.failed.name,
+        AlbumBackupState.paused.name,
+        if (assetId != null) assetId,
+      ],
+    );
+  }
+
   Future<void> upsertRemoteAssets(List<AlbumRemoteAsset> assets) async {
     if (assets.isEmpty) {
       return;
@@ -724,6 +811,330 @@ class AlbumBackupRepository {
       }
       await batch.commit(noResult: true);
     });
+  }
+
+  Future<void> updateThumbnailState({
+    required String assetId,
+    required String destinationId,
+    required AlbumDerivedMediaState state,
+    required String versionKey,
+    String? thumbnailPath,
+    String? error,
+    DateTime? now,
+  }) async {
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    await _database.transaction((transaction) async {
+      await transaction.update(
+        'backup_records',
+        <String, Object?>{
+          'thumbnail_state': state.name,
+          'updated_at_ms': timestamp,
+        },
+        where: 'asset_id = ? AND destination_id = ?',
+        whereArgs: <Object?>[assetId, destinationId],
+      );
+      final rows = await transaction.query(
+        'backup_records',
+        columns: const <String>['remote_path'],
+        where: 'asset_id = ? AND destination_id = ?',
+        whereArgs: <Object?>[assetId, destinationId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final remotePath = rows.single['remote_path']! as String;
+      await transaction.insert(
+        'derived_media',
+        <String, Object?>{
+          'destination_id': destinationId,
+          'remote_path': remotePath,
+          'kind': 'thumbnail',
+          'version_key': versionKey,
+          'state': state.name,
+          'derived_path': thumbnailPath,
+          'last_error': error,
+          'updated_at_ms': timestamp,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      if (thumbnailPath != null) {
+        await transaction.update(
+          'remote_assets',
+          <String, Object?>{'thumbnail_path': thumbnailPath},
+          where: 'destination_id = ? AND path = ?',
+          whereArgs: <Object?>[destinationId, remotePath],
+        );
+      }
+    });
+  }
+
+  Future<List<AlbumMediaAsset>> searchMedia({
+    String query = '',
+    AlbumMediaKind? kind,
+    int? fromMs,
+    int? toMs,
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final clauses = <String>['missing_local = 0'];
+    final arguments = <Object?>[];
+    final normalized = query.trim();
+    if (normalized.isNotEmpty) {
+      clauses.add('(display_name LIKE ? ESCAPE \'\\\' OR '
+          'relative_path LIKE ? ESCAPE \'\\\' OR mime_type LIKE ?)');
+      final pattern =
+          '%${normalized.replaceAll('\\', r'\\').replaceAll('%', r'\%').replaceAll('_', r'\_')}%';
+      arguments.addAll(<Object?>[pattern, pattern, '%$normalized%']);
+    }
+    if (kind != null) {
+      clauses.add('media_kind = ?');
+      arguments.add(kind.name);
+    }
+    if (fromMs != null) {
+      clauses.add('COALESCE(capture_time_ms, date_modified_ms) >= ?');
+      arguments.add(fromMs);
+    }
+    if (toMs != null) {
+      clauses.add('COALESCE(capture_time_ms, date_modified_ms) <= ?');
+      arguments.add(toMs);
+    }
+    final rows = await _database.query(
+      'media_assets',
+      where: clauses.join(' AND '),
+      whereArgs: arguments,
+      orderBy: 'COALESCE(capture_time_ms, date_modified_ms) DESC, id DESC',
+      limit: limit.clamp(1, 500),
+      offset: offset < 0 ? 0 : offset,
+    );
+    return rows.map(AlbumMediaAsset.fromMap).toList(growable: false);
+  }
+
+  Future<List<AlbumLogicalAlbum>> listLogicalAlbums() async {
+    final rows = await _database.rawQuery('''
+      SELECT a.id, a.name, a.created_at_ms, a.updated_at_ms,
+             COUNT(i.asset_id) AS item_count
+      FROM logical_albums a
+      LEFT JOIN logical_album_items i ON i.album_id = a.id
+      GROUP BY a.id
+      ORDER BY a.updated_at_ms DESC, a.name COLLATE NOCASE
+    ''');
+    return rows
+        .map(
+          (row) => AlbumLogicalAlbum(
+            id: row['id']! as String,
+            name: row['name']! as String,
+            itemCount: row['item_count']! as int,
+            createdAtMs: row['created_at_ms']! as int,
+            updatedAtMs: row['updated_at_ms']! as int,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<AlbumLogicalAlbum> createLogicalAlbum(String name,
+      {DateTime? now}) async {
+    final normalized = name.trim();
+    if (normalized.isEmpty) {
+      throw const AlbumBackupException('相册名称不能为空');
+    }
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final id = 'album-${albumStableKey('$normalized:$timestamp')}';
+    await _database.insert('logical_albums', <String, Object?>{
+      'id': id,
+      'name': normalized,
+      'created_at_ms': timestamp,
+      'updated_at_ms': timestamp,
+    });
+    return AlbumLogicalAlbum(
+      id: id,
+      name: normalized,
+      itemCount: 0,
+      createdAtMs: timestamp,
+      updatedAtMs: timestamp,
+    );
+  }
+
+  Future<void> deleteLogicalAlbum(String albumId) async {
+    await _database.delete(
+      'logical_albums',
+      where: 'id = ?',
+      whereArgs: <Object?>[albumId],
+    );
+  }
+
+  Future<void> addAssetsToLogicalAlbum({
+    required String albumId,
+    required Iterable<String> assetIds,
+    DateTime? now,
+  }) async {
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    await _database.transaction((transaction) async {
+      final batch = transaction.batch();
+      for (final assetId in assetIds.toSet()) {
+        batch.insert(
+          'logical_album_items',
+          <String, Object?>{
+            'album_id': albumId,
+            'asset_id': assetId,
+            'added_at_ms': timestamp,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+      batch.update(
+        'logical_albums',
+        <String, Object?>{'updated_at_ms': timestamp},
+        where: 'id = ?',
+        whereArgs: <Object?>[albumId],
+      );
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<List<AlbumMediaAsset>> listLogicalAlbumAssets({
+    required String albumId,
+    int limit = 200,
+    int offset = 0,
+  }) async {
+    final rows = await _database.rawQuery('''
+      SELECT m.* FROM media_assets m
+      JOIN logical_album_items i ON i.asset_id = m.id
+      WHERE i.album_id = ? AND m.missing_local = 0
+      ORDER BY COALESCE(m.capture_time_ms, m.date_modified_ms) DESC, m.id DESC
+      LIMIT ? OFFSET ?
+    ''', <Object?>[albumId, limit.clamp(1, 500), offset < 0 ? 0 : offset]);
+    return rows.map(AlbumMediaAsset.fromMap).toList(growable: false);
+  }
+
+  Future<List<AlbumMediaAsset>> listPotentialDuplicateAssets({
+    int limit = 500,
+  }) async {
+    final rows = await _database.rawQuery('''
+      SELECT m.* FROM media_assets m
+      JOIN (
+        SELECT size_bytes FROM media_assets
+        WHERE missing_local = 0 AND size_bytes > 0
+        GROUP BY size_bytes HAVING COUNT(*) > 1
+      ) candidates ON candidates.size_bytes = m.size_bytes
+      WHERE m.missing_local = 0
+      ORDER BY m.size_bytes, m.id
+      LIMIT ?
+    ''', <Object?>[limit.clamp(2, 5000)]);
+    return rows.map(AlbumMediaAsset.fromMap).toList(growable: false);
+  }
+
+  Future<void> upsertAssetHash({
+    required String assetId,
+    required String versionKey,
+    required String sha256,
+    DateTime? now,
+  }) async {
+    await _database.insert(
+      'asset_hashes',
+      <String, Object?>{
+        'asset_id': assetId,
+        'version_key': versionKey,
+        'sha256': sha256,
+        'updated_at_ms': (now ?? DateTime.now()).millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<List<AlbumDuplicateGroup>> listDuplicateGroups() async {
+    final rows = await _database.rawQuery('''
+      SELECT m.*, h.sha256 FROM media_assets m
+      JOIN asset_hashes h ON h.asset_id = m.id
+      JOIN (
+        SELECT sha256 FROM asset_hashes GROUP BY sha256 HAVING COUNT(*) > 1
+      ) duplicate_hashes ON duplicate_hashes.sha256 = h.sha256
+      WHERE m.missing_local = 0 AND h.version_key =
+            (CAST(m.size_bytes AS TEXT) || ':' || CAST(m.date_modified_ms AS TEXT))
+      ORDER BY h.sha256, m.id
+    ''');
+    final grouped = <String, List<AlbumMediaAsset>>{};
+    for (final row in rows) {
+      grouped
+          .putIfAbsent(row['sha256']! as String, () => <AlbumMediaAsset>[])
+          .add(AlbumMediaAsset.fromMap(row));
+    }
+    return grouped.entries
+        .where((entry) => entry.value.length > 1)
+        .map(
+          (entry) => AlbumDuplicateGroup(
+            sha256: entry.key,
+            sizeBytes: entry.value.first.sizeBytes,
+            assets: List<AlbumMediaAsset>.unmodifiable(entry.value),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<List<AlbumMediaAsset>> listVerifiedLocalAssets(
+      {int limit = 500}) async {
+    final rows = await _database.rawQuery('''
+      SELECT DISTINCT m.* FROM media_assets m
+      JOIN backup_records b ON b.asset_id = m.id
+      WHERE m.missing_local = 0 AND b.state = 'completed'
+        AND b.remote_size = b.total_bytes AND b.remote_size = m.size_bytes
+      ORDER BY m.size_bytes DESC, m.id
+      LIMIT ?
+    ''', <Object?>[limit.clamp(1, 5000)]);
+    return rows.map(AlbumMediaAsset.fromMap).toList(growable: false);
+  }
+
+  Future<void> markAssetsMissing(Iterable<String> assetIds,
+      {DateTime? now}) async {
+    final ids = assetIds.toSet().toList(growable: false);
+    if (ids.isEmpty) return;
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    await _database.transaction((transaction) async {
+      for (var start = 0; start < ids.length; start += 400) {
+        final chunk = ids.sublist(start, (start + 400).clamp(0, ids.length));
+        final placeholders = List.filled(chunk.length, '?').join(',');
+        await transaction.rawUpdate(
+          'UPDATE media_assets SET missing_local=1, updated_at_ms=? '
+          'WHERE id IN ($placeholders)',
+          <Object?>[timestamp, ...chunk],
+        );
+        await transaction.rawUpdate(
+          'UPDATE backup_records SET state=?, last_error=?, updated_at_ms=? '
+          'WHERE asset_id IN ($placeholders)',
+          <Object?>[
+            AlbumBackupState.missingLocal.name,
+            '本地原件已由用户确认释放；远端已验证副本保留',
+            timestamp,
+            ...chunk,
+          ],
+        );
+      }
+    });
+  }
+
+  Future<void> updateAssetMetadata({
+    required String assetId,
+    bool favorite = false,
+    bool archived = false,
+    Iterable<String> tags = const <String>[],
+    String description = '',
+    int rating = 0,
+    DateTime? now,
+  }) async {
+    await _database.insert(
+      'asset_metadata',
+      <String, Object?>{
+        'asset_id': assetId,
+        'favorite': favorite ? 1 : 0,
+        'archived': archived ? 1 : 0,
+        'tags': tags
+            .map((tag) => tag.trim())
+            .where((tag) => tag.isNotEmpty)
+            .join(','),
+        'description': description.trim(),
+        'rating': rating.clamp(0, 5),
+        'updated_at_ms': (now ?? DateTime.now()).millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<int> markLegacyExistingAssets({

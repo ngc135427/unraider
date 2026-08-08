@@ -2,10 +2,15 @@ package com.ngc.unraider
 
 import android.content.Context
 import android.content.ContentUris
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
 import android.util.Size
 import com.hierynomus.msdtyp.AccessMask
@@ -24,17 +29,22 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileWriter
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.EnumSet
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
 import kotlin.system.exitProcess
 
 class MainActivity : AudioServiceActivity() {
     companion object {
         private const val LOG_TAG = "UnraiderLog"
+        private const val DELETE_MEDIA_REQUEST = 8427
         @Volatile private var uncaughtHandlerInstalled = false
     }
 
@@ -43,6 +53,8 @@ class MainActivity : AudioServiceActivity() {
     private var cachedSmbClient: SMBClient? = null
     private var cachedSmbConnection: Connection? = null
     private var cachedSmbShare: DiskShare? = null
+    private var pendingDeleteResult: MethodChannel.Result? = null
+    private var pendingDeleteUris: List<Uri> = emptyList()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -114,6 +126,9 @@ class MainActivity : AudioServiceActivity() {
                             "initialBackupMode" to preferences.getString("initialBackupMode", "all"),
                             "deviceId" to deviceId,
                             "deviceName" to preferences.getString("deviceName", Build.MODEL)!!,
+                            "wifiOnly" to preferences.getBoolean("wifiOnly", true),
+                            "chargingOnly" to preferences.getBoolean("chargingOnly", false),
+                            "transferConcurrency" to preferences.getInt("transferConcurrency", 2),
                         )
                     )
                 }
@@ -130,6 +145,9 @@ class MainActivity : AudioServiceActivity() {
                         .putString("initialBackupMode", call.argument<String>("initialBackupMode") ?: "all")
                         .putString("deviceId", call.argument<String>("deviceId") ?: "")
                         .putString("deviceName", call.argument<String>("deviceName") ?: Build.MODEL)
+                        .putBoolean("wifiOnly", call.argument<Boolean>("wifiOnly") ?: true)
+                        .putBoolean("chargingOnly", call.argument<Boolean>("chargingOnly") ?: false)
+                        .putInt("transferConcurrency", call.argument<Int>("transferConcurrency") ?: 2)
                         .apply()
                     result.success(null)
                 }
@@ -265,6 +283,60 @@ class MainActivity : AudioServiceActivity() {
                         }.start()
                     }
                 }
+                "sha256" -> {
+                    val uri = call.argument<String>("uri").orEmpty()
+                    if (uri.isBlank()) {
+                        result.error("invalid_arguments", "媒体 URI 为空", null)
+                    } else {
+                        Thread {
+                            try {
+                                val hash = sha256(uri)
+                                runOnUiThread { result.success(hash) }
+                            } catch (error: Exception) {
+                                runOnUiThread {
+                                    result.error("hash_failed", error.message ?: "计算哈希失败", null)
+                                }
+                            }
+                        }.start()
+                    }
+                }
+                "deleteMedia" -> {
+                    val uris = call.argument<List<String>>("uris")
+                        ?.mapNotNull { value -> value.takeIf { it.isNotBlank() }?.let(Uri::parse) }
+                        ?.distinct()
+                        .orEmpty()
+                    if (uris.isEmpty()) {
+                        result.success(mapOf("requested" to 0, "deleted" to 0))
+                    } else if (pendingDeleteResult != null) {
+                        result.error("delete_in_progress", "已有删除确认正在进行", null)
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        pendingDeleteResult = result
+                        pendingDeleteUris = uris
+                        val request = MediaStore.createDeleteRequest(contentResolver, uris)
+                        try {
+                            startIntentSenderForResult(
+                                request.intentSender,
+                                DELETE_MEDIA_REQUEST,
+                                null,
+                                0,
+                                0,
+                                0,
+                            )
+                        } catch (error: Exception) {
+                            pendingDeleteResult = null
+                            pendingDeleteUris = emptyList()
+                            result.error("delete_request_failed", error.message, null)
+                        }
+                    } else {
+                        Thread {
+                            var deleted = 0
+                            uris.forEach { uri -> deleted += contentResolver.delete(uri, null, null) }
+                            runOnUiThread {
+                                result.success(mapOf("requested" to uris.size, "deleted" to deleted))
+                            }
+                        }.start()
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -351,6 +423,109 @@ class MainActivity : AudioServiceActivity() {
                         }.start()
                     }
                 }
+                "uploadLocalMedia" -> {
+                    val transport = call.argument<String>("transport").orEmpty()
+                    val sourceUri = call.argument<String>("sourceUri").orEmpty()
+                    val expectedSize = (call.argument<Number>("expectedSize") ?: -1).toLong()
+                    if (sourceUri.isBlank() || expectedSize < 0) {
+                        result.error("invalid_arguments", "媒体上传参数不完整", null)
+                    } else {
+                        Thread {
+                            try {
+                                val response = when (transport.lowercase(Locale.ROOT)) {
+                                    "webdav" -> uploadLocalMediaWebDav(
+                                        sourceUri = sourceUri,
+                                        targetUrl = call.argument<String>("webDavUrl").orEmpty(),
+                                        token = call.argument<String>("webDavToken").orEmpty(),
+                                        expectedSize = expectedSize,
+                                        modifiedMs = (call.argument<Number>("modifiedMs") ?: 0).toLong(),
+                                    )
+                                    "smb" -> uploadLocalMediaSmb(
+                                        sourceUri = sourceUri,
+                                        host = call.argument<String>("host").orEmpty(),
+                                        username = call.argument<String>("username").orEmpty(),
+                                        password = call.argument<String>("password").orEmpty(),
+                                        shareName = call.argument<String>("share").orEmpty(),
+                                        relativePath = call.argument<String>("relativePath").orEmpty(),
+                                        expectedSize = expectedSize,
+                                        modifiedMs = (call.argument<Number>("modifiedMs") ?: 0).toLong(),
+                                    )
+                                    else -> throw IllegalArgumentException("不支持的上传渠道：$transport")
+                                }
+                                runOnUiThread { result.success(response) }
+                            } catch (error: Exception) {
+                                appendLogLine(
+                                    "${timestamp()} album_native_upload_error transport=$transport " +
+                                        Log.getStackTraceString(error)
+                                )
+                                runOnUiThread {
+                                    result.error(
+                                        "native_upload_failed",
+                                        error.message ?: "原生媒体上传失败",
+                                        null,
+                                    )
+                                }
+                            }
+                        }.start()
+                    }
+                }
+                "generateRemoteThumbnail" -> {
+                    val path = call.argument<String>("relativePath").orEmpty()
+                    val isVideo = call.argument<Boolean>("isVideo") == true
+                    val extent = (call.argument<Int>("extent") ?: 480).coerceIn(128, 1280)
+                    Thread {
+                        try {
+                            val bytes = generateRemoteThumbnail(
+                                host = call.argument<String>("host").orEmpty(),
+                                username = call.argument<String>("username").orEmpty(),
+                                password = call.argument<String>("password").orEmpty(),
+                                shareName = call.argument<String>("share").orEmpty(),
+                                relativePath = path,
+                                webDavUrl = call.argument<String>("webDavUrl").orEmpty(),
+                                webDavToken = call.argument<String>("webDavToken").orEmpty(),
+                                isVideo = isVideo,
+                                extent = extent,
+                            )
+                            runOnUiThread { result.success(bytes) }
+                        } catch (error: Exception) {
+                            appendLogLine(
+                                "${timestamp()} remote_thumbnail_error path=$path " +
+                                    Log.getStackTraceString(error)
+                            )
+                            runOnUiThread {
+                                result.error(
+                                    "thumbnail_failed",
+                                    error.message ?: "生成远端缩略图失败",
+                                    null,
+                                )
+                            }
+                        }
+                    }.start()
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "unraider/album_background"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "configure" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val values = call.arguments as? Map<String, Any?> ?: emptyMap()
+                    AlbumBackgroundScheduler.configure(applicationContext, values)
+                    result.success(null)
+                }
+                "runNow" -> {
+                    AlbumBackgroundScheduler.runNow(applicationContext, focused = true)
+                    result.success(null)
+                }
+                "cancel" -> {
+                    AlbumBackgroundScheduler.cancelFocused(applicationContext)
+                    result.success(null)
+                }
+                "status" -> result.success(AlbumBackgroundScheduler.status(applicationContext))
                 else -> result.notImplemented()
             }
         }
@@ -874,6 +1049,437 @@ class MainActivity : AudioServiceActivity() {
         }
         throw lastError ?: IllegalStateException("SMB range 读取失败")
     }
+
+    private fun sha256(uriText: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        contentResolver.openInputStream(Uri.parse(uriText)).use { input ->
+            requireNotNull(input) { "无法打开媒体文件" }
+            val buffer = ByteArray(1024 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+    }
+
+    private fun mediaExists(uri: Uri): Boolean = try {
+        contentResolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
+            ?.use { it.moveToFirst() } == true
+    } catch (_: Exception) {
+        false
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == DELETE_MEDIA_REQUEST) {
+            val result = pendingDeleteResult
+            val uris = pendingDeleteUris
+            pendingDeleteResult = null
+            pendingDeleteUris = emptyList()
+            if (result != null) {
+                if (resultCode == Activity.RESULT_OK) {
+                    Thread {
+                        val remaining = uris.count(::mediaExists)
+                        runOnUiThread {
+                            result.success(
+                                mapOf(
+                                    "requested" to uris.size,
+                                    "deleted" to uris.size - remaining,
+                                    "cancelled" to false,
+                                )
+                            )
+                        }
+                    }.start()
+                } else {
+                    result.success(
+                        mapOf("requested" to uris.size, "deleted" to 0, "cancelled" to true)
+                    )
+                }
+            }
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
+    }
+
+    private fun uploadLocalMediaSmb(
+        sourceUri: String,
+        host: String,
+        username: String,
+        password: String,
+        shareName: String,
+        relativePath: String,
+        expectedSize: Long,
+        modifiedMs: Long,
+    ): Map<String, Any?> {
+        require(host.isNotBlank() && username.isNotBlank() && shareName.isNotBlank()) {
+            "SMB 参数不完整"
+        }
+        val finalPath = relativePath.replace('/', '\\').trim('\\', '/')
+        require(finalPath.isNotBlank() && !finalPath.split('\\').any { it == ".." }) {
+            "SMB 目标路径无效"
+        }
+        val tempPath = "$finalPath.part-${UUID.randomUUID()}"
+        val started = System.nanoTime()
+        val config = SmbConfig.builder()
+            .withTimeout(30, TimeUnit.SECONDS)
+            .withSoTimeout(60, TimeUnit.SECONDS)
+            .build()
+        val auth = AuthenticationContext(username, password.toCharArray(), null)
+        val connectStarted = System.nanoTime()
+        val share = synchronized(smbCacheLock) {
+            getCachedSmbShare(
+                config = config,
+                host = host,
+                auth = auth,
+                shareName = shareName,
+                cacheKey = "$host\u0000$username\u0000${password.hashCode()}\u0000$shareName",
+            )
+        }
+        val connectMs = elapsedMs(connectStarted)
+        val prepareStarted = System.nanoTime()
+        ensureSmbDirectories(share, finalPath.substringBeforeLast('\\', ""))
+        if (share.fileExists(finalPath)) {
+            val existing = share.getFileInformation(finalPath).standardInformation.endOfFile
+            if (existing == expectedSize) {
+                return uploadResult(
+                    transport = "smb",
+                    remoteSize = existing,
+                    modifiedMs = modifiedMs,
+                    started = started,
+                    connectMs = connectMs,
+                    prepareMs = elapsedMs(prepareStarted),
+                )
+            }
+            throw IllegalStateException("目标文件已存在且大小不同")
+        }
+        val prepareMs = elapsedMs(prepareStarted)
+        val uploadStarted = System.nanoTime()
+        try {
+            share.openFile(
+                tempPath,
+                EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ),
+                EnumSet.noneOf(FileAttributes::class.java),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+            ).use { remoteFile ->
+                contentResolver.openInputStream(Uri.parse(sourceUri)).use { input ->
+                    requireNotNull(input) { "无法打开本机媒体" }
+                    remoteFile.outputStream.use { output -> input.copyTo(output, 1024 * 1024) }
+                }
+            }
+            val uploadMs = elapsedMs(uploadStarted)
+            val verifyStarted = System.nanoTime()
+            val remoteSize = share.getFileInformation(tempPath).standardInformation.endOfFile
+            if (remoteSize != expectedSize) {
+                throw IllegalStateException("SMB 上传大小校验失败：期望 $expectedSize，实际 $remoteSize")
+            }
+            val verifyMs = elapsedMs(verifyStarted)
+            val commitStarted = System.nanoTime()
+            share.openFile(
+                tempPath,
+                EnumSet.of(AccessMask.DELETE),
+                EnumSet.noneOf(FileAttributes::class.java),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OPEN,
+                EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+            ).use { it.rename(finalPath) }
+            val commitMs = elapsedMs(commitStarted)
+            return uploadResult(
+                transport = "smb",
+                remoteSize = remoteSize,
+                modifiedMs = modifiedMs,
+                started = started,
+                connectMs = connectMs,
+                prepareMs = prepareMs,
+                uploadMs = uploadMs,
+                verifyMs = verifyMs,
+                commitMs = commitMs,
+            )
+        } catch (error: Exception) {
+            try {
+                if (share.fileExists(tempPath)) share.rm(tempPath)
+            } catch (_: Exception) {
+                // A stale unique .part file is safe and can be removed later.
+            }
+            throw error
+        }
+    }
+
+    private fun generateRemoteThumbnail(
+        host: String,
+        username: String,
+        password: String,
+        shareName: String,
+        relativePath: String,
+        webDavUrl: String,
+        webDavToken: String,
+        isVideo: Boolean,
+        extent: Int,
+    ): ByteArray? {
+        fun openSource(): InputStream {
+            if (webDavUrl.isNotBlank() && webDavToken.isNotBlank()) {
+                val connection = openWebDav(URL(webDavUrl), "GET", webDavToken)
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    connection.disconnect()
+                    throw IllegalStateException("WebDAV 缩略图源返回 HTTP $code")
+                }
+                return connection.inputStream
+            }
+            require(host.isNotBlank() && shareName.isNotBlank() && relativePath.isNotBlank()) {
+                "远端缩略图参数不完整"
+            }
+            val config = SmbConfig.builder()
+                .withTimeout(30, TimeUnit.SECONDS)
+                .withSoTimeout(60, TimeUnit.SECONDS)
+                .build()
+            val auth = AuthenticationContext(username, password.toCharArray(), null)
+            val share = synchronized(smbCacheLock) {
+                getCachedSmbShare(
+                    config = config,
+                    host = host,
+                    auth = auth,
+                    shareName = shareName,
+                    cacheKey = "$host\u0000$username\u0000${password.hashCode()}\u0000$shareName",
+                )
+            }
+            val remote = share.openFile(
+                relativePath.replace('/', '\\').trim('\\', '/'),
+                EnumSet.of(AccessMask.GENERIC_READ),
+                EnumSet.noneOf(FileAttributes::class.java),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OPEN,
+                EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+            )
+            return object : InputStream() {
+                private val delegate = remote.inputStream
+                override fun read(): Int = delegate.read()
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                    delegate.read(buffer, offset, length)
+                override fun close() {
+                    try { delegate.close() } finally { remote.close() }
+                }
+            }
+        }
+
+        val bitmap = if (isVideo) {
+            val temp = File.createTempFile("unraider-preview-", ".video", cacheDir)
+            try {
+                openSource().use { input -> temp.outputStream().use { input.copyTo(it, 1024 * 1024) } }
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(temp.absolutePath)
+                    retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                } finally {
+                    retriever.release()
+                }
+            } finally {
+                temp.delete()
+            }
+        } else {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            openSource().use { BitmapFactory.decodeStream(it, null, bounds) }
+            var sample = 1
+            while (bounds.outWidth / sample > extent * 2 || bounds.outHeight / sample > extent * 2) {
+                sample *= 2
+            }
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            openSource().use { BitmapFactory.decodeStream(it, null, options) }
+        } ?: return null
+        val scaled = scaleBitmap(bitmap, extent)
+        return try {
+            ByteArrayOutputStream().use { stream ->
+                scaled.compress(Bitmap.CompressFormat.JPEG, 82, stream)
+                stream.toByteArray()
+            }
+        } finally {
+            if (scaled !== bitmap) scaled.recycle()
+            bitmap.recycle()
+        }
+    }
+
+    private fun scaleBitmap(bitmap: Bitmap, extent: Int): Bitmap {
+        val largest = maxOf(bitmap.width, bitmap.height)
+        if (largest <= extent) return bitmap
+        val scale = extent.toFloat() / largest.toFloat()
+        return Bitmap.createScaledBitmap(
+            bitmap,
+            maxOf(1, (bitmap.width * scale).toInt()),
+            maxOf(1, (bitmap.height * scale).toInt()),
+            true,
+        )
+    }
+
+    private fun ensureSmbDirectories(share: DiskShare, directory: String) {
+        if (directory.isBlank()) return
+        var current = ""
+        directory.split('\\').filter { it.isNotBlank() }.forEach { part ->
+            current = if (current.isEmpty()) part else "$current\\$part"
+            if (!share.folderExists(current)) share.mkdir(current)
+        }
+    }
+
+    private fun uploadLocalMediaWebDav(
+        sourceUri: String,
+        targetUrl: String,
+        token: String,
+        expectedSize: Long,
+        modifiedMs: Long,
+    ): Map<String, Any?> {
+        require(targetUrl.isNotBlank() && token.isNotBlank()) { "WebDAV 参数不完整" }
+        val finalUrl = URL(targetUrl)
+        val tempUrl = URL("$targetUrl.part-${UUID.randomUUID()}")
+        val started = System.nanoTime()
+        val prepareStarted = System.nanoTime()
+        ensureWebDavDirectories(finalUrl, token)
+        val existing = webDavHead(finalUrl, token)
+        if (existing.first in 200..299) {
+            if (existing.second == expectedSize) {
+                return uploadResult(
+                    transport = "webDav",
+                    remoteSize = expectedSize,
+                    modifiedMs = modifiedMs,
+                    started = started,
+                    prepareMs = elapsedMs(prepareStarted),
+                    etag = existing.third,
+                )
+            }
+            throw IllegalStateException("目标文件已存在且大小不同")
+        }
+        val prepareMs = elapsedMs(prepareStarted)
+        val uploadStarted = System.nanoTime()
+        try {
+            val connection = openWebDav(tempUrl, "PUT", token)
+            connection.doOutput = true
+            connection.setFixedLengthStreamingMode(expectedSize)
+            connection.setRequestProperty("Content-Type", "application/octet-stream")
+            contentResolver.openInputStream(Uri.parse(sourceUri)).use { input ->
+                requireNotNull(input) { "无法打开本机媒体" }
+                connection.outputStream.use { output -> input.copyTo(output, 1024 * 1024) }
+            }
+            val uploadCode = connection.responseCode
+            connection.disconnect()
+            if (uploadCode !in 200..299) {
+                throw IllegalStateException("WebDAV PUT 返回 HTTP $uploadCode")
+            }
+            val uploadMs = elapsedMs(uploadStarted)
+            val verifyStarted = System.nanoTime()
+            val head = webDavHead(tempUrl, token)
+            if (head.first !in 200..299 || head.second != expectedSize) {
+                throw IllegalStateException(
+                    "WebDAV 上传大小校验失败：期望 $expectedSize，实际 ${head.second}",
+                )
+            }
+            val verifyMs = elapsedMs(verifyStarted)
+            val commitStarted = System.nanoTime()
+            val move = openWebDav(tempUrl, "MOVE", token)
+            move.setRequestProperty("Destination", finalUrl.toString())
+            move.setRequestProperty("Overwrite", "F")
+            val moveCode = move.responseCode
+            move.disconnect()
+            if (moveCode !in 200..299) {
+                throw IllegalStateException("WebDAV 不支持安全 MOVE（HTTP $moveCode）")
+            }
+            val commitMs = elapsedMs(commitStarted)
+            val committed = webDavHead(finalUrl, token)
+            if (committed.second != expectedSize) {
+                throw IllegalStateException("WebDAV 提交后校验失败")
+            }
+            return uploadResult(
+                transport = "webDav",
+                remoteSize = expectedSize,
+                modifiedMs = modifiedMs,
+                started = started,
+                prepareMs = prepareMs,
+                uploadMs = uploadMs,
+                verifyMs = verifyMs,
+                commitMs = commitMs,
+                etag = committed.third,
+            )
+        } catch (error: Exception) {
+            try {
+                val delete = openWebDav(tempUrl, "DELETE", token)
+                delete.responseCode
+                delete.disconnect()
+            } catch (_: Exception) {
+                // A stale unique .part resource is safe and can be removed later.
+            }
+            throw error
+        }
+    }
+
+    private fun ensureWebDavDirectories(target: URL, token: String) {
+        val segments = target.path.split('/').filter { it.isNotBlank() }
+        if (segments.size <= 1) return
+        var path = ""
+        segments.dropLast(1).forEach { segment ->
+            path += "/$segment"
+            val url = URL(target.protocol, target.host, target.port, path)
+            val head = webDavHead(url, token)
+            if (head.first == HttpURLConnection.HTTP_NOT_FOUND) {
+                val mkdir = openWebDav(url, "MKCOL", token)
+                val code = mkdir.responseCode
+                mkdir.disconnect()
+                if (code !in 200..299 && code != HttpURLConnection.HTTP_CONFLICT) {
+                    throw IllegalStateException("WebDAV 创建目录失败（HTTP $code）")
+                }
+            }
+        }
+    }
+
+    private fun webDavHead(url: URL, token: String): Triple<Int, Long, String?> {
+        val connection = openWebDav(url, "HEAD", token)
+        val code = connection.responseCode
+        val length = connection.getHeaderFieldLong("Content-Length", -1L)
+        val etag = connection.getHeaderField("ETag")
+        connection.disconnect()
+        return Triple(code, length, etag)
+    }
+
+    private fun openWebDav(url: URL, method: String, token: String): HttpURLConnection {
+        return (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 20_000
+            readTimeout = 60_000
+            useCaches = false
+            setRequestProperty("Authorization", webDavAuthorization(token))
+            setRequestProperty("Accept-Encoding", "identity")
+        }
+    }
+
+    private fun webDavAuthorization(token: String): String {
+        val encoded = Base64.encodeToString("unraider:$token".toByteArray(), Base64.NO_WRAP)
+        return "Basic $encoded"
+    }
+
+    private fun elapsedMs(started: Long): Long =
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+    private fun uploadResult(
+        transport: String,
+        remoteSize: Long,
+        modifiedMs: Long,
+        started: Long,
+        connectMs: Long = 0,
+        prepareMs: Long = 0,
+        uploadMs: Long = 0,
+        verifyMs: Long = 0,
+        commitMs: Long = 0,
+        etag: String? = null,
+    ): Map<String, Any?> = mapOf(
+        "transport" to transport,
+        "remoteSize" to remoteSize,
+        "remoteModifiedMs" to modifiedMs,
+        "etag" to etag,
+        "elapsedMs" to elapsedMs(started),
+        "connectMs" to connectMs,
+        "prepareMs" to prepareMs,
+        "uploadMs" to uploadMs,
+        "verifyMs" to verifyMs,
+        "commitMs" to commitMs,
+    )
 
     private fun getCachedSmbShare(
         config: SmbConfig,

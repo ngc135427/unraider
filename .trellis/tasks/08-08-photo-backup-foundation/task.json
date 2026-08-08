@@ -3,7 +3,7 @@
   "name": "photo-backup-foundation",
   "title": "相册持久索引与文件夹映射",
   "description": "MediaStore 相对路径、持久化索引、任务队列与迁移基础",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
+  "completedAt": "2026-08-09",
   "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "持久索引、路径映射、队列迁移及 50,000 条资产分页回归测试已完成。",
   "meta": {}
 }

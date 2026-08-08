@@ -170,6 +170,9 @@ String _folderTargetPathFor({
       initialBackupMode: preferences.initialBackupMode,
       deviceId: preferences.deviceId,
       deviceName: preferences.deviceName,
+      wifiOnly: preferences.wifiOnly,
+      chargingOnly: preferences.chargingOnly,
+      transferConcurrency: preferences.transferConcurrency,
     ),
     buckets: buckets,
   );
@@ -209,15 +212,6 @@ String _relativePath(String base, String path) {
     return normalizedPath.substring(normalizedBase.length + 1);
   }
   return normalizedPath;
-}
-
-String _parentPath(String path) {
-  final normalized = _normalizeLocalPath(path);
-  final slash = normalized.lastIndexOf('/');
-  if (slash <= 0) {
-    return '/';
-  }
-  return normalized.substring(0, slash);
 }
 
 String _trimSlash(String path) {

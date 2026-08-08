@@ -42,6 +42,363 @@ class _AlbumHeader extends StatelessWidget {
   }
 }
 
+class _AlbumManagementPanel extends StatefulWidget {
+  const _AlbumManagementPanel({
+    required this.repository,
+    required this.onLibraryChanged,
+  });
+
+  final AlbumBackupRepository? repository;
+  final Future<void> Function() onLibraryChanged;
+
+  @override
+  State<_AlbumManagementPanel> createState() => _AlbumManagementPanelState();
+}
+
+class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
+  final TextEditingController _searchController = TextEditingController();
+  List<AlbumMediaAsset> _results = const <AlbumMediaAsset>[];
+  List<AlbumLogicalAlbum> _albums = const <AlbumLogicalAlbum>[];
+  List<AlbumDuplicateGroup> _duplicates = const <AlbumDuplicateGroup>[];
+  final Set<String> _selectedAssetIds = <String>{};
+  AlbumMediaKind? _kind;
+  bool _loading = false;
+  String? _message;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_reload());
+  }
+
+  @override
+  void didUpdateWidget(covariant _AlbumManagementPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.repository != widget.repository) unawaited(_reload());
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reload() async {
+    final repository = widget.repository;
+    if (repository == null) return;
+    setState(() => _loading = true);
+    try {
+      final values = await Future.wait<Object>([
+        repository.searchMedia(query: _searchController.text, kind: _kind),
+        repository.listLogicalAlbums(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _results = values[0] as List<AlbumMediaAsset>;
+        _albums = values[1] as List<AlbumLogicalAlbum>;
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _createAlbum() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('新建逻辑相册'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '相册名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+    await widget.repository?.createLogicalAlbum(name);
+    await _reload();
+  }
+
+  Future<void> _addSelectionToAlbum(AlbumLogicalAlbum album) async {
+    if (_selectedAssetIds.isEmpty) return;
+    await widget.repository?.addAssetsToLogicalAlbum(
+      albumId: album.id,
+      assetIds: _selectedAssetIds,
+    );
+    if (!mounted) return;
+    setState(() {
+      _message = '已将 ${_selectedAssetIds.length} 项加入“${album.name}”';
+      _selectedAssetIds.clear();
+    });
+    await _reload();
+  }
+
+  Future<void> _scanDuplicates() async {
+    final repository = widget.repository;
+    if (repository == null || _loading) return;
+    setState(() {
+      _loading = true;
+      _message = '正在计算候选文件 SHA-256…';
+    });
+    try {
+      final groups =
+          await AlbumManagementService(repository).scanExactDuplicates(
+        onProgress: (progress) {
+          if (!mounted) return;
+          setState(() {
+            _message = '重复项强校验 ${progress.completed}/${progress.total}';
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _duplicates = groups;
+        _message = groups.isEmpty ? '没有发现精确重复项' : '发现 ${groups.length} 组精确重复项';
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _releaseSpace() async {
+    final repository = widget.repository;
+    if (repository == null || _loading) return;
+    setState(() {
+      _loading = true;
+      _message = '正在核对远端已验证状态…';
+    });
+    try {
+      final service = AlbumManagementService(repository);
+      final preview = await service.freeSpacePreview();
+      if (!mounted) return;
+      if (preview.assets.isEmpty) {
+        setState(() => _message = '没有可安全释放的项目');
+        return;
+      }
+      final selected = preview.assets.map((asset) => asset.id).toSet();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('释放手机空间'),
+            content: SizedBox(
+              width: 520,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '仅列出远端原件大小已验证的媒体。已选 ${selected.length} 项，'
+                    '约 ${_formatManagementBytes(preview.assets.where((asset) => selected.contains(asset.id)).fold<int>(0, (sum, asset) => sum + asset.sizeBytes))}。',
+                  ),
+                  const SizedBox(height: 10),
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: preview.assets.length,
+                      itemBuilder: (context, index) {
+                        final asset = preview.assets[index];
+                        return CheckboxListTile(
+                          value: selected.contains(asset.id),
+                          title: Text(asset.displayName),
+                          subtitle: Text(
+                            '${asset.relativePath} · ${_formatManagementBytes(asset.sizeBytes)}',
+                          ),
+                          onChanged: (checked) {
+                            setDialogState(() {
+                              if (checked == true) {
+                                selected.add(asset.id);
+                              } else {
+                                selected.remove(asset.id);
+                              }
+                            });
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: selected.isEmpty
+                    ? null
+                    : () => Navigator.of(context).pop(true),
+                icon: const Icon(Icons.delete_sweep_outlined),
+                label: const Text('交由系统确认删除'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      final requested = preview.assets
+          .where((asset) => selected.contains(asset.id))
+          .toList(growable: false);
+      final result = await service.releaseVerifiedAssets(requested);
+      if (!mounted) return;
+      setState(() {
+        _message = result.cancelled
+            ? '用户取消了系统删除确认'
+            : '已释放 ${result.deleted}/${result.requested} 项';
+      });
+      if (result.deleted > 0) await widget.onLibraryChanged();
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.repository == null) {
+      return const Center(child: Text('相册索引不可用，无法打开管理功能'));
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
+      children: [
+        TextField(
+          controller: _searchController,
+          decoration: InputDecoration(
+            labelText: '按文件名、目录或媒体类型搜索',
+            prefixIcon: const Icon(Icons.search),
+            suffixIcon: IconButton(
+              onPressed: _reload,
+              icon: const Icon(Icons.arrow_forward),
+            ),
+          ),
+          textInputAction: TextInputAction.search,
+          onSubmitted: (_) => _reload(),
+        ),
+        const SizedBox(height: 10),
+        SegmentedButton<AlbumMediaKind?>(
+          segments: const [
+            ButtonSegment(value: null, label: Text('全部')),
+            ButtonSegment(value: AlbumMediaKind.image, label: Text('照片')),
+            ButtonSegment(value: AlbumMediaKind.video, label: Text('视频')),
+          ],
+          selected: <AlbumMediaKind?>{_kind},
+          onSelectionChanged: (value) {
+            setState(() => _kind = value.single);
+            unawaited(_reload());
+          },
+        ),
+        const SizedBox(height: 14),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: _loading ? null : _createAlbum,
+              icon: const Icon(Icons.create_new_folder_outlined),
+              label: const Text('新建逻辑相册'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _scanDuplicates,
+              icon: const Icon(Icons.content_copy_outlined),
+              label: const Text('复核重复项'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _releaseSpace,
+              icon: const Icon(Icons.cleaning_services_outlined),
+              label: const Text('安全释放空间'),
+            ),
+          ],
+        ),
+        if (_loading) ...[
+          const SizedBox(height: 12),
+          const LinearProgressIndicator(),
+        ],
+        if (_message != null) ...[
+          const SizedBox(height: 10),
+          Text(_message!, style: const TextStyle(color: AppTheme.textMedium)),
+        ],
+        if (_albums.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          const Text('逻辑相册', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          for (final album in _albums)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.photo_album_outlined),
+              title: Text(album.name),
+              subtitle: Text('${album.itemCount} 项 · 不复制原始文件'),
+              trailing: _selectedAssetIds.isEmpty
+                  ? null
+                  : TextButton(
+                      onPressed: () => _addSelectionToAlbum(album),
+                      child: const Text('加入所选'),
+                    ),
+            ),
+        ],
+        if (_duplicates.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          const Text('精确重复项', style: TextStyle(fontWeight: FontWeight.w700)),
+          for (final group in _duplicates)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.copy_all_outlined),
+              title: Text('${group.assets.length} 个字节级相同文件'),
+              subtitle: Text(
+                '${_formatManagementBytes(group.sizeBytes)} · SHA-256 ${group.sha256.substring(0, 12)}…\n'
+                '${group.assets.map((asset) => asset.displayName).join('、')}',
+              ),
+              isThreeLine: true,
+            ),
+        ],
+        const SizedBox(height: 18),
+        Text('搜索结果（${_results.length}）',
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        for (final asset in _results)
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _selectedAssetIds.contains(asset.id),
+            title: Text(asset.displayName),
+            subtitle: Text(
+              '${asset.relativePath} · ${asset.kind == AlbumMediaKind.video ? '视频' : '照片'} · '
+              '${_formatManagementBytes(asset.sizeBytes)}',
+            ),
+            onChanged: (checked) {
+              setState(() {
+                if (checked == true) {
+                  _selectedAssetIds.add(asset.id);
+                } else {
+                  _selectedAssetIds.remove(asset.id);
+                }
+              });
+            },
+          ),
+      ],
+    );
+  }
+}
+
+String _formatManagementBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).toStringAsFixed(0)} KB';
+}
+
 class _AlbumStats extends StatelessWidget {
   const _AlbumStats({
     required this.localPhotos,
@@ -154,6 +511,7 @@ class _AlbumTabs extends StatelessWidget {
       ),
       (_PhoAlbumTab.remote, Icons.cloud_outlined, '云端'),
       (_PhoAlbumTab.sync, Icons.sync, '同步'),
+      (_PhoAlbumTab.manage, Icons.collections_bookmark_outlined, '管理'),
       (_PhoAlbumTab.settings, Icons.tune, '设置'),
     ];
 
@@ -355,6 +713,9 @@ class _RemoteTimeline extends StatefulWidget {
     required this.entries,
     required this.gallery,
     required this.client,
+    required this.remoteRoot,
+    required this.hasMore,
+    required this.onLoadMore,
     required this.padding,
     this.error,
     this.onRetry,
@@ -363,6 +724,9 @@ class _RemoteTimeline extends StatefulWidget {
   final bool loading;
   final String? error;
   final UnraidClient? client;
+  final String remoteRoot;
+  final bool hasMore;
+  final VoidCallback onLoadMore;
   final List<UnraidFileEntry> entries;
 
   /// Full remote gallery used for swipe navigation.
@@ -430,6 +794,18 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
       sliver: SliverList(
         delegate: SliverChildBuilderDelegate(
           (context, index) {
+            if (index == sections.length) {
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Center(
+                  child: OutlinedButton.icon(
+                    onPressed: widget.loading ? null : widget.onLoadMore,
+                    icon: const Icon(Icons.expand_more),
+                    label: const Text('加载更多'),
+                  ),
+                ),
+              );
+            }
             final section = sections[index];
             final visible = section.items.length <= _maxAlbumSectionTiles
                 ? section.items
@@ -450,6 +826,7 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
                   const SizedBox(height: 10),
                   _RemoteGrid(
                     client: widget.client,
+                    remoteRoot: widget.remoteRoot,
                     items: visible,
                     gallery: widget.gallery,
                   ),
@@ -467,7 +844,7 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
               ),
             );
           },
-          childCount: sections.length,
+          childCount: sections.length + (widget.hasMore ? 1 : 0),
           addAutomaticKeepAlives: false,
         ),
       ),
@@ -483,7 +860,11 @@ class _SyncPanel extends StatelessWidget {
     required this.pendingCount,
     required this.uploadedCount,
     required this.syncing,
+    required this.paused,
+    required this.backgroundStatus,
     required this.onSync,
+    required this.onBackgroundSync,
+    required this.onPauseResume,
     required this.onCancel,
     required this.onSettings,
     this.message,
@@ -495,8 +876,12 @@ class _SyncPanel extends StatelessWidget {
   final int pendingCount;
   final int uploadedCount;
   final bool syncing;
+  final bool paused;
   final String? message;
+  final AlbumBackgroundStatus backgroundStatus;
   final VoidCallback onSync;
+  final VoidCallback onBackgroundSync;
+  final VoidCallback onPauseResume;
   final VoidCallback onCancel;
   final VoidCallback onSettings;
 
@@ -528,6 +913,16 @@ class _SyncPanel extends StatelessWidget {
             ('本机项目', '$localCount'),
             ('云端项目', '$remoteCount'),
             if (syncing) ('本轮已传', '$uploadedCount'),
+            ('后台阶段', backgroundStatus.stage),
+            if (backgroundStatus.lastSuccessMs > 0)
+              (
+                '最近成功',
+                DateTime.fromMillisecondsSinceEpoch(
+                  backgroundStatus.lastSuccessMs,
+                ).toLocal().toString().substring(0, 16),
+              ),
+            if (backgroundStatus.lastError.isNotEmpty)
+              ('后台诊断', backgroundStatus.lastError),
           ],
         ),
         const SizedBox(height: 14),
@@ -543,6 +938,12 @@ class _SyncPanel extends StatelessWidget {
             if (syncing) ...[
               const SizedBox(width: 12),
               OutlinedButton.icon(
+                onPressed: onPauseResume,
+                icon: Icon(paused ? Icons.play_arrow : Icons.pause),
+                label: Text(paused ? '继续' : '暂停'),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
                 onPressed: onCancel,
                 icon: const Icon(Icons.stop_circle_outlined),
                 label: const Text('取消'),
@@ -555,6 +956,15 @@ class _SyncPanel extends StatelessWidget {
               icon: const Icon(Icons.tune),
             ),
           ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: onBackgroundSync,
+            icon: const Icon(Icons.notifications_active_outlined),
+            label: const Text('启动前台集中备份'),
+          ),
         ),
       ],
     );
@@ -607,6 +1017,9 @@ class _SettingsPanelState extends State<_SettingsPanel> {
   Future<void> _save({
     bool? autoBackup,
     AlbumInitialBackupMode? initialBackupMode,
+    bool? wifiOnly,
+    bool? chargingOnly,
+    int? transferConcurrency,
   }) async {
     final target = _normalizeLocalPath(_targetController.text);
     if (target.isEmpty ||
@@ -628,6 +1041,10 @@ class _SettingsPanelState extends State<_SettingsPanel> {
             initialBackupMode ?? widget.preferences.initialBackupMode,
         deviceId: widget.preferences.deviceId,
         deviceName: widget.preferences.deviceName,
+        wifiOnly: wifiOnly ?? widget.preferences.wifiOnly,
+        chargingOnly: chargingOnly ?? widget.preferences.chargingOnly,
+        transferConcurrency:
+            transferConcurrency ?? widget.preferences.transferConcurrency,
       ),
     );
     if (!mounted) {
@@ -697,9 +1114,42 @@ class _SettingsPanelState extends State<_SettingsPanel> {
         SwitchListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 4),
           title: const Text('自动同步'),
-          subtitle: const Text('进入相册时上传新增照片和视频'),
+          subtitle: const Text('由系统后台发现并上传新增照片和视频'),
           value: widget.preferences.autoBackup,
           onChanged: (value) => _save(autoBackup: value),
+        ),
+        SwitchListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+          title: const Text('仅 Wi-Fi'),
+          subtitle: const Text('后台任务只在不计费网络下运行'),
+          value: widget.preferences.wifiOnly,
+          onChanged: (value) => _save(wifiOnly: value),
+        ),
+        SwitchListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+          title: const Text('仅充电时'),
+          subtitle: const Text('适合首次大批量备份'),
+          value: widget.preferences.chargingOnly,
+          onChanged: (value) => _save(chargingOnly: value),
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<int>(
+          initialValue: widget.preferences.transferConcurrency,
+          decoration: const InputDecoration(
+            labelText: '同一目标并发数',
+            prefixIcon: Icon(Icons.speed),
+          ),
+          items: const [
+            DropdownMenuItem(value: 1, child: Text('1（兼容）')),
+            DropdownMenuItem(value: 2, child: Text('2（推荐）')),
+            DropdownMenuItem(value: 3, child: Text('3')),
+            DropdownMenuItem(value: 4, child: Text('4')),
+          ],
+          onChanged: _saving
+              ? null
+              : (value) {
+                  if (value != null) _save(transferConcurrency: value);
+                },
         ),
         const SizedBox(height: 14),
         SizedBox(
@@ -761,11 +1211,13 @@ class _LocalGrid extends StatelessWidget {
 class _RemoteGrid extends StatelessWidget {
   const _RemoteGrid({
     required this.client,
+    required this.remoteRoot,
     required this.items,
     required this.gallery,
   });
 
   final UnraidClient? client;
+  final String remoteRoot;
   final List<UnraidFileEntry> items;
   final List<UnraidFileEntry> gallery;
 
@@ -785,6 +1237,7 @@ class _RemoteGrid extends StatelessWidget {
         return RepaintBoundary(
           child: _RemoteTile(
             client: client,
+            remoteRoot: remoteRoot,
             entry: entry,
             onTap: () => _openRemotePreview(
               context,
@@ -868,11 +1321,13 @@ class _LocalTileState extends State<_LocalTile> {
 class _RemoteTile extends StatefulWidget {
   const _RemoteTile({
     required this.client,
+    required this.remoteRoot,
     required this.entry,
     required this.onTap,
   });
 
   final UnraidClient? client;
+  final String remoteRoot;
   final UnraidFileEntry entry;
   final VoidCallback onTap;
 
@@ -893,6 +1348,7 @@ class _RemoteTileState extends State<_RemoteTile> {
   void didUpdateWidget(covariant _RemoteTile oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.entry.path != widget.entry.path ||
+        oldWidget.remoteRoot != widget.remoteRoot ||
         oldWidget.client != widget.client) {
       _bytesFuture = _loadThumbnail();
     }
@@ -901,46 +1357,26 @@ class _RemoteTileState extends State<_RemoteTile> {
   Future<Uint8List?> _loadThumbnail() {
     final client = widget.client;
     final entry = widget.entry;
-    if (client == null || entry.isVideo) {
+    if (client == null) {
       return Future<Uint8List?>.value();
     }
-    if (entry.sizeBytes > _maxAlbumPreviewBytes) {
-      return Future<Uint8List?>.value();
-    }
-
-    final cached = _remoteThumbnailCache.remove(entry.path);
-    if (cached != null) {
-      // LRU touch: reinsert so hot tiles outlive cold ones under the cap.
-      _remoteThumbnailCache[entry.path] = cached;
-      return cached;
-    }
-
-    final future = _withRemoteThumbnailSlot(() async {
-      try {
-        final bytes = await client.fetchFileBytes(entry.path);
-        if (bytes.isEmpty) {
-          return null;
-        }
-        return bytes;
-      } on Object {
-        return null;
-      }
-    });
-
-    if (_remoteThumbnailCache.length >= _maxRemoteThumbnailCacheEntries) {
-      _remoteThumbnailCache.remove(_remoteThumbnailCache.keys.first);
-    }
-    _remoteThumbnailCache[entry.path] = future;
-    return future;
+    final versionKey =
+        '${entry.sizeBytes}:${entry.modifiedDate?.millisecondsSinceEpoch ?? 0}';
+    return _albumPreviewCache.load(
+      client: client,
+      destinationId: albumDestinationId(widget.remoteRoot),
+      remoteRoot: widget.remoteRoot,
+      remotePath: entry.path,
+      versionKey: versionKey,
+      isVideo: entry.isVideo,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final entry = widget.entry;
     Widget child;
-    if (entry.isVideo || widget.client == null) {
-      child = _RemotePlaceholder(entry: entry);
-    } else if (entry.sizeBytes > _maxAlbumPreviewBytes) {
+    if (widget.client == null) {
       child = _RemotePlaceholder(entry: entry);
     } else {
       child = ClipRRect(
@@ -982,7 +1418,18 @@ class _RemoteTileState extends State<_RemoteTile> {
       child: InkWell(
         onTap: widget.onTap,
         borderRadius: BorderRadius.circular(8),
-        child: child,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            child,
+            if (entry.isVideo)
+              const Positioned(
+                right: 6,
+                bottom: 6,
+                child: _MediaBadge(icon: Icons.play_arrow),
+              ),
+          ],
+        ),
       ),
     );
   }

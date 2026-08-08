@@ -527,7 +527,7 @@ void main() {
     });
 
     test(
-      'stores ten thousand assets and returns bounded timeline pages',
+      'stores fifty thousand assets and returns bounded timeline pages',
       () async {
         final repository = await _openMemoryRepository();
         addTearDown(repository.close);
@@ -535,7 +535,7 @@ void main() {
         final sources =
             await repository.replaceSourceFolders(<AlbumSourceFolder>[source]);
         final assets = List<AlbumMediaAsset>.generate(
-          10000,
+          50000,
           (index) => _asset(
             id: 'external:image:$index',
             mediaStoreId: '$index',
@@ -555,7 +555,7 @@ void main() {
         expect(firstPage.map((asset) => asset.id).toSet(),
             isNot(contains(secondPage.first.id)));
         expect((await repository.countBackupStates())[AlbumBackupState.queued],
-            10000);
+            50000);
       },
       timeout: const Timeout(Duration(minutes: 2)),
     );

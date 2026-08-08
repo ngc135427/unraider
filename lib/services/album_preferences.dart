@@ -12,6 +12,9 @@ class AlbumBackupPreferences {
     this.initialBackupMode = AlbumInitialBackupMode.all,
     this.deviceId = 'local',
     this.deviceName = 'Android',
+    this.wifiOnly = true,
+    this.chargingOnly = false,
+    this.transferConcurrency = 2,
   });
 
   final bool autoBackup;
@@ -22,6 +25,9 @@ class AlbumBackupPreferences {
   final AlbumInitialBackupMode initialBackupMode;
   final String deviceId;
   final String deviceName;
+  final bool wifiOnly;
+  final bool chargingOnly;
+  final int transferConcurrency;
 
   List<String> get selectedSourceIds {
     if (sourceIds.isNotEmpty) {
@@ -59,6 +65,10 @@ class AlbumPreferences {
         deviceName: _asString(result['deviceName']).isEmpty
             ? 'Android'
             : _asString(result['deviceName']),
+        wifiOnly: result['wifiOnly'] != false,
+        chargingOnly: result['chargingOnly'] == true,
+        transferConcurrency:
+            ((result['transferConcurrency'] as num?)?.toInt() ?? 2).clamp(1, 4),
       );
     } on MissingPluginException {
       return const AlbumBackupPreferences();
@@ -78,6 +88,9 @@ class AlbumPreferences {
         'initialBackupMode': preferences.initialBackupMode.name,
         'deviceId': preferences.deviceId,
         'deviceName': preferences.deviceName,
+        'wifiOnly': preferences.wifiOnly,
+        'chargingOnly': preferences.chargingOnly,
+        'transferConcurrency': preferences.transferConcurrency,
       });
     } on MissingPluginException {
       return;

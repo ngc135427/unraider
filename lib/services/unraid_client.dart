@@ -22,6 +22,32 @@ class UnraidClientException implements Exception {
   String toString() => message;
 }
 
+class UnraidUploadResult {
+  const UnraidUploadResult({
+    required this.transport,
+    required this.remoteSize,
+    required this.elapsed,
+    this.remoteModifiedMs,
+    this.etag,
+    this.connect = Duration.zero,
+    this.prepare = Duration.zero,
+    this.upload = Duration.zero,
+    this.verify = Duration.zero,
+    this.commit = Duration.zero,
+  });
+
+  final String transport;
+  final int remoteSize;
+  final int? remoteModifiedMs;
+  final String? etag;
+  final Duration elapsed;
+  final Duration connect;
+  final Duration prepare;
+  final Duration upload;
+  final Duration verify;
+  final Duration commit;
+}
+
 class _WebDavReadException implements Exception {
   const _WebDavReadException(
     this.message, {
@@ -192,6 +218,16 @@ class UnraidWebGuiClient {
   _DashboardSegmentCache? _dashboardSegmentCache;
   Future<UnraidDashboard>? _dashboardInflight;
   bool _dashboardInflightForced = false;
+
+  Map<String, Object?> get albumBackgroundConfiguration => <String, Object?>{
+        'host': Uri.parse(baseUrl).host,
+        'username': username,
+        'password': _password,
+        'webDavEnabled': hasWebDavPreview,
+        'webDavUrl': _webDavUrl,
+        'webDavPrefix': _webDavPathPrefix,
+        'webDavToken': _webDavToken,
+      };
 
   Future<void> checkConnection() async {
     try {
@@ -1116,6 +1152,8 @@ class UnraidWebGuiClient {
     }
 
     final normalized = _normalizeUnraidPath(targetPath);
+    final temporary =
+        '$normalized.part-${DateTime.now().microsecondsSinceEpoch}';
     await ensureDirectory(_parentPath(normalized));
     try {
       await _runSftpTransfer(() async {
@@ -1124,7 +1162,7 @@ class UnraidWebGuiClient {
         try {
           final sftp = await _ensureSftpClient();
           file = await sftp.open(
-            normalized,
+            temporary,
             mode: SftpFileOpenMode.create |
                 SftpFileOpenMode.truncate |
                 SftpFileOpenMode.write,
@@ -1157,6 +1195,27 @@ class UnraidWebGuiClient {
           await file?.close();
         }
       }).timeout(fileTransferTimeout);
+      final verifiedSizeText = await _runSshCommand(
+        '校验上传文件',
+        'stat -c %s -- ${shellQuote(temporary)}',
+        timeout: httpTimeout,
+      );
+      final verifiedSize = int.tryParse(verifiedSizeText.trim());
+      if (verifiedSize != sizeBytes) {
+        throw UnraidClientException(
+          '上传大小校验失败（期望 $sizeBytes，实际 ${verifiedSize ?? '未知'}）',
+        );
+      }
+      await _runSshCommand(
+        '安全提交文件',
+        'if [ -e ${shellQuote(normalized)} ]; then '
+            'existing=\$(stat -c %s -- ${shellQuote(normalized)}); '
+            'if [ "\$existing" = "$sizeBytes" ]; then '
+            'rm -f -- ${shellQuote(temporary)}; exit 0; '
+            "else printf '%s\\n' '目标文件已存在且大小不同' >&2; exit 17; fi; "
+            'fi; mv -- ${shellQuote(temporary)} ${shellQuote(normalized)}',
+        timeout: httpTimeout,
+      );
       if (modifiedDate != null && modifiedDate.millisecondsSinceEpoch > 0) {
         await _runSshCommand(
           '保留文件时间',
@@ -1167,12 +1226,194 @@ class UnraidWebGuiClient {
       // Parent path invalidation also drops nested media-scan cache keys.
       _invalidateDirectoryCache(_parentPath(normalized));
     } on TimeoutException {
+      unawaited(_cleanupTemporaryUpload(temporary));
       throw const UnraidClientException('上传文件超时');
     } on UnraidClientException {
+      unawaited(_cleanupTemporaryUpload(temporary));
       rethrow;
     } on Object catch (error) {
+      unawaited(_cleanupTemporaryUpload(temporary));
       throw UnraidClientException('无法上传文件：$error');
     }
+  }
+
+  Future<void> _cleanupTemporaryUpload(String path) async {
+    try {
+      await _runSshCommand(
+        '清理临时上传文件',
+        'rm -f -- ${shellQuote(path)}',
+        timeout: probeTimeout,
+      );
+    } on Object {
+      // Stale .part files are safe and may be cleaned by a later repair pass.
+    }
+  }
+
+  Future<UnraidUploadResult> uploadLocalMediaSafely({
+    required String targetPath,
+    required String sourceUri,
+    required int sizeBytes,
+    DateTime? modifiedDate,
+  }) async {
+    final normalized = _normalizeUnraidPath(targetPath);
+    final stopwatch = Stopwatch()..start();
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final webDavUri = webDavFileUri(normalized);
+      if (webDavUri != null && _canAttemptWebDav(normalized)) {
+        try {
+          final result = await _uploadLocalMediaViaAndroid(
+            transport: 'webDav',
+            sourceUri: sourceUri,
+            targetPath: normalized,
+            sizeBytes: sizeBytes,
+            modifiedDate: modifiedDate,
+            webDavUri: webDavUri,
+          );
+          _invalidateDirectoryCache(_parentPath(normalized));
+          return result;
+        } on Object catch (error, stackTrace) {
+          _handleWebDavFailure(error);
+          await AppLogger.log(
+            'album_upload_webdav_fallback path=$normalized',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+      final smbPath = smbSharePathFromUnraidPath(normalized);
+      if (smbPath != null &&
+          !_androidSmbUnavailableShares.contains(smbPath.share)) {
+        try {
+          final result = await _uploadLocalMediaViaAndroid(
+            transport: 'smb',
+            sourceUri: sourceUri,
+            targetPath: normalized,
+            sizeBytes: sizeBytes,
+            modifiedDate: modifiedDate,
+            smbPath: smbPath,
+          );
+          _invalidateDirectoryCache(_parentPath(normalized));
+          return result;
+        } on Object catch (error, stackTrace) {
+          _androidSmbUnavailableShares.add(smbPath.share);
+          await AppLogger.log(
+            'album_upload_smb_fallback path=$normalized share=${smbPath.share}',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+    }
+
+    await uploadLocalMediaFile(
+      targetPath: normalized,
+      sourceUri: sourceUri,
+      sizeBytes: sizeBytes,
+      modifiedDate: modifiedDate,
+      chunkSize: 4 * 1024 * 1024,
+    );
+    stopwatch.stop();
+    return UnraidUploadResult(
+      transport: 'sftp',
+      remoteSize: sizeBytes,
+      remoteModifiedMs: modifiedDate?.millisecondsSinceEpoch,
+      elapsed: stopwatch.elapsed,
+      upload: stopwatch.elapsed,
+    );
+  }
+
+  Future<void> uploadBytesSafely({
+    required String targetPath,
+    required Uint8List bytes,
+  }) {
+    return uploadFile(
+      targetPath: targetPath,
+      sizeBytes: bytes.length,
+      chunkSize: 1024 * 1024,
+      readChunk: (offset, length) async {
+        if (offset >= bytes.length) return Uint8List(0);
+        final end = (offset + length).clamp(0, bytes.length);
+        return Uint8List.sublistView(bytes, offset, end);
+      },
+    );
+  }
+
+  Future<Uint8List?> generateAlbumThumbnail({
+    required String remotePath,
+    required bool isVideo,
+    int extent = 480,
+  }) async {
+    if (defaultTargetPlatform != TargetPlatform.android) return null;
+    final normalized = _normalizeUnraidPath(remotePath);
+    final webDavUri = webDavFileUri(normalized);
+    final smbPath = smbSharePathFromUnraidPath(normalized);
+    if (webDavUri == null && smbPath == null) return null;
+    try {
+      return await _remoteFileChannel.invokeMethod<Uint8List>(
+        'generateRemoteThumbnail',
+        <String, Object?>{
+          'host': Uri.parse(baseUrl).host,
+          'username': username,
+          'password': _password,
+          'isVideo': isVideo,
+          'extent': extent,
+          if (smbPath != null) 'share': smbPath.share,
+          if (smbPath != null) 'relativePath': smbPath.relativePath,
+          if (webDavUri != null) 'webDavUrl': webDavUri.toString(),
+          if (webDavUri != null) 'webDavToken': _webDavToken,
+        },
+      ).timeout(fileTransferTimeout);
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'album_thumbnail_generate_failed path=$normalized',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return null;
+    }
+  }
+
+  Future<UnraidUploadResult> _uploadLocalMediaViaAndroid({
+    required String transport,
+    required String sourceUri,
+    required String targetPath,
+    required int sizeBytes,
+    required DateTime? modifiedDate,
+    Uri? webDavUri,
+    SmbSharePath? smbPath,
+  }) async {
+    final result = await _remoteFileChannel
+        .invokeMapMethod<String, Object?>('uploadLocalMedia', <String, Object?>{
+      'transport': transport,
+      'sourceUri': sourceUri,
+      'targetPath': targetPath,
+      'expectedSize': sizeBytes,
+      'modifiedMs': modifiedDate?.millisecondsSinceEpoch ?? 0,
+      'host': Uri.parse(baseUrl).host,
+      'username': username,
+      'password': _password,
+      if (smbPath != null) 'share': smbPath.share,
+      if (smbPath != null) 'relativePath': smbPath.relativePath,
+      if (webDavUri != null) 'webDavUrl': webDavUri.toString(),
+      if (webDavUri != null) 'webDavToken': _webDavToken,
+    }).timeout(fileTransferTimeout);
+    if (result == null) {
+      throw UnraidClientException('$transport 上传没有返回结果');
+    }
+    Duration duration(String key) =>
+        Duration(milliseconds: (result[key] as num?)?.toInt() ?? 0);
+    return UnraidUploadResult(
+      transport: result['transport']?.toString() ?? transport,
+      remoteSize: (result['remoteSize'] as num?)?.toInt() ?? sizeBytes,
+      remoteModifiedMs: (result['remoteModifiedMs'] as num?)?.toInt(),
+      etag: result['etag']?.toString(),
+      elapsed: duration('elapsedMs'),
+      connect: duration('connectMs'),
+      prepare: duration('prepareMs'),
+      upload: duration('uploadMs'),
+      verify: duration('verifyMs'),
+      commit: duration('commitMs'),
+    );
   }
 
   /// Upload a local MediaStore item to Unraid over the shared SFTP session.

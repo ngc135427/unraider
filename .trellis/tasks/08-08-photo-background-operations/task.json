@@ -3,7 +3,7 @@
   "name": "photo-background-operations",
   "title": "相册后台备份与可观测性",
   "description": "WorkManager、前台集中备份、状态诊断与恢复",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,8 +11,8 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-08-09",
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,6 @@
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
   "relatedFiles": [],
-  "notes": "",
+  "notes": "已接入 WorkManager 增量发现与上传、网络/充电约束、前台通知、租约恢复及 UI 状态诊断。",
   "meta": {}
 }

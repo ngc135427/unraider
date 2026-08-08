@@ -10,7 +10,11 @@ import '../services/album_backup_discovery.dart';
 import '../services/album_backup_models.dart';
 import '../services/album_backup_path.dart';
 import '../services/album_backup_repository.dart';
+import '../services/album_background_service.dart';
+import '../services/album_management_service.dart';
+import '../services/album_transfer_engine.dart';
 import '../services/album_preferences.dart';
+import '../services/album_preview_cache.dart';
 import '../services/app_logger.dart';
 import '../services/local_media_store.dart';
 import '../services/media_cache.dart';
@@ -25,11 +29,7 @@ import '../widgets/video_wake_lock.dart';
 part 'album_widgets.dart';
 part 'album_utils.dart';
 
-/// Skip full-resolution remote downloads above this size for album *tiles*
-/// only — fullscreen stills stream to disk with no size ceiling.
-const _maxAlbumPreviewBytes = 8 * 1024 * 1024;
 const _maxAlbumFullscreenDecodeExtent = 2400;
-const _maxSyncBatchSize = 10;
 const _maxAlbumTileDecodeExtent = 480;
 
 // Compile-time rollback switches. Keep the legacy page path usable while the
@@ -37,7 +37,6 @@ const _maxAlbumTileDecodeExtent = 480;
 const _albumPersistentIndexEnabled = true;
 const _albumMultiSourceSelectionEnabled = true;
 const _albumLegacyImportEnabled = true;
-const _albumFolderMappingEnabled = true;
 
 /// Cap tiles per day-section so a huge day does not expand the outer ListView.
 const _maxAlbumSectionTiles = 60;
@@ -52,30 +51,7 @@ final Map<String, Future<File>> _remoteFullscreenFileCache =
     <String, Future<File>>{};
 const _maxRemoteFullscreenCacheEntries = 12;
 
-/// In-memory LRU-ish cache for remote album thumbnails within one process.
-final Map<String, Future<Uint8List?>> _remoteThumbnailCache =
-    <String, Future<Uint8List?>>{};
-const _maxRemoteThumbnailCacheEntries = 64;
-const _maxRemoteThumbnailInflight = 3;
-int _remoteThumbnailInflight = 0;
-final List<Completer<void>> _remoteThumbnailWaiters = <Completer<void>>[];
-
-Future<T> _withRemoteThumbnailSlot<T>(Future<T> Function() action) async {
-  while (_remoteThumbnailInflight >= _maxRemoteThumbnailInflight) {
-    final gate = Completer<void>();
-    _remoteThumbnailWaiters.add(gate);
-    await gate.future;
-  }
-  _remoteThumbnailInflight += 1;
-  try {
-    return await action();
-  } finally {
-    _remoteThumbnailInflight -= 1;
-    if (_remoteThumbnailWaiters.isNotEmpty) {
-      _remoteThumbnailWaiters.removeAt(0).complete();
-    }
-  }
-}
+final AlbumPreviewCache _albumPreviewCache = AlbumPreviewCache();
 
 class AlbumPageArgs {
   const AlbumPageArgs({
@@ -134,7 +110,7 @@ class AlbumBackupPage extends StatelessWidget {
   }
 }
 
-enum _PhoAlbumTab { local, remote, sync, settings }
+enum _PhoAlbumTab { local, remote, sync, manage, settings }
 
 class _AlbumSyncProgress {
   const _AlbumSyncProgress({
@@ -202,8 +178,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   late final ValueNotifier<_PhoAlbumTab> _tab =
       ValueNotifier<_PhoAlbumTab>(widget.initialTab);
   AlbumBackupPreferences _preferences = const AlbumBackupPreferences();
+  AlbumBackgroundStatus _backgroundStatus = AlbumBackgroundStatus.fromMap(null);
+  Timer? _backgroundStatusTimer;
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
+  static const _remotePageSize = 240;
+  int _remotePageOffset = 0;
+  bool _remoteHasMore = false;
+  bool _remoteLoadingMore = false;
   List<LocalMediaBucket> _buckets = const <LocalMediaBucket>[];
 
   /// Only build tab bodies after first visit so remote thumbnails are not
@@ -321,6 +303,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     _localState.dispose();
     _remoteState.dispose();
     _syncProgress.dispose();
+    _backgroundStatusTimer?.cancel();
     super.dispose();
   }
 
@@ -352,6 +335,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
       setState(() => _preferences = preferences);
+      await AlbumBackgroundService.configure(
+        client: args.unraidClient,
+        preferences: preferences,
+      );
+      final backgroundStatus = await AlbumBackgroundService.status();
+      if (mounted && generation == _loadGeneration) {
+        setState(() => _backgroundStatus = backgroundStatus);
+      }
 
       await _ensureBackupRepository();
 
@@ -465,13 +456,16 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         includeAudio: false,
         forceRefresh: forceRefresh,
       );
-      if (!mounted || generation != _loadGeneration) {
-        return;
-      }
-      setState(() {
-        _remoteMedia = remote;
-      });
       await _indexRemoteMedia(remote);
+      final page = _backupRepository == null
+          ? remote.take(_remotePageSize).toList(growable: false)
+          : await _readRemotePage(offset: 0);
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _remoteMedia = page;
+        _remotePageOffset = page.length;
+        _remoteHasMore = page.length == _remotePageSize;
+      });
       _remoteState.value = const _AlbumPaneState(loading: false);
     } on UnraidClientException catch (error) {
       if (!mounted || generation != _loadGeneration) {
@@ -519,6 +513,65 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     _syncProgress.value = current.copyWith(pendingCount: pending);
   }
 
+  Future<List<UnraidFileEntry>> _readRemotePage({required int offset}) async {
+    final repository = _backupRepository;
+    if (repository == null) {
+      return offset == 0
+          ? _remoteMedia.take(_remotePageSize).toList(growable: false)
+          : const <UnraidFileEntry>[];
+    }
+    final rows = await repository.listRemotePage(
+      destinationId: albumDestinationId(_preferences.targetDir),
+      limit: _remotePageSize,
+      offset: offset,
+    );
+    return rows
+        .map(
+          (asset) => UnraidFileEntry(
+            name: asset.displayName,
+            path: asset.path,
+            isDirectory: false,
+            sizeBytes: asset.sizeBytes,
+            size: _formatBytes(asset.sizeBytes),
+            modified: asset.modifiedMs <= 0
+                ? ''
+                : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs)
+                    .toLocal()
+                    .toString(),
+            modifiedDate: asset.modifiedMs <= 0
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> _loadMoreRemote() async {
+    if (!_remoteHasMore || _remoteLoadingMore) return;
+    _remoteLoadingMore = true;
+    try {
+      final page = await _readRemotePage(offset: _remotePageOffset);
+      if (!mounted) return;
+      setState(() {
+        _remoteMedia = <UnraidFileEntry>[..._remoteMedia, ...page];
+        _remotePageOffset += page.length;
+        _remoteHasMore = page.length == _remotePageSize;
+      });
+    } finally {
+      _remoteLoadingMore = false;
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  }
+
   List<LocalMediaAsset> get _pendingUploads {
     if (_backupIndexReady) {
       return _localMedia
@@ -549,212 +602,139 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
   int _syncGeneration = 0;
   bool _syncCancelRequested = false;
+  AlbumTransferEngine? _activeTransferEngine;
+  bool _syncPaused = false;
 
   void _cancelSync() {
     if (!_syncProgress.value.syncing) {
       return;
     }
     _syncCancelRequested = true;
+    _syncPaused = false;
+    _activeTransferEngine?.cancel();
     _syncProgress.value = _syncProgress.value.copyWith(
       message: '正在取消…',
     );
   }
 
-  Future<void> _syncPending() async {
+  void _toggleSyncPause() {
+    final engine = _activeTransferEngine;
+    if (engine == null) return;
+    setState(() => _syncPaused = !_syncPaused);
+    if (_syncPaused) {
+      engine.pause();
+      _syncProgress.value =
+          _syncProgress.value.copyWith(message: '已暂停；当前文件完成后停止领取新任务');
+    } else {
+      engine.resume();
+      _syncProgress.value = _syncProgress.value.copyWith(message: '正在继续备份…');
+    }
+  }
+
+  Future<void> _syncPending({bool forceRetry = false}) async {
     final client = _client;
-    if (client == null || _syncProgress.value.syncing) {
+    final repository = _backupRepository;
+    if (client == null || repository == null || _syncProgress.value.syncing) {
       return;
     }
 
     final generation = ++_syncGeneration;
     _syncCancelRequested = false;
-
-    var totalUploaded = 0;
-    var totalFailed = 0;
-    Object? lastError;
-    final ensuredDirs = <String>{};
-
+    _syncPaused = false;
     _syncProgress.value = _AlbumSyncProgress(
       syncing: true,
       uploadedCount: 0,
       pendingCount: _countPendingUploads(),
-      message: '准备同步',
+      message: '正在领取持久队列',
     );
 
     try {
-      // Drain the backlog in bounded batches so the UI stays responsive and
-      // remote listings refresh between waves.
-      while (
-          mounted && generation == _syncGeneration && !_syncCancelRequested) {
-        // Recompute pending each wave so successful uploads drop out.
-        final allPending = _pendingUploads;
-        if (allPending.isEmpty) {
-          break;
-        }
-        final pending =
-            allPending.take(_maxSyncBatchSize).toList(growable: false);
-        final remainingAfterBatch = allPending.length - pending.length;
-
-        _syncProgress.value = _syncProgress.value.copyWith(
-          pendingCount: allPending.length,
-          message: remainingAfterBatch > 0
-              ? '本批 ${pending.length} / 剩余 ${allPending.length}'
-              : '上传 ${pending.length} 个',
-        );
-
-        var batchUploaded = 0;
-        for (final asset in pending) {
-          if (!mounted ||
-              generation != _syncGeneration ||
-              _syncCancelRequested) {
-            break;
-          }
-          if (asset.uri.isEmpty) {
-            totalFailed += 1;
-            lastError = '媒体 URI 为空：${asset.name}';
-            continue;
-          }
-          final indexedRecord = _indexedRecordsByAsset[asset.id];
-          final targetPath = _albumFolderMappingEnabled
-              ? indexedRecord?.remotePath ??
-                  _folderTargetPathFor(
-                    targetDir: _preferences.targetDir,
-                    asset: asset,
-                    preferences: _preferences,
-                    buckets: _buckets,
-                  )
-              : _legacyDateTargetPathFor(_preferences.targetDir, asset);
-          final targetDir = _parentPath(targetPath);
-          if (ensuredDirs.add(targetDir)) {
-            _syncProgress.value = _syncProgress.value.copyWith(
-              message:
-                  '创建目录 ${_relativePath(_preferences.targetDir, targetDir)}',
-            );
-            await client.ensureDirectory(targetDir);
-          }
-
-          if (!mounted ||
-              generation != _syncGeneration ||
-              _syncCancelRequested) {
-            break;
-          }
-          _syncProgress.value = _syncProgress.value.copyWith(
-            message: '上传 ${totalUploaded + batchUploaded + 1}：${asset.name}',
+      final destinationId = albumDestinationId(_preferences.targetDir);
+      if (forceRetry) {
+        await repository.requeueRetryable(destinationId: destinationId);
+      }
+      final claimed = await repository.claimQueued(
+        leaseOwner:
+            'foreground-$generation-${DateTime.now().millisecondsSinceEpoch}',
+        destinationId: destinationId,
+        limit: 100,
+        leaseDuration: const Duration(minutes: 30),
+      );
+      final assets = <String, LocalMediaAsset>{
+        for (final asset in _localMedia) asset.id: asset,
+      };
+      final unavailable = claimed.where(
+        (record) => assets[record.assetId]?.uri.isNotEmpty != true,
+      );
+      await Future.wait(
+        unavailable.map(
+          (record) => repository.transitionBackupState(
+            assetId: record.assetId,
+            destinationId: record.destinationId,
+            state: AlbumBackupState.missingLocal,
+            error: '本地媒体已不存在或当前不可访问',
+          ),
+        ),
+      );
+      final jobs = claimed
+          .where((record) => assets[record.assetId]?.uri.isNotEmpty == true)
+          .map(
+            (record) => AlbumTransferJob(
+              record: record,
+              asset: assets[record.assetId]!,
+            ),
+          )
+          .toList(growable: false);
+      final engine = AlbumTransferEngine(
+        repository: repository,
+        client: client,
+        remoteRoot: _preferences.targetDir,
+        maxConcurrency: _preferences.transferConcurrency,
+        onProgress: (progress) {
+          if (!mounted || generation != _syncGeneration) return;
+          final speed = progress.bytesPerSecond <= 0
+              ? ''
+              : ' · ${_formatByteRate(progress.bytesPerSecond)}';
+          _syncProgress.value = _AlbumSyncProgress(
+            syncing: true,
+            uploadedCount: progress.completed,
+            pendingCount:
+                (progress.total - progress.completed - progress.failed)
+                    .clamp(0, progress.total),
+            message: progress.lastError != null
+                ? '部分失败：${progress.lastError}'
+                : '${progress.active} 个并发 · ${progress.currentName ?? '准备中'}$speed',
           );
-          try {
-            if (indexedRecord != null) {
-              await _backupRepository?.transitionBackupState(
-                assetId: asset.id,
-                destinationId: indexedRecord.destinationId,
-                state: AlbumBackupState.uploading,
-              );
-            }
-            await client.uploadLocalMediaFile(
-              targetPath: targetPath,
-              sourceUri: asset.uri,
-              sizeBytes: asset.sizeBytes,
-              modifiedDate: asset.dateModified,
-            );
-            if (indexedRecord != null) {
-              await _backupRepository?.transitionBackupState(
-                assetId: asset.id,
-                destinationId: indexedRecord.destinationId,
-                state: AlbumBackupState.verifying,
-                uploadedBytes: asset.sizeBytes,
-              );
-              await _backupRepository?.transitionBackupState(
-                assetId: asset.id,
-                destinationId: indexedRecord.destinationId,
-                state: AlbumBackupState.completed,
-                uploadedBytes: asset.sizeBytes,
-                remoteSize: asset.sizeBytes,
-                remoteModifiedMs: asset.dateModified.millisecondsSinceEpoch,
-              );
-              _indexedPendingAssetIds.remove(asset.id);
-              _indexedRecordsByAsset.remove(asset.id);
-            }
-            batchUploaded += 1;
-            totalUploaded += 1;
-          } on Object catch (error) {
-            if (indexedRecord != null) {
-              try {
-                await _backupRepository?.transitionBackupState(
-                  assetId: asset.id,
-                  destinationId: indexedRecord.destinationId,
-                  state: AlbumBackupState.failed,
-                  error: error.toString(),
-                  nextRetry: DateTime.now().add(const Duration(minutes: 1)),
-                );
-              } on Object catch (indexError) {
-                await AppLogger.log(
-                  'album_index_transition_error asset=${asset.id} '
-                  'error=$indexError',
-                );
-              }
-            }
-            totalFailed += 1;
-            lastError = error;
-            if (!mounted) {
-              return;
-            }
-            _syncProgress.value = _syncProgress.value.copyWith(
-              message: '跳过 ${asset.name}：$error',
-            );
-            await Future<void>.delayed(const Duration(milliseconds: 350));
-            continue;
-          }
-          if (!mounted) {
-            return;
-          }
-          _syncProgress.value = _syncProgress.value.copyWith(
-            uploadedCount: totalUploaded,
-            pendingCount: allPending.length - batchUploaded,
-          );
-        }
-
-        if (_syncCancelRequested) {
-          break;
-        }
-        // Stop when this wave uploaded nothing useful and failures remain —
-        // otherwise a permanent bad file would loop forever.
-        if (batchUploaded == 0) {
-          break;
-        }
-      }
-
-      if (!mounted || generation != _syncGeneration) {
-        return;
-      }
-      if (totalUploaded > 0) {
-        LocalMediaStore.invalidateCaches();
-        await _reloadRemote();
-      }
+        },
+      );
+      _activeTransferEngine = engine;
+      final result = await engine.run(jobs);
+      _activeTransferEngine = null;
+      _syncPaused = false;
+      await _refreshIndexedPending();
+      if (!mounted || generation != _syncGeneration) return;
       final stillPending = _countPendingUploads();
-      final cancelled = _syncCancelRequested;
+      final cancelled = _syncCancelRequested || result.cancelled;
       _syncCancelRequested = false;
       _syncProgress.value = _AlbumSyncProgress(
         syncing: false,
-        uploadedCount: totalUploaded,
+        uploadedCount: result.completed,
         pendingCount: stillPending,
         message: cancelled
-            ? '已取消：上传 $totalUploaded 个'
-                '${totalFailed > 0 ? '，失败 $totalFailed 个' : ''}'
-                '${stillPending > 0 ? '，剩余 $stillPending 个' : ''}'
-            : totalFailed > 0
-                ? '已上传 $totalUploaded 个，失败 $totalFailed 个'
-                    '${lastError == null ? '' : '（$lastError）'}'
-                    '${stillPending > 0 ? '，剩余 $stillPending 个' : ''}'
-                : stillPending > 0
-                    ? '已上传 $totalUploaded 个，剩余 $stillPending 个'
-                    : totalUploaded > 0
-                        ? '已上传 $totalUploaded 个照片/视频'
-                        : '已同步',
+            ? '已取消：完成 ${result.completed} 个，失败 ${result.failed} 个'
+            : result.failed > 0
+                ? '完成 ${result.completed} 个，失败 ${result.failed} 个，可稍后重试'
+                : jobs.isEmpty
+                    ? '当前没有到期的备份任务'
+                    : '已安全提交 ${result.completed} 个照片/视频',
       );
     } on Object catch (error) {
       if (!mounted || generation != _syncGeneration) {
         return;
       }
       _syncCancelRequested = false;
+      _activeTransferEngine = null;
+      _syncPaused = false;
       _syncProgress.value = _syncProgress.value.copyWith(
         syncing: false,
         message: '同步失败：$error',
@@ -762,13 +742,54 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     }
   }
 
+  String _formatByteRate(double bytesPerSecond) {
+    if (bytesPerSecond >= 1024 * 1024) {
+      return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(1)} MB/s';
+    }
+    return '${(bytesPerSecond / 1024).toStringAsFixed(0)} KB/s';
+  }
+
   Future<void> _savePreferences(AlbumBackupPreferences preferences) async {
     await AlbumPreferences.save(preferences);
+    final client = _client;
+    if (client != null) {
+      await AlbumBackgroundService.configure(
+        client: client,
+        preferences: preferences,
+      );
+    }
     if (!mounted) {
       return;
     }
     setState(() => _preferences = preferences);
     await _loadAll(runAutoSync: false);
+  }
+
+  Future<void> _runFocusedBackup() async {
+    final client = _client;
+    if (client == null) return;
+    await AlbumBackgroundService.configure(
+      client: client,
+      preferences: _preferences,
+    );
+    await AlbumBackgroundService.runNow();
+    _backgroundStatusTimer?.cancel();
+    _backgroundStatusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_refreshBackgroundStatus());
+    });
+    await _refreshBackgroundStatus();
+  }
+
+  Future<void> _refreshBackgroundStatus() async {
+    final status = await AlbumBackgroundService.status();
+    if (!mounted) return;
+    setState(() => _backgroundStatus = status);
+    if (const <String>{'completed', 'partial_failure', 'failed', 'blocked'}
+        .contains(status.stage)) {
+      _backgroundStatusTimer?.cancel();
+      _backgroundStatusTimer = null;
+      await _refreshIndexedPending();
+    }
   }
 
   Future<void> _chooseSource() async {
@@ -832,6 +853,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                           initialBackupMode: _preferences.initialBackupMode,
                           deviceId: _preferences.deviceId,
                           deviceName: _preferences.deviceName,
+                          wifiOnly: _preferences.wifiOnly,
+                          chargingOnly: _preferences.chargingOnly,
+                          transferConcurrency: _preferences.transferConcurrency,
                         ),
                       );
                     },
@@ -1150,6 +1174,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                     loading: remoteState.loading,
                     error: remoteState.error,
                     client: _client,
+                    remoteRoot: _preferences.targetDir,
+                    hasMore: _remoteHasMore,
+                    onLoadMore: _loadMoreRemote,
                     entries: _remoteMedia,
                     gallery: _remoteMedia,
                     onRetry: _reloadRemote,
@@ -1174,13 +1201,21 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                   uploadedCount: progress.uploadedCount,
                   syncing: progress.syncing,
                   message: progress.message,
-                  onSync: _syncPending,
+                  backgroundStatus: _backgroundStatus,
+                  paused: _syncPaused,
+                  onSync: () => _syncPending(forceRetry: true),
+                  onBackgroundSync: _runFocusedBackup,
+                  onPauseResume: _toggleSyncPause,
                   onCancel: _cancelSync,
                   onSettings: () => _selectTab(_PhoAlbumTab.settings),
                 );
               },
             ),
           ],
+        ),
+      _PhoAlbumTab.manage => _AlbumManagementPanel(
+          repository: _backupRepository,
+          onLibraryChanged: () => _loadAll(runAutoSync: false),
         ),
       _PhoAlbumTab.settings => ListView(
           padding: padding,
