@@ -28,6 +28,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.EnumSet
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
@@ -98,6 +99,11 @@ class MainActivity : AudioServiceActivity() {
 
             when (call.method) {
                 "load" -> {
+                    val deviceId = preferences.getString("deviceId", null)
+                        ?.takeIf { it.isNotBlank() }
+                        ?: UUID.randomUUID().toString().also { generated ->
+                            preferences.edit().putString("deviceId", generated).apply()
+                        }
                     result.success(
                         mapOf(
                             "targetDir" to preferences.getString("targetDir", "/mnt/user/photos/mobile"),
@@ -105,6 +111,9 @@ class MainActivity : AudioServiceActivity() {
                             "sourceIds" to preferences.getStringSet("sourceIds", emptySet())?.toList(),
                             "sourceName" to preferences.getString("sourceName", "本机所有照片"),
                             "autoBackup" to preferences.getBoolean("autoBackup", true),
+                            "initialBackupMode" to preferences.getString("initialBackupMode", "all"),
+                            "deviceId" to deviceId,
+                            "deviceName" to preferences.getString("deviceName", Build.MODEL)!!,
                         )
                     )
                 }
@@ -118,6 +127,9 @@ class MainActivity : AudioServiceActivity() {
                             call.argument<List<String>>("sourceIds")?.toSet() ?: emptySet()
                         )
                         .putString("sourceName", call.argument<String>("sourceName") ?: "本机所有照片")
+                        .putString("initialBackupMode", call.argument<String>("initialBackupMode") ?: "all")
+                        .putString("deviceId", call.argument<String>("deviceId") ?: "")
+                        .putString("deviceName", call.argument<String>("deviceName") ?: Build.MODEL)
                         .apply()
                     result.success(null)
                 }
@@ -190,12 +202,14 @@ class MainActivity : AudioServiceActivity() {
                 "listMedia" -> {
                     val limit = call.argument<Int>("limit") ?: 0
                     val bucketId = call.argument<String>("bucketId")
-                    result.success(listMedia(limit, bucketId))
+                    val modifiedAfterMs = call.argument<Number>("modifiedAfterMs")?.toLong()
+                    result.success(listMedia(limit, bucketId, modifiedAfterMs))
                 }
                 "listImages" -> {
                     val limit = call.argument<Int>("limit") ?: 0
                     val bucketId = call.argument<String>("bucketId")
-                    result.success(listMedia(limit, bucketId))
+                    val modifiedAfterMs = call.argument<Number>("modifiedAfterMs")?.toLong()
+                    result.success(listMedia(limit, bucketId, modifiedAfterMs))
                 }
                 "listBuckets" -> result.success(listBuckets())
                 "loadThumbnail" -> {
@@ -420,11 +434,15 @@ class MainActivity : AudioServiceActivity() {
         return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date())
     }
 
-    private fun listMedia(limit: Int, bucketId: String?): List<Map<String, Any?>> {
+    private fun listMedia(
+        limit: Int,
+        bucketId: String?,
+        modifiedAfterMs: Long? = null
+    ): List<Map<String, Any?>> {
         val items = mutableListOf<Map<String, Any?>>()
-        queryMedia(false, limit, bucketId, items)
+        queryMedia(false, limit, bucketId, modifiedAfterMs, items)
         if (limit <= 0 || items.size < limit) {
-            queryMedia(true, limit, bucketId, items)
+            queryMedia(true, limit, bucketId, modifiedAfterMs, items)
         }
         return items.sortedByDescending { (it["dateModifiedMs"] as? Long) ?: 0L }
     }
@@ -433,6 +451,7 @@ class MainActivity : AudioServiceActivity() {
         videos: Boolean,
         limit: Int,
         bucketId: String?,
+        modifiedAfterMs: Long?,
         items: MutableList<Map<String, Any?>>
     ) {
         val collection = if (videos) {
@@ -448,39 +467,112 @@ class MainActivity : AudioServiceActivity() {
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             }
         }
-        val projection = arrayOf(
+        val projection = mutableListOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.BUCKET_ID,
             MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.DATE_ADDED,
             MediaStore.MediaColumns.DATE_MODIFIED,
             MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.WIDTH,
+            MediaStore.MediaColumns.HEIGHT,
         )
-        val selection = if (!bucketId.isNullOrBlank()) "${MediaStore.MediaColumns.BUCKET_ID}=?" else null
-        val selectionArgs = if (!bucketId.isNullOrBlank()) arrayOf(bucketId) else null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            projection.add(MediaStore.MediaColumns.RELATIVE_PATH)
+        } else {
+            @Suppress("DEPRECATION")
+            projection.add(MediaStore.MediaColumns.DATA)
+        }
+        if (videos) {
+            projection.add(MediaStore.Video.Media.DATE_TAKEN)
+            projection.add(MediaStore.Video.Media.DURATION)
+        } else {
+            projection.add(MediaStore.Images.Media.DATE_TAKEN)
+            projection.add(MediaStore.Images.Media.ORIENTATION)
+        }
+
+        val selectionParts = mutableListOf<String>()
+        val selectionValues = mutableListOf<String>()
+        if (!bucketId.isNullOrBlank()) {
+            selectionParts.add("${MediaStore.MediaColumns.BUCKET_ID}=?")
+            selectionValues.add(bucketId)
+        }
+        if (modifiedAfterMs != null && modifiedAfterMs > 0) {
+            selectionParts.add("${MediaStore.MediaColumns.DATE_MODIFIED}>=?")
+            selectionValues.add((modifiedAfterMs / 1000L).toString())
+        }
+        val selection = selectionParts.takeIf { it.isNotEmpty() }?.joinToString(" AND ")
+        val selectionArgs = selectionValues.takeIf { it.isNotEmpty() }?.toTypedArray()
         val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
 
-        contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+        contentResolver.query(collection, projection.toTypedArray(), selection, selectionArgs, sortOrder)?.use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val bucketIdColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_ID)
             val bucketNameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+            val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+            val dateAddedColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
             val dateColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
             val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+            val widthColumn = cursor.getColumnIndex(MediaStore.MediaColumns.WIDTH)
+            val heightColumn = cursor.getColumnIndex(MediaStore.MediaColumns.HEIGHT)
+            val relativePathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+            } else {
+                @Suppress("DEPRECATION")
+                cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+            }
+            val captureTimeColumn = cursor.getColumnIndex(
+                if (videos) MediaStore.Video.Media.DATE_TAKEN else MediaStore.Images.Media.DATE_TAKEN
+            )
+            val durationColumn = if (videos) {
+                cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
+            } else {
+                -1
+            }
+            val orientationColumn = if (videos) {
+                -1
+            } else {
+                cursor.getColumnIndex(MediaStore.Images.Media.ORIENTATION)
+            }
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idColumn)
                 val uri = ContentUris.withAppendedId(collection, id)
+                val name = cursor.getString(nameColumn).orEmpty()
+                val volumeName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.getVolumeName(uri)
+                } else {
+                    "external"
+                }
+                val relativePath = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getString(relativePathColumn).orEmpty()
+                } else {
+                    legacyRelativePath(cursor.getString(relativePathColumn), name)
+                }
+                val addedMs = cursor.getLong(dateAddedColumn) * 1000L
                 val modifiedMs = cursor.getLong(dateColumn) * 1000
                 items.add(
                     mapOf(
-                        "id" to (if (videos) "video:" else "image:") + id.toString(),
+                        "id" to "$volumeName:${if (videos) "video" else "image"}:$id",
+                        "mediaStoreId" to id.toString(),
                         "uri" to uri.toString(),
-                        "name" to cursor.getString(nameColumn),
-                        "bucketId" to cursor.getString(bucketIdColumn),
-                        "bucketName" to cursor.getString(bucketNameColumn),
+                        "name" to name,
+                        "bucketId" to cursor.getString(bucketIdColumn).orEmpty(),
+                        "bucketName" to cursor.getString(bucketNameColumn).orEmpty(),
+                        "volumeName" to volumeName,
+                        "relativePath" to relativePath,
+                        "mimeType" to cursor.getString(mimeColumn).orEmpty(),
+                        "dateAddedMs" to addedMs,
                         "dateModifiedMs" to modifiedMs,
+                        "captureTimeMs" to if (captureTimeColumn >= 0) cursor.getLong(captureTimeColumn) else 0L,
                         "sizeBytes" to cursor.getLong(sizeColumn),
                         "isVideo" to videos,
+                        "width" to if (widthColumn >= 0) cursor.getInt(widthColumn) else 0,
+                        "height" to if (heightColumn >= 0) cursor.getInt(heightColumn) else 0,
+                        "durationMs" to if (durationColumn >= 0) cursor.getLong(durationColumn) else 0L,
+                        "orientation" to if (orientationColumn >= 0) cursor.getInt(orientationColumn) else 0,
                     )
                 )
                 if (limit > 0 && items.size >= limit) break
@@ -490,15 +582,40 @@ class MainActivity : AudioServiceActivity() {
 
     private fun listBuckets(): List<Map<String, Any?>> {
         val buckets = linkedMapOf<String, MutableMap<String, Any?>>()
-        for (item in listMedia(0, null)) {
+        for (item in listMedia(0, null, null)) {
             val id = item["bucketId"]?.toString() ?: continue
             val name = item["bucketName"]?.toString() ?: "本机相册"
             val existing = buckets.getOrPut(id) {
-                mutableMapOf("id" to id, "name" to name, "count" to 0)
+                mutableMapOf(
+                    "id" to id,
+                    "name" to name,
+                    "count" to 0,
+                    "volumeName" to (item["volumeName"]?.toString() ?: "external"),
+                    "relativePath" to (item["relativePath"]?.toString() ?: ""),
+                )
             }
             existing["count"] = (existing["count"] as Int) + 1
         }
         return buckets.values.sortedByDescending { it["count"] as Int }
+    }
+
+    private fun legacyRelativePath(fullPath: String?, displayName: String): String {
+        val normalized = fullPath.orEmpty().replace('\\', '/')
+        val withoutName = if (displayName.isNotBlank() && normalized.endsWith("/$displayName")) {
+            normalized.removeSuffix(displayName)
+        } else {
+            normalized.substringBeforeLast('/', "") + "/"
+        }
+        val knownPrefixes = listOf(
+            "/storage/emulated/0/",
+            "/storage/self/primary/",
+            "/sdcard/",
+        )
+        val relative = knownPrefixes.firstNotNullOfOrNull { prefix ->
+            withoutName.takeIf { it.startsWith(prefix, ignoreCase = true) }
+                ?.removePrefix(prefix)
+        } ?: withoutName.trimStart('/')
+        return if (relative.isBlank()) "" else relative.trim('/') + "/"
     }
 
     private fun loadThumbnail(uriText: String, size: Int): ByteArray? {

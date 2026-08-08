@@ -6,7 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 
+import '../services/album_backup_discovery.dart';
+import '../services/album_backup_models.dart';
+import '../services/album_backup_path.dart';
+import '../services/album_backup_repository.dart';
 import '../services/album_preferences.dart';
+import '../services/app_logger.dart';
 import '../services/local_media_store.dart';
 import '../services/media_cache.dart';
 import '../services/remote_video_stream.dart';
@@ -26,6 +31,14 @@ const _maxAlbumPreviewBytes = 8 * 1024 * 1024;
 const _maxAlbumFullscreenDecodeExtent = 2400;
 const _maxSyncBatchSize = 10;
 const _maxAlbumTileDecodeExtent = 480;
+
+// Compile-time rollback switches. Keep the legacy page path usable while the
+// persistent index, multi-source selection, and legacy import mature.
+const _albumPersistentIndexEnabled = true;
+const _albumMultiSourceSelectionEnabled = true;
+const _albumLegacyImportEnabled = true;
+const _albumFolderMappingEnabled = true;
+
 /// Cap tiles per day-section so a huge day does not expand the outer ListView.
 const _maxAlbumSectionTiles = 60;
 
@@ -192,23 +205,32 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
   List<LocalMediaBucket> _buckets = const <LocalMediaBucket>[];
+
   /// Only build tab bodies after first visit so remote thumbnails are not
   /// downloaded while the user is still on the local tab.
   late final Set<_PhoAlbumTab> _visitedTabs = <_PhoAlbumTab>{widget.initialTab};
+
   /// Bumped when a lazy album tab is first visited.
   final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
   bool _loadingAll = false;
   int _loadGeneration = 0;
+
   /// Local/remote loading banners are isolated so one side finishing does not
   /// rebuild the other timeline body.
   final ValueNotifier<_AlbumPaneState> _localState =
       ValueNotifier<_AlbumPaneState>(const _AlbumPaneState());
   final ValueNotifier<_AlbumPaneState> _remoteState =
       ValueNotifier<_AlbumPaneState>(const _AlbumPaneState());
+
   /// Sync progress is published separately so per-file updates do not rebuild
   /// the local/remote timeline tabs.
   final ValueNotifier<_AlbumSyncProgress> _syncProgress =
       ValueNotifier<_AlbumSyncProgress>(const _AlbumSyncProgress());
+  AlbumBackupRepository? _backupRepository;
+  bool _backupIndexReady = false;
+  Set<String> _indexedPendingAssetIds = <String>{};
+  Map<String, AlbumBackupRecord> _indexedRecordsByAsset =
+      <String, AlbumBackupRecord>{};
 
   // Memoized visible-media projection for stats + tab bodies.
   List<LocalMediaAsset>? _visibleSourceRef;
@@ -290,6 +312,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
   @override
   void dispose() {
+    final repository = _backupRepository;
+    if (repository != null) {
+      unawaited(repository.close());
+    }
     _tab.dispose();
     _visitedTabsVersion.dispose();
     _localState.dispose();
@@ -327,6 +353,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
       setState(() => _preferences = preferences);
 
+      await _ensureBackupRepository();
+
       // Manual refresh (runAutoSync: false) should bypass short caches.
       final forceRefresh = !runAutoSync;
       if (forceRefresh) {
@@ -345,6 +373,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         ),
       ]);
 
+      await _adoptLegacyBackupMatches();
+
       if (!mounted || generation != _loadGeneration) {
         return;
       }
@@ -352,7 +382,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       final current = _syncProgress.value;
       _syncProgress.value = current.copyWith(pendingCount: pending);
 
-      if (preferences.autoBackup && runAutoSync && _localState.value.error == null) {
+      if (preferences.autoBackup &&
+          runAutoSync &&
+          _localState.value.error == null) {
         unawaited(_syncPending());
       }
     } finally {
@@ -380,6 +412,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
 
+      final fullScan = await _hasCompleteMediaAccess();
       final results = await Future.wait<Object>([
         LocalMediaStore.listMedia(),
         LocalMediaStore.listBuckets(),
@@ -391,6 +424,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         _localMedia = results[0] as List<LocalMediaAsset>;
         _buckets = results[1] as List<LocalMediaBucket>;
       });
+      await _reconcileBackupIndex(fullScan: fullScan);
       _localState.value = const _AlbumPaneState(loading: false);
     } on LocalMediaException catch (error) {
       if (!mounted || generation != _loadGeneration) {
@@ -437,6 +471,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       setState(() {
         _remoteMedia = remote;
       });
+      await _indexRemoteMedia(remote);
       _remoteState.value = const _AlbumPaneState(loading: false);
     } on UnraidClientException catch (error) {
       if (!mounted || generation != _loadGeneration) {
@@ -485,6 +520,11 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   }
 
   List<LocalMediaAsset> get _pendingUploads {
+    if (_backupIndexReady) {
+      return _localMedia
+          .where((asset) => _indexedPendingAssetIds.contains(asset.id))
+          .toList(growable: false);
+    }
     final sourceIds = _preferences.selectedSourceIds;
     if (identical(_pendingLocalRef, _localMedia) &&
         identical(_pendingRemoteRef, _remoteMedia) &&
@@ -544,9 +584,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     try {
       // Drain the backlog in bounded batches so the UI stays responsive and
       // remote listings refresh between waves.
-      while (mounted &&
-          generation == _syncGeneration &&
-          !_syncCancelRequested) {
+      while (
+          mounted && generation == _syncGeneration && !_syncCancelRequested) {
         // Recompute pending each wave so successful uploads drop out.
         final allPending = _pendingUploads;
         if (allPending.isEmpty) {
@@ -575,7 +614,16 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             lastError = '媒体 URI 为空：${asset.name}';
             continue;
           }
-          final targetPath = _targetPathFor(_preferences.targetDir, asset);
+          final indexedRecord = _indexedRecordsByAsset[asset.id];
+          final targetPath = _albumFolderMappingEnabled
+              ? indexedRecord?.remotePath ??
+                  _folderTargetPathFor(
+                    targetDir: _preferences.targetDir,
+                    asset: asset,
+                    preferences: _preferences,
+                    buckets: _buckets,
+                  )
+              : _legacyDateTargetPathFor(_preferences.targetDir, asset);
           final targetDir = _parentPath(targetPath);
           if (ensuredDirs.add(targetDir)) {
             _syncProgress.value = _syncProgress.value.copyWith(
@@ -591,19 +639,59 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             break;
           }
           _syncProgress.value = _syncProgress.value.copyWith(
-            message:
-                '上传 ${totalUploaded + batchUploaded + 1}：${asset.name}',
+            message: '上传 ${totalUploaded + batchUploaded + 1}：${asset.name}',
           );
           try {
+            if (indexedRecord != null) {
+              await _backupRepository?.transitionBackupState(
+                assetId: asset.id,
+                destinationId: indexedRecord.destinationId,
+                state: AlbumBackupState.uploading,
+              );
+            }
             await client.uploadLocalMediaFile(
               targetPath: targetPath,
               sourceUri: asset.uri,
               sizeBytes: asset.sizeBytes,
               modifiedDate: asset.dateModified,
             );
+            if (indexedRecord != null) {
+              await _backupRepository?.transitionBackupState(
+                assetId: asset.id,
+                destinationId: indexedRecord.destinationId,
+                state: AlbumBackupState.verifying,
+                uploadedBytes: asset.sizeBytes,
+              );
+              await _backupRepository?.transitionBackupState(
+                assetId: asset.id,
+                destinationId: indexedRecord.destinationId,
+                state: AlbumBackupState.completed,
+                uploadedBytes: asset.sizeBytes,
+                remoteSize: asset.sizeBytes,
+                remoteModifiedMs: asset.dateModified.millisecondsSinceEpoch,
+              );
+              _indexedPendingAssetIds.remove(asset.id);
+              _indexedRecordsByAsset.remove(asset.id);
+            }
             batchUploaded += 1;
             totalUploaded += 1;
           } on Object catch (error) {
+            if (indexedRecord != null) {
+              try {
+                await _backupRepository?.transitionBackupState(
+                  assetId: asset.id,
+                  destinationId: indexedRecord.destinationId,
+                  state: AlbumBackupState.failed,
+                  error: error.toString(),
+                  nextRetry: DateTime.now().add(const Duration(minutes: 1)),
+                );
+              } on Object catch (indexError) {
+                await AppLogger.log(
+                  'album_index_transition_error asset=${asset.id} '
+                  'error=$indexError',
+                );
+              }
+            }
             totalFailed += 1;
             lastError = error;
             if (!mounted) {
@@ -624,12 +712,6 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
           );
         }
 
-        LocalMediaStore.invalidateCaches();
-        if (!mounted || generation != _syncGeneration) {
-          return;
-        }
-        await _reloadRemote();
-
         if (_syncCancelRequested) {
           break;
         }
@@ -642,6 +724,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
       if (!mounted || generation != _syncGeneration) {
         return;
+      }
+      if (totalUploaded > 0) {
+        LocalMediaStore.invalidateCaches();
+        await _reloadRemote();
       }
       final stillPending = _countPendingUploads();
       final cancelled = _syncCancelRequested;
@@ -682,57 +768,79 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       return;
     }
     setState(() => _preferences = preferences);
-    await _reloadRemote();
+    await _loadAll(runAutoSync: false);
   }
 
   Future<void> _chooseSource() async {
+    final selectedIds = _preferences.selectedSourceIds.toSet();
     final selected = await showModalBottomSheet<AlbumBackupPreferences>(
       context: context,
       showDragHandle: true,
       builder: (context) {
-        return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            children: [
-              ListTile(
-                leading: const Icon(Icons.photo_library_outlined),
-                title: const Text('本机所有照片和视频'),
-                trailing: _preferences.sourceId.isEmpty
-                    ? const Icon(Icons.check, color: AppTheme.primary)
-                    : null,
-                onTap: () {
-                  Navigator.of(context).pop(
-                    AlbumBackupPreferences(
-                      autoBackup: _preferences.autoBackup,
-                      targetDir: _preferences.targetDir,
-                      sourceId: '',
-                      sourceName: '本机所有照片',
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final allSelected = selectedIds.isEmpty;
+            return SafeArea(
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                children: [
+                  CheckboxListTile(
+                    value: allSelected,
+                    secondary: const Icon(Icons.photo_library_outlined),
+                    title: const Text('本机所有照片和视频'),
+                    subtitle: const Text('保留每个媒体文件夹的原始层级'),
+                    onChanged: (_) => setModalState(selectedIds.clear),
+                  ),
+                  for (final bucket in _buckets)
+                    CheckboxListTile(
+                      value: selectedIds.contains(bucket.id),
+                      secondary: const Icon(Icons.folder_copy_outlined),
+                      title: Text(bucket.name),
+                      subtitle:
+                          Text('${bucket.relativePath} · ${bucket.count} 个项目'),
+                      onChanged: (checked) {
+                        setModalState(() {
+                          if (checked == true) {
+                            if (!_albumMultiSourceSelectionEnabled) {
+                              selectedIds.clear();
+                            }
+                            selectedIds.add(bucket.id);
+                          } else {
+                            selectedIds.remove(bucket.id);
+                          }
+                        });
+                      },
                     ),
-                  );
-                },
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    onPressed: () {
+                      final names = _buckets
+                          .where((bucket) => selectedIds.contains(bucket.id))
+                          .map((bucket) => bucket.name)
+                          .toList(growable: false);
+                      Navigator.of(context).pop(
+                        AlbumBackupPreferences(
+                          autoBackup: _preferences.autoBackup,
+                          targetDir: _preferences.targetDir,
+                          sourceIds: selectedIds.toList(growable: false),
+                          sourceName: names.isEmpty
+                              ? '本机所有照片'
+                              : names.length <= 2
+                                  ? names.join('、')
+                                  : '${names.length} 个文件夹',
+                          initialBackupMode: _preferences.initialBackupMode,
+                          deviceId: _preferences.deviceId,
+                          deviceName: _preferences.deviceName,
+                        ),
+                      );
+                    },
+                    child: const Text('确认备份来源'),
+                  ),
+                ],
               ),
-              for (final bucket in _buckets)
-                ListTile(
-                  leading: const Icon(Icons.folder_copy_outlined),
-                  title: Text(bucket.name),
-                  subtitle: Text('${bucket.count} 个项目'),
-                  trailing: _preferences.sourceId == bucket.id
-                      ? const Icon(Icons.check, color: AppTheme.primary)
-                      : null,
-                  onTap: () {
-                    Navigator.of(context).pop(
-                      AlbumBackupPreferences(
-                        autoBackup: _preferences.autoBackup,
-                        targetDir: _preferences.targetDir,
-                        sourceId: bucket.id,
-                        sourceName: bucket.name,
-                      ),
-                    );
-                  },
-                ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -742,6 +850,144 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       if (_preferences.autoBackup) {
         unawaited(_syncPending());
       }
+    }
+  }
+
+  Future<void> _ensureBackupRepository() async {
+    if (!_albumPersistentIndexEnabled) {
+      _backupIndexReady = false;
+      return;
+    }
+    if (_backupRepository != null) {
+      return;
+    }
+    try {
+      _backupRepository = await AlbumBackupRepository.open();
+    } on Object catch (error) {
+      _backupIndexReady = false;
+      await AppLogger.log('album_index_open_error error=$error');
+    }
+  }
+
+  Future<void> _reconcileBackupIndex({required bool fullScan}) async {
+    final repository = _backupRepository;
+    if (repository == null) {
+      return;
+    }
+    try {
+      await AlbumBackupDiscovery(repository).reconcile(
+        media: _localMedia,
+        buckets: _buckets,
+        preferences: _preferences,
+        fullScan: fullScan,
+      );
+      await _refreshIndexedPending();
+    } on Object catch (error) {
+      _backupIndexReady = false;
+      await AppLogger.log('album_index_reconcile_error error=$error');
+    }
+  }
+
+  Future<void> _refreshIndexedPending() async {
+    final repository = _backupRepository;
+    if (repository == null) {
+      return;
+    }
+    final destinationId = albumDestinationId(_preferences.targetDir);
+    final records = await repository.listBackupRecords(
+      states: const <AlbumBackupState>{
+        AlbumBackupState.queued,
+        AlbumBackupState.failed,
+      },
+      limit: 5000,
+    );
+    final activeSources = await repository.listSourceFolders(enabledOnly: true);
+    final activeSourceIds = activeSources.map((source) => source.id).toSet();
+    final current = records
+        .where(
+          (record) =>
+              record.destinationId == destinationId &&
+              activeSourceIds.contains(record.sourceFolderId),
+        )
+        .toList(growable: false);
+    _indexedRecordsByAsset = <String, AlbumBackupRecord>{
+      for (final record in current) record.assetId: record,
+    };
+    _indexedPendingAssetIds = _indexedRecordsByAsset.keys.toSet();
+    _backupIndexReady = true;
+  }
+
+  Future<void> _indexRemoteMedia(List<UnraidFileEntry> remote) async {
+    final repository = _backupRepository;
+    if (repository == null || remote.isEmpty) {
+      return;
+    }
+    final destinationId = albumDestinationId(_preferences.targetDir);
+    try {
+      await repository.upsertRemoteAssets(
+        remote
+            .where((entry) => !entry.isDirectory)
+            .map(
+              (entry) => AlbumRemoteAsset(
+                destinationId: destinationId,
+                path: entry.path,
+                displayName: entry.name,
+                mediaKind:
+                    entry.isVideo ? AlbumMediaKind.video : AlbumMediaKind.image,
+                sizeBytes: entry.sizeBytes,
+                modifiedMs: entry.modifiedDate?.millisecondsSinceEpoch ?? 0,
+                captureTimeMs: entry.modifiedDate?.millisecondsSinceEpoch,
+                versionKey:
+                    '${entry.sizeBytes}:${entry.modifiedDate?.millisecondsSinceEpoch ?? 0}',
+                origin: 'imported-existing',
+              ),
+            )
+            .toList(growable: false),
+      );
+    } on Object catch (error) {
+      await AppLogger.log('album_remote_index_error error=$error');
+    }
+  }
+
+  Future<void> _adoptLegacyBackupMatches() async {
+    if (!_albumLegacyImportEnabled) {
+      return;
+    }
+    final repository = _backupRepository;
+    if (repository == null || _localMedia.isEmpty || _remoteMedia.isEmpty) {
+      return;
+    }
+    final remoteSizes = <String, int>{
+      for (final entry in _remoteMedia)
+        if (!entry.isDirectory) entry.path.toLowerCase(): entry.sizeBytes,
+    };
+    final matches = <String>{};
+    for (final asset in _localMedia) {
+      final legacyPath =
+          _legacyDateTargetPathFor(_preferences.targetDir, asset).toLowerCase();
+      if (remoteSizes[legacyPath] == asset.sizeBytes) {
+        matches.add(asset.id);
+      }
+    }
+    if (matches.isEmpty) {
+      return;
+    }
+    try {
+      final updated = await repository.markLegacyExistingAssets(
+        destinationId: albumDestinationId(_preferences.targetDir),
+        assetIds: matches,
+      );
+      if (updated > 0) {
+        await _refreshIndexedPending();
+        _syncProgress.value = _syncProgress.value.copyWith(
+          message: '已识别 $updated 个旧日期目录备份，原文件保持不变',
+        );
+        await AppLogger.log(
+          'album_legacy_import_success matched=${matches.length} updated=$updated',
+        );
+      }
+    } on Object catch (error) {
+      await AppLogger.log('album_legacy_import_error error=$error');
     }
   }
 

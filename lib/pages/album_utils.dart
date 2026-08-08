@@ -5,8 +5,7 @@ Future<bool> _requestMediaAccess() async {
     Permission.photos,
     Permission.videos,
   ].request();
-  final modernGranted =
-      (results[Permission.photos]?.isGranted ?? false) &&
+  final modernGranted = (results[Permission.photos]?.isGranted ?? false) &&
       (results[Permission.videos]?.isGranted ?? false);
   if (modernGranted) {
     return true;
@@ -39,6 +38,23 @@ Future<bool> _requestMediaAccess() async {
   return false;
 }
 
+Future<bool> _hasCompleteMediaAccess() async {
+  try {
+    final photos = await Permission.photos.status;
+    final videos = await Permission.videos.status;
+    if (photos.isGranted && videos.isGranted) {
+      return true;
+    }
+  } catch (_) {
+    // Fall through to the legacy storage permission check.
+  }
+  try {
+    return (await Permission.storage.status).isGranted;
+  } catch (_) {
+    return false;
+  }
+}
+
 List<LocalMediaAsset> _findPendingUploads({
   required List<LocalMediaAsset> local,
   required List<UnraidFileEntry> remote,
@@ -55,8 +71,8 @@ List<LocalMediaAsset> _findPendingUploads({
     if (sourceFilter != null && !sourceFilter.contains(asset.bucketId)) {
       continue;
     }
-    final relative =
-        _relativePath(targetDir, _targetPathFor(targetDir, asset)).toLowerCase();
+    final relative = _relativePath(targetDir, _targetPathFor(targetDir, asset))
+        .toLowerCase();
     if (!remotePaths.contains(relative)) {
       pending.add(asset);
     }
@@ -121,12 +137,51 @@ List<_RemoteSection> _groupRemoteByDate(List<UnraidFileEntry> entries) {
 }
 
 String _targetPathFor(String targetDir, LocalMediaAsset asset) {
+  return _folderTargetPathFor(
+    targetDir: targetDir,
+    asset: asset,
+    preferences: AlbumBackupPreferences(targetDir: targetDir),
+    buckets: const <LocalMediaBucket>[],
+  );
+}
+
+String _legacyDateTargetPathFor(String targetDir, LocalMediaAsset asset) {
   final base = _trimSlash(_normalizeLocalPath(targetDir));
   final date = asset.dateModified;
   final year = date.year.toString().padLeft(4, '0');
   final month = date.month.toString().padLeft(2, '0');
   final day = date.day.toString().padLeft(2, '0');
-  return '$base/$year/$month/$day/${_safeRemoteName(asset.name)}';
+  return '$base/$year/$month/$day/${safeAlbumPathSegment(asset.name)}';
+}
+
+String _folderTargetPathFor({
+  required String targetDir,
+  required LocalMediaAsset asset,
+  required AlbumBackupPreferences preferences,
+  required List<LocalMediaBucket> buckets,
+}) {
+  final sources = sourceFoldersFromPreferences(
+    preferences: AlbumBackupPreferences(
+      autoBackup: preferences.autoBackup,
+      targetDir: targetDir,
+      sourceId: preferences.sourceId,
+      sourceIds: preferences.sourceIds,
+      sourceName: preferences.sourceName,
+      initialBackupMode: preferences.initialBackupMode,
+      deviceId: preferences.deviceId,
+      deviceName: preferences.deviceName,
+    ),
+    buckets: buckets,
+  );
+  final persistentAsset = albumMediaAssetFromLocal(asset);
+  final matching = sources
+      .where((source) => albumAssetBelongsToSource(persistentAsset, source))
+      .toList(growable: false)
+    ..sort((a, b) => b.relativePath.length.compareTo(a.relativePath.length));
+  if (matching.isEmpty) {
+    throw const AlbumBackupException('媒体不属于当前备份来源');
+  }
+  return buildAlbumRemotePath(source: matching.first, asset: persistentAsset);
 }
 
 String _dateTitle(DateTime date) {
@@ -142,20 +197,7 @@ String _dateTitle(DateTime date) {
   return '${date.year}年${date.month.toString().padLeft(2, '0')}月${date.day.toString().padLeft(2, '0')}日';
 }
 
-final _controlCharRegex = RegExp(r'[\x00-\x1F]');
 final _localMultiSlashRegex = RegExp(r'/+');
-
-String _safeRemoteName(String name) {
-  final sanitized = name
-      .replaceAll('/', '_')
-      .replaceAll(r'\', '_')
-      .replaceAll(_controlCharRegex, '_')
-      .trim();
-  if (sanitized.isEmpty) {
-    return 'media_${DateTime.now().millisecondsSinceEpoch}';
-  }
-  return sanitized;
-}
 
 String _relativePath(String base, String path) {
   final normalizedBase = _trimSlash(_normalizeLocalPath(base));

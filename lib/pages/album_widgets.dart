@@ -604,7 +604,10 @@ class _SettingsPanelState extends State<_SettingsPanel> {
     super.dispose();
   }
 
-  Future<void> _save({bool? autoBackup}) async {
+  Future<void> _save({
+    bool? autoBackup,
+    AlbumInitialBackupMode? initialBackupMode,
+  }) async {
     final target = _normalizeLocalPath(_targetController.text);
     if (target.isEmpty ||
         (!target.startsWith('/mnt/') && !target.startsWith('/boot'))) {
@@ -619,7 +622,12 @@ class _SettingsPanelState extends State<_SettingsPanel> {
         autoBackup: autoBackup ?? widget.preferences.autoBackup,
         targetDir: target,
         sourceId: widget.preferences.sourceId,
+        sourceIds: widget.preferences.sourceIds,
         sourceName: widget.preferences.sourceName,
+        initialBackupMode:
+            initialBackupMode ?? widget.preferences.initialBackupMode,
+        deviceId: widget.preferences.deviceId,
+        deviceName: widget.preferences.deviceName,
       ),
     );
     if (!mounted) {
@@ -659,6 +667,31 @@ class _SettingsPanelState extends State<_SettingsPanel> {
             labelText: '目标目录',
             prefixIcon: Icon(Icons.cloud_queue),
           ),
+        ),
+        const SizedBox(height: 14),
+        DropdownButtonFormField<AlbumInitialBackupMode>(
+          initialValue: widget.preferences.initialBackupMode,
+          decoration: const InputDecoration(
+            labelText: '首次备份范围',
+            prefixIcon: Icon(Icons.history_toggle_off),
+          ),
+          items: const [
+            DropdownMenuItem(
+              value: AlbumInitialBackupMode.all,
+              child: Text('备份全部现有照片和视频'),
+            ),
+            DropdownMenuItem(
+              value: AlbumInitialBackupMode.newOnly,
+              child: Text('从现在开始，仅备份新增'),
+            ),
+          ],
+          onChanged: _saving
+              ? null
+              : (value) {
+                  if (value != null) {
+                    _save(initialBackupMode: value);
+                  }
+                },
         ),
         const SizedBox(height: 14),
         SwitchListTile(

@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import 'album_backup_models.dart';
+
 class AlbumBackupPreferences {
   const AlbumBackupPreferences({
     this.autoBackup = true,
@@ -7,6 +9,9 @@ class AlbumBackupPreferences {
     this.sourceId = '',
     this.sourceIds = const <String>[],
     this.sourceName = '本机所有照片',
+    this.initialBackupMode = AlbumInitialBackupMode.all,
+    this.deviceId = 'local',
+    this.deviceName = 'Android',
   });
 
   final bool autoBackup;
@@ -14,6 +19,9 @@ class AlbumBackupPreferences {
   final String sourceId;
   final List<String> sourceIds;
   final String sourceName;
+  final AlbumInitialBackupMode initialBackupMode;
+  final String deviceId;
+  final String deviceName;
 
   List<String> get selectedSourceIds {
     if (sourceIds.isNotEmpty) {
@@ -43,6 +51,14 @@ class AlbumPreferences {
         sourceName: _asString(result['sourceName']).isEmpty
             ? '本机所有照片'
             : _asString(result['sourceName']),
+        initialBackupMode:
+            AlbumInitialBackupMode.parse(result['initialBackupMode']),
+        deviceId: _asString(result['deviceId']).isEmpty
+            ? 'local'
+            : _asString(result['deviceId']),
+        deviceName: _asString(result['deviceName']).isEmpty
+            ? 'Android'
+            : _asString(result['deviceName']),
       );
     } on MissingPluginException {
       return const AlbumBackupPreferences();
@@ -59,6 +75,9 @@ class AlbumPreferences {
             : '',
         'sourceIds': preferences.selectedSourceIds,
         'sourceName': preferences.sourceName,
+        'initialBackupMode': preferences.initialBackupMode.name,
+        'deviceId': preferences.deviceId,
+        'deviceName': preferences.deviceName,
       });
     } on MissingPluginException {
       return;
