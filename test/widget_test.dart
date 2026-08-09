@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:unraider/main.dart';
+import 'package:unraider/pages/music_page.dart';
 import 'package:unraider/services/login_preferences.dart';
+import 'package:unraider/services/music_player_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -88,6 +90,48 @@ void main() {
     expect(fields, hasLength(3));
     expect(tester.widget<Checkbox>(find.byType(Checkbox)).value, isTrue);
     expect(find.text('https://'), findsOneWidget);
+  });
+
+  testWidgets('opens and closes the music player outside the build phase',
+      (tester) async {
+    final navigatorKey = GlobalKey<NavigatorState>();
+    final service = MusicPlayerService.instance;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigatorKey,
+        builder: (context, child) => Stack(
+          children: [
+            child ?? const SizedBox.shrink(),
+            AnimatedBuilder(
+              animation: service,
+              builder: (context, _) => const SizedBox.shrink(),
+            ),
+          ],
+        ),
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const MusicPlayerPage(),
+              ),
+            ),
+            child: const Text('打开播放器'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('打开播放器'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('当前没有播放会话'), findsOneWidget);
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
   });
 
   test('saves remembered password with login preferences', () async {

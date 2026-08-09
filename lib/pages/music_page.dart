@@ -705,15 +705,33 @@ class MusicPlayerPage extends StatefulWidget {
 }
 
 class _MusicPlayerPageState extends State<MusicPlayerPage> {
+  bool _enteredFullPlayer = false;
+
   @override
   void initState() {
     super.initState();
-    MusicPlayerService.instance.enterFullPlayer();
+    // The global mini player listens to this service. Notifying it while this
+    // route is still mounting marks a sibling AnimatedBuilder dirty during
+    // build and triggers Flutter's red error screen. Wait until the first frame
+    // has completed before publishing the visibility change.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _enteredFullPlayer = true;
+      MusicPlayerService.instance.enterFullPlayer();
+    });
   }
 
   @override
   void dispose() {
-    MusicPlayerService.instance.leaveFullPlayer();
+    if (_enteredFullPlayer) {
+      // Route disposal can also happen while Navigator is finalizing a frame;
+      // publish the matching visibility change at the next safe frame boundary.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        MusicPlayerService.instance.leaveFullPlayer();
+      });
+    }
     super.dispose();
   }
 

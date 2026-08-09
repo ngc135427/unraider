@@ -91,18 +91,27 @@ class UnraiderApp extends StatelessWidget {
           fit: StackFit.expand,
           children: [
             child ?? const SizedBox.shrink(),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: SafeArea(
-                top: false,
-                // Sit above the 58px shell bottom nav; other routes just get
-                // a little extra bottom inset which is fine.
-                child: MiniPlayerBar(
-                  navigatorKey: _rootNavigatorKey,
-                  bottomOffset: 58,
-                ),
+            Positioned.fill(
+              // MaterialApp.builder places this widget beside the Navigator,
+              // so give it an Overlay for IconButton tooltips and other
+              // floating Material affordances.
+              child: Overlay(
+                initialEntries: [
+                  OverlayEntry(
+                    builder: (context) => Align(
+                      alignment: Alignment.bottomCenter,
+                      child: SafeArea(
+                        top: false,
+                        // Sit above the 58px shell bottom nav; other routes
+                        // just get a little extra bottom inset which is fine.
+                        child: MiniPlayerBar(
+                          navigatorKey: _rootNavigatorKey,
+                          bottomOffset: 58,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
