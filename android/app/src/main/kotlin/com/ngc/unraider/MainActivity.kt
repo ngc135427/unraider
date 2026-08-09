@@ -26,10 +26,18 @@ import com.hierynomus.smbj.share.DiskShare
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.Response
+import okio.BufferedSink
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileWriter
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -55,6 +63,14 @@ class MainActivity : AudioServiceActivity() {
     private var cachedSmbShare: DiskShare? = null
     private var pendingDeleteResult: MethodChannel.Result? = null
     private var pendingDeleteUris: List<Uri> = emptyList()
+    private val webDavDirectoryLock = Any()
+    private val verifiedWebDavDirectories = mutableSetOf<String>()
+    private val webDavClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.MINUTES)
+        .retryOnConnectionFailure(true)
+        .build()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -207,6 +223,32 @@ class MainActivity : AudioServiceActivity() {
                         .remove("webDavToken")
                         .apply()
                     result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "unraider/media_cache"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "repairTransportStreamHeader" -> {
+                    val path = call.argument<String>("path").orEmpty()
+                    Thread {
+                        try {
+                            val repaired = repairTransportStreamHeader(path)
+                            runOnUiThread { result.success(repaired) }
+                        } catch (error: Exception) {
+                            runOnUiThread {
+                                result.error(
+                                    "repair_video_header_failed",
+                                    error.message ?: "修复视频缓存头失败",
+                                    null,
+                                )
+                            }
+                        }
+                    }.start()
                 }
                 else -> result.notImplemented()
             }
@@ -436,6 +478,7 @@ class MainActivity : AudioServiceActivity() {
                                     "webdav" -> uploadLocalMediaWebDav(
                                         sourceUri = sourceUri,
                                         targetUrl = call.argument<String>("webDavUrl").orEmpty(),
+                                        baseUrl = call.argument<String>("webDavBaseUrl").orEmpty(),
                                         token = call.argument<String>("webDavToken").orEmpty(),
                                         expectedSize = expectedSize,
                                         modifiedMs = (call.argument<Number>("modifiedMs") ?: 0).toLong(),
@@ -1324,16 +1367,20 @@ class MainActivity : AudioServiceActivity() {
     private fun uploadLocalMediaWebDav(
         sourceUri: String,
         targetUrl: String,
+        baseUrl: String,
         token: String,
         expectedSize: Long,
         modifiedMs: Long,
     ): Map<String, Any?> {
-        require(targetUrl.isNotBlank() && token.isNotBlank()) { "WebDAV 参数不完整" }
+        require(targetUrl.isNotBlank() && baseUrl.isNotBlank() && token.isNotBlank()) {
+            "WebDAV 参数不完整"
+        }
         val finalUrl = URL(targetUrl)
+        val rootUrl = URL(baseUrl)
         val tempUrl = URL("$targetUrl.part-${UUID.randomUUID()}")
         val started = System.nanoTime()
         val prepareStarted = System.nanoTime()
-        ensureWebDavDirectories(finalUrl, token)
+        ensureWebDavDirectories(finalUrl, rootUrl, token)
         val existing = webDavHead(finalUrl, token)
         if (existing.first in 200..299) {
             if (existing.second == expectedSize) {
@@ -1351,16 +1398,34 @@ class MainActivity : AudioServiceActivity() {
         val prepareMs = elapsedMs(prepareStarted)
         val uploadStarted = System.nanoTime()
         try {
-            val connection = openWebDav(tempUrl, "PUT", token)
-            connection.doOutput = true
-            connection.setFixedLengthStreamingMode(expectedSize)
-            connection.setRequestProperty("Content-Type", "application/octet-stream")
-            contentResolver.openInputStream(Uri.parse(sourceUri)).use { input ->
-                requireNotNull(input) { "无法打开本机媒体" }
-                connection.outputStream.use { output -> input.copyTo(output, 1024 * 1024) }
+            val requestBody = object : RequestBody() {
+                override fun contentType() = "application/octet-stream".toMediaType()
+
+                override fun contentLength() = expectedSize
+
+                override fun writeTo(sink: BufferedSink) {
+                    contentResolver.openInputStream(Uri.parse(sourceUri)).use { input ->
+                        requireNotNull(input) { "无法打开本机媒体" }
+                        val buffer = ByteArray(1024 * 1024)
+                        var written = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            sink.write(buffer, 0, read)
+                            written += read
+                        }
+                        check(written == expectedSize) {
+                            "读取本机媒体不完整：期望 $expectedSize，实际 $written"
+                        }
+                    }
+                }
             }
-            val uploadCode = connection.responseCode
-            connection.disconnect()
+            val uploadCode = executeWebDavRequest(
+                url = tempUrl,
+                method = "PUT",
+                token = token,
+                body = requestBody,
+            ).use { it.code }
             if (uploadCode !in 200..299) {
                 throw IllegalStateException("WebDAV PUT 返回 HTTP $uploadCode")
             }
@@ -1374,11 +1439,15 @@ class MainActivity : AudioServiceActivity() {
             }
             val verifyMs = elapsedMs(verifyStarted)
             val commitStarted = System.nanoTime()
-            val move = openWebDav(tempUrl, "MOVE", token)
-            move.setRequestProperty("Destination", finalUrl.toString())
-            move.setRequestProperty("Overwrite", "F")
-            val moveCode = move.responseCode
-            move.disconnect()
+            val moveCode = executeWebDavRequest(
+                url = tempUrl,
+                method = "MOVE",
+                token = token,
+                headers = mapOf(
+                    "Destination" to finalUrl.toString(),
+                    "Overwrite" to "F",
+                ),
+            ).use { it.code }
             if (moveCode !in 200..299) {
                 throw IllegalStateException("WebDAV 不支持安全 MOVE（HTTP $moveCode）")
             }
@@ -1400,9 +1469,7 @@ class MainActivity : AudioServiceActivity() {
             )
         } catch (error: Exception) {
             try {
-                val delete = openWebDav(tempUrl, "DELETE", token)
-                delete.responseCode
-                delete.disconnect()
+                executeWebDavRequest(tempUrl, "DELETE", token).close()
             } catch (_: Exception) {
                 // A stale unique .part resource is safe and can be removed later.
             }
@@ -1410,32 +1477,116 @@ class MainActivity : AudioServiceActivity() {
         }
     }
 
-    private fun ensureWebDavDirectories(target: URL, token: String) {
-        val segments = target.path.split('/').filter { it.isNotBlank() }
-        if (segments.size <= 1) return
-        var path = ""
-        segments.dropLast(1).forEach { segment ->
-            path += "/$segment"
-            val url = URL(target.protocol, target.host, target.port, path)
-            val head = webDavHead(url, token)
-            if (head.first == HttpURLConnection.HTTP_NOT_FOUND) {
-                val mkdir = openWebDav(url, "MKCOL", token)
-                val code = mkdir.responseCode
-                mkdir.disconnect()
-                if (code !in 200..299 && code != HttpURLConnection.HTTP_CONFLICT) {
-                    throw IllegalStateException("WebDAV 创建目录失败（HTTP $code）")
+    private fun ensureWebDavDirectories(target: URL, root: URL, token: String) {
+        require(
+            target.protocol == root.protocol &&
+                target.host == root.host &&
+                target.port == root.port
+        ) { "WebDAV 目标不在配置的服务器上" }
+        val rootPath = root.toString().toHttpUrl().encodedPath.trimEnd('/')
+        val parentPath = target.toString().toHttpUrl().encodedPath
+            .substringBeforeLast('/', "")
+            .trimEnd('/')
+        require(parentPath == rootPath || parentPath.startsWith("$rootPath/")) {
+            "WebDAV 目标不在配置的基础目录下"
+        }
+        val relative = parentPath.removePrefix(rootPath).trim('/')
+        if (relative.isEmpty()) return
+        synchronized(webDavDirectoryLock) {
+            var path = rootPath
+            relative.split('/').filter { it.isNotBlank() }.forEach { segment ->
+                path += "/$segment"
+                val url = URL(target.protocol, target.host, target.port, path)
+                val key = url.toString()
+                if (verifiedWebDavDirectories.contains(key)) return@forEach
+                val status = webDavDirectoryStatus(url, token)
+                if (status == HttpURLConnection.HTTP_NOT_FOUND) {
+                    val code = executeWebDavRequest(url, "MKCOL", token).use { it.code }
+                    if (
+                        code !in 200..299 &&
+                        code != HttpURLConnection.HTTP_CONFLICT &&
+                        code != HttpURLConnection.HTTP_BAD_METHOD
+                    ) {
+                        throw IllegalStateException("WebDAV 创建目录失败（HTTP $code）")
+                    }
+                } else if (status !in 200..299) {
+                    throw IllegalStateException("WebDAV 检查目录失败（HTTP $status）")
                 }
+                verifiedWebDavDirectories.add(key)
             }
         }
     }
 
+    private fun repairTransportStreamHeader(path: String): Boolean {
+        require(path.isNotBlank()) { "视频缓存路径为空" }
+        val target = File(path).canonicalFile
+        val cacheRoot = cacheDir.canonicalFile
+        require(target.path.startsWith(cacheRoot.path + File.separator)) {
+            "只能修复应用缓存中的视频"
+        }
+        require(target.isFile) { "视频缓存不存在" }
+        val packetSize = 188
+        val probeSize = packetSize * 6
+        RandomAccessFile(target, "rw").use { file ->
+            if (file.length() < probeSize) return false
+            val probe = ByteArray(probeSize)
+            file.seek(0)
+            file.readFully(probe)
+            if (probe[0].toInt() and 0xff == 0x47) return false
+            for (packet in 1..5) {
+                if (probe[packet * packetSize].toInt() and 0xff != 0x47) {
+                    return false
+                }
+            }
+
+            // Replace only the unrecoverable first packet with a valid null
+            // packet; all following media packets and the server file remain
+            // untouched.
+            val nullPacket = ByteArray(packetSize) { 0xff.toByte() }
+            nullPacket[0] = 0x47
+            nullPacket[1] = 0x1f
+            nullPacket[2] = 0xff.toByte()
+            nullPacket[3] = 0x10
+            file.seek(0)
+            file.write(nullPacket)
+            file.fd.sync()
+            return true
+        }
+    }
+
+    private fun webDavDirectoryStatus(url: URL, token: String): Int =
+        executeWebDavRequest(
+            url = url,
+            method = "PROPFIND",
+            token = token,
+            headers = mapOf("Depth" to "0"),
+        ).use { it.code }
+
     private fun webDavHead(url: URL, token: String): Triple<Int, Long, String?> {
-        val connection = openWebDav(url, "HEAD", token)
-        val code = connection.responseCode
-        val length = connection.getHeaderFieldLong("Content-Length", -1L)
-        val etag = connection.getHeaderField("ETag")
-        connection.disconnect()
-        return Triple(code, length, etag)
+        return executeWebDavRequest(url, "HEAD", token).use { response ->
+            Triple(
+                response.code,
+                response.header("Content-Length")?.toLongOrNull() ?: -1L,
+                response.header("ETag"),
+            )
+        }
+    }
+
+    private fun executeWebDavRequest(
+        url: URL,
+        method: String,
+        token: String,
+        headers: Map<String, String> = emptyMap(),
+        body: RequestBody? = null,
+    ): Response {
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", webDavAuthorization(token))
+            .header("Accept-Encoding", "identity")
+            .apply { headers.forEach { (name, value) -> header(name, value) } }
+            .method(method, body)
+            .build()
+        return webDavClient.newCall(request).execute()
     }
 
     private fun openWebDav(url: URL, method: String, token: String): HttpURLConnection {

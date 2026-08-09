@@ -6,12 +6,31 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:unraider/services/album_backup_models.dart';
 import 'package:unraider/services/album_backup_repository.dart';
 import 'package:unraider/services/album_preview_cache.dart';
+import 'package:unraider/services/remote_video_stream.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   sqfliteFfiInit();
 
   group('Album preview cache', () {
+    test('detects a transport stream shifted by one damaged packet', () {
+      const packetSize = 188;
+      final shifted = Uint8List(packetSize * 6);
+      for (var packet = 1; packet <= 5; packet++) {
+        shifted[packet * packetSize] = 0x47;
+      }
+      final normal = Uint8List.fromList(shifted)..[0] = 0x47;
+
+      expect(RemoteVideoStream.hasShiftedTransportStream(shifted), isTrue);
+      expect(RemoteVideoStream.hasShiftedTransportStream(normal), isFalse);
+      expect(
+        RemoteVideoStream.hasShiftedTransportStream(
+          Uint8List(packetSize * 5),
+        ),
+        isFalse,
+      );
+    });
+
     test('uses a deterministic versioned sidecar path', () {
       final first = albumThumbnailSidecarPath(
         remoteRoot: '/mnt/user/photos',

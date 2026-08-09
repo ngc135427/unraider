@@ -359,6 +359,49 @@ void main() {
       expect(record.leaseOwner, 'worker-b');
     });
 
+    test('interrupted foreground leases are requeued after process restart',
+        () async {
+      final repository = await _openMemoryRepository();
+      addTearDown(repository.close);
+      final source = _source();
+      final sources =
+          await repository.replaceSourceFolders(<AlbumSourceFolder>[source]);
+      final interrupted = _asset(id: 'interrupted');
+      final active = _asset(id: 'active');
+      await repository.reconcileAssets(
+        assets: <AlbumMediaAsset>[interrupted, active],
+        sources: sources,
+      );
+      await repository.claimQueued(
+        leaseOwner: 'foreground-old-process-1',
+        destinationId: source.destinationId,
+        limit: 1,
+      );
+      await repository.claimQueued(
+        leaseOwner: 'foreground-current-process-1',
+        destinationId: source.destinationId,
+        limit: 1,
+      );
+
+      final requeued = await repository.requeueInterruptedForeground(
+        destinationId: source.destinationId,
+        activeLeasePrefix: 'foreground-current-process-',
+      );
+
+      expect(requeued, 1);
+      final records = await repository.listBackupRecords();
+      final recovered = records.singleWhere(
+        (record) => record.leaseOwner != 'foreground-current-process-1',
+      );
+      final stillActive = records.singleWhere(
+        (record) => record.leaseOwner == 'foreground-current-process-1',
+      );
+      expect(recovered.state, AlbumBackupState.queued);
+      expect(recovered.leaseOwner, isNull);
+      expect(recovered.leaseExpiresMs, isNull);
+      expect(stillActive.state, AlbumBackupState.uploading);
+    });
+
     test('changed completed media is requeued and loses stale verification',
         () async {
       final repository = await _openMemoryRepository();

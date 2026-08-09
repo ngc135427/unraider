@@ -14,7 +14,7 @@ class AlbumBackupPreferences {
     this.deviceName = 'Android',
     this.wifiOnly = true,
     this.chargingOnly = false,
-    this.transferConcurrency = 2,
+    this.transferConcurrency = 8,
   });
 
   final bool autoBackup;
@@ -68,7 +68,8 @@ class AlbumPreferences {
         wifiOnly: result['wifiOnly'] != false,
         chargingOnly: result['chargingOnly'] == true,
         transferConcurrency:
-            ((result['transferConcurrency'] as num?)?.toInt() ?? 2).clamp(1, 4),
+            ((result['transferConcurrency'] as num?)?.toInt() ?? 8)
+                .clamp(1, 16),
       );
     } on MissingPluginException {
       return const AlbumBackupPreferences();

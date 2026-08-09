@@ -7,6 +7,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.net.Uri
@@ -34,7 +35,13 @@ import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.share.DiskShare
-import java.io.InputStream
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.Response
+import okio.BufferedSink
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.EnumSet
@@ -179,15 +186,21 @@ class AlbumBackgroundWorker(
                             val done = completed.incrementAndGet()
                             val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1)
                             val speed = bytes.get() * 1000L / elapsed
+                            val fallbackNotice = uploader.fallbackNotice
                             updateStatus(
                                 stage = "uploading",
                                 pending = (jobs.size - done - failed.get()).coerceAtLeast(0),
                                 completed = done,
                                 failed = failed.get(),
                                 bytesPerSecond = speed,
+                                lastError = fallbackNotice,
                             )
                             setForegroundAsync(
-                                foreground("正在备份 ${job.name}", done + failed.get(), jobs.size),
+                                foreground(
+                                    fallbackNotice ?: "正在备份 ${job.name}",
+                                    done + failed.get(),
+                                    jobs.size,
+                                ),
                             )
                         } catch (error: Exception) {
                             markFailed(database, job, error.message ?: error.javaClass.simpleName)
@@ -246,7 +259,11 @@ class AlbumBackgroundWorker(
             .setContentIntent(pendingIntent)
             .apply { if (total > 0) setProgress(total, progress, false) }
             .build()
-        return ForegroundInfo(NOTIFICATION_ID, notification)
+        return ForegroundInfo(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
     }
 
     @Synchronized
@@ -562,17 +579,40 @@ private class BackgroundUploader(
     private var smbClient: SMBClient? = null
     private var smbConnection: Connection? = null
     private val shares = mutableMapOf<String, DiskShare>()
+    private val webDavDirectoryLock = Any()
+    private val verifiedWebDavDirectories = mutableSetOf<String>()
+    @Volatile
+    var fallbackNotice: String? = null
+        private set
+    private val webDavClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.MINUTES)
+        .retryOnConnectionFailure(true)
+        .build()
 
     fun upload(job: BackgroundJob): Long {
         val webDavTarget = webDavUrl(job.remotePath)
+        var webDavFailure: Exception? = null
         if (webDavTarget != null) {
             try {
                 return uploadWebDav(job, webDavTarget)
-            } catch (_: Exception) {
-                // Fall back to SMB; a verified .part resource is never reported complete.
+            } catch (error: Exception) {
+                webDavFailure = error
+                fallbackNotice = "WebDAV 连接失败，已自动降级为 SMB 上传"
             }
         }
-        return uploadSmb(job)
+        return try {
+            uploadSmb(job)
+        } catch (error: Exception) {
+            if (webDavFailure != null) {
+                throw IllegalStateException(
+                    "WebDAV 连接失败，降级到 SMB 后仍上传失败：${error.message ?: error.javaClass.simpleName}",
+                    error,
+                )
+            }
+            throw error
+        }
     }
 
     private fun uploadSmb(job: BackgroundJob): Long {
@@ -630,32 +670,50 @@ private class BackgroundUploader(
         }
         ensureWebDavDirectories(finalUrl)
         try {
-            val put = open(tempUrl, "PUT").apply {
-                doOutput = true
-                setFixedLengthStreamingMode(job.size)
-                setRequestProperty("Content-Type", "application/octet-stream")
+            val requestBody = object : RequestBody() {
+                override fun contentType() = "application/octet-stream".toMediaType()
+
+                override fun contentLength() = job.size
+
+                override fun writeTo(sink: BufferedSink) {
+                    context.contentResolver.openInputStream(Uri.parse(job.uri)).use { input ->
+                        requireNotNull(input) { "无法打开本机媒体" }
+                        val buffer = ByteArray(1024 * 1024)
+                        var written = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            sink.write(buffer, 0, read)
+                            written += read
+                        }
+                        check(written == job.size) {
+                            "读取本机媒体不完整：期望 ${job.size}，实际 $written"
+                        }
+                    }
+                }
             }
-            context.contentResolver.openInputStream(Uri.parse(job.uri)).use { input ->
-                requireNotNull(input) { "无法打开本机媒体" }
-                put.outputStream.use { input.copyTo(it, 1024 * 1024) }
-            }
-            val code = put.responseCode
-            put.disconnect()
+            val code = executeWebDavRequest(
+                url = tempUrl,
+                method = "PUT",
+                body = requestBody,
+            ).use { it.code }
             if (code !in 200..299 || head(tempUrl).second != job.size) {
                 throw IllegalStateException("WebDAV 后台上传校验失败")
             }
-            val move = open(tempUrl, "MOVE").apply {
-                setRequestProperty("Destination", finalUrl.toString())
-                setRequestProperty("Overwrite", "F")
-            }
-            val moveCode = move.responseCode
-            move.disconnect()
+            val moveCode = executeWebDavRequest(
+                url = tempUrl,
+                method = "MOVE",
+                headers = mapOf(
+                    "Destination" to finalUrl.toString(),
+                    "Overwrite" to "F",
+                ),
+            ).use { it.code }
             if (moveCode !in 200..299 || head(finalUrl).second != job.size) {
                 throw IllegalStateException("WebDAV 后台安全提交失败")
             }
             return job.size
         } catch (error: Exception) {
-            try { open(tempUrl, "DELETE").apply { responseCode; disconnect() } } catch (_: Exception) {}
+            try { executeWebDavRequest(tempUrl, "DELETE").close() } catch (_: Exception) {}
             throw error
         }
     }
@@ -697,42 +755,78 @@ private class BackgroundUploader(
     }
 
     private fun ensureWebDavDirectories(target: URL) {
-        val segments = target.path.split('/').filter { it.isNotBlank() }
-        var path = ""
-        segments.dropLast(1).forEach { segment ->
-            path += "/$segment"
-            val url = URL(target.protocol, target.host, target.port, path)
-            if (head(url).first == HttpURLConnection.HTTP_NOT_FOUND) {
-                val mkdir = open(url, "MKCOL")
-                val code = mkdir.responseCode
-                mkdir.disconnect()
-                if (code !in 200..299 && code != HttpURLConnection.HTTP_CONFLICT) {
-                    throw IllegalStateException("WebDAV 创建目录失败（HTTP $code）")
+        val root = URL(config.webDavUrl)
+        require(
+            target.protocol == root.protocol &&
+                target.host == root.host &&
+                target.port == root.port
+        ) { "WebDAV 目标不在配置的服务器上" }
+        val rootPath = root.toString().toHttpUrl().encodedPath.trimEnd('/')
+        val parentPath = target.toString().toHttpUrl().encodedPath
+            .substringBeforeLast('/', "")
+            .trimEnd('/')
+        require(parentPath == rootPath || parentPath.startsWith("$rootPath/")) {
+            "WebDAV 目标不在配置的基础目录下"
+        }
+        val relative = parentPath.removePrefix(rootPath).trim('/')
+        if (relative.isEmpty()) return
+        synchronized(webDavDirectoryLock) {
+            var path = rootPath
+            relative.split('/').filter { it.isNotBlank() }.forEach { segment ->
+                path += "/$segment"
+                val url = URL(target.protocol, target.host, target.port, path)
+                val key = url.toString()
+                if (verifiedWebDavDirectories.contains(key)) return@forEach
+                val code = webDavDirectoryStatus(url)
+                if (code == HttpURLConnection.HTTP_NOT_FOUND) {
+                    val mkdirCode = executeWebDavRequest(url, "MKCOL").use { it.code }
+                    if (
+                        mkdirCode !in 200..299 &&
+                        mkdirCode != HttpURLConnection.HTTP_CONFLICT &&
+                        mkdirCode != HttpURLConnection.HTTP_BAD_METHOD
+                    ) {
+                        throw IllegalStateException("WebDAV 创建目录失败（HTTP $mkdirCode）")
+                    }
+                } else if (code !in 200..299) {
+                    throw IllegalStateException("WebDAV 检查目录失败（HTTP $code）")
                 }
+                verifiedWebDavDirectories.add(key)
             }
         }
     }
 
+    private fun webDavDirectoryStatus(url: URL): Int =
+        executeWebDavRequest(
+            url = url,
+            method = "PROPFIND",
+            headers = mapOf("Depth" to "0"),
+        ).use { it.code }
+
     private fun head(url: URL): Pair<Int, Long> {
-        val connection = open(url, "HEAD")
-        val result = connection.responseCode to connection.getHeaderFieldLong("Content-Length", -1)
-        connection.disconnect()
-        return result
+        return executeWebDavRequest(url, "HEAD").use { response ->
+            response.code to (response.header("Content-Length")?.toLongOrNull() ?: -1L)
+        }
     }
 
-    private fun open(url: URL, method: String): HttpURLConnection =
-        (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 20_000
-            readTimeout = 60_000
-            useCaches = false
-            val token = android.util.Base64.encodeToString(
-                "unraider:${config.webDavToken}".toByteArray(),
-                android.util.Base64.NO_WRAP,
-            )
-            setRequestProperty("Authorization", "Basic $token")
-            setRequestProperty("Accept-Encoding", "identity")
-        }
+    private fun executeWebDavRequest(
+        url: URL,
+        method: String,
+        headers: Map<String, String> = emptyMap(),
+        body: RequestBody? = null,
+    ): Response {
+        val token = android.util.Base64.encodeToString(
+            "unraider:${config.webDavToken}".toByteArray(),
+            android.util.Base64.NO_WRAP,
+        )
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Basic $token")
+            .header("Accept-Encoding", "identity")
+            .apply { headers.forEach { (name, value) -> header(name, value) } }
+            .method(method, body)
+            .build()
+        return webDavClient.newCall(request).execute()
+    }
 
     override fun close() {
         shares.values.forEach { try { it.close() } catch (_: Exception) {} }

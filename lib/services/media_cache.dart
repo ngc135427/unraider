@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'local_media_store.dart';
@@ -15,7 +16,10 @@ import 'unraid_client.dart';
 class MediaCache {
   MediaCache._();
 
+  static const _channel = MethodChannel('unraider/media_cache');
+
   static const defaultChunkBytes = 4 * 1024 * 1024;
+
   /// How many completed cache files to keep indexed in-process.
   static const _maxIndexEntries = 32;
 
@@ -128,8 +132,7 @@ class MediaCache {
     String? fileName,
     int? readyBytes,
   }) async {
-    final resolvedReady =
-        readyBytes ?? adaptiveReadyBytes(expectedSizeBytes);
+    final resolvedReady = readyBytes ?? adaptiveReadyBytes(expectedSizeBytes);
     if (kIsWeb) {
       throw const UnraidClientException('Web 端暂不支持媒体缓存');
     }
@@ -174,6 +177,26 @@ class MediaCache {
       }),
     );
     return ProgressiveMediaHandle(progressive);
+  }
+
+  /// Repairs a recoverable MPEG-TS cache whose first 188-byte packet is
+  /// corrupted while later packets are correctly aligned. The server file is
+  /// never modified; Android only replaces the first packet in the app cache.
+  static Future<bool> repairVideoHeader(File file) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>(
+            'repairTransportStreamHeader',
+            <String, Object>{'path': file.path},
+          ) ??
+          false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
   }
 
   /// Stream a local MediaStore URI to a temp file via chunked reads.

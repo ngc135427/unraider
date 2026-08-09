@@ -796,6 +796,37 @@ class AlbumBackupRepository {
     );
   }
 
+  Future<int> requeueInterruptedForeground({
+    required String destinationId,
+    required String activeLeasePrefix,
+    DateTime? now,
+  }) {
+    if (activeLeasePrefix.trim().isEmpty) {
+      throw const AlbumBackupException('前台 lease 前缀不能为空');
+    }
+    final timestamp = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    return _database.update(
+      'backup_records',
+      <String, Object?>{
+        'state': AlbumBackupState.queued.name,
+        'next_retry_ms': null,
+        'last_error': '检测到前台同步中断，已重新排队',
+        'lease_owner': null,
+        'lease_expires_ms': null,
+        'updated_at_ms': timestamp,
+      },
+      where: 'destination_id = ? AND state IN (?, ?) '
+          "AND lease_owner LIKE 'foreground-%' "
+          'AND lease_owner NOT LIKE ?',
+      whereArgs: <Object?>[
+        destinationId,
+        AlbumBackupState.uploading.name,
+        AlbumBackupState.verifying.name,
+        '$activeLeasePrefix%',
+      ],
+    );
+  }
+
   Future<void> upsertRemoteAssets(List<AlbumRemoteAsset> assets) async {
     if (assets.isEmpty) {
       return;

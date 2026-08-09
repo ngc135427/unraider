@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 
 import 'album_backup_models.dart';
 import 'album_backup_repository.dart';
-import 'album_preview_cache.dart';
 import 'app_logger.dart';
 import 'local_media_store.dart';
 import 'unraid_client.dart';
@@ -79,6 +78,7 @@ class AlbumTransferProgress {
     required this.elapsed,
     this.currentName,
     this.lastError,
+    this.fallbackNotice,
   });
 
   final int completed;
@@ -89,6 +89,7 @@ class AlbumTransferProgress {
   final Duration elapsed;
   final String? currentName;
   final String? lastError;
+  final String? fallbackNotice;
 
   double get bytesPerSecond => elapsed.inMilliseconds <= 0
       ? 0
@@ -110,30 +111,27 @@ class AlbumTransferRunResult {
     required this.completed,
     required this.failed,
     required this.cancelled,
+    this.fallbackNotice,
   });
 
   final int completed;
   final int failed;
   final bool cancelled;
+  final String? fallbackNotice;
 }
 
 class AlbumTransferEngine {
   AlbumTransferEngine({
     required this.repository,
     required this.client,
-    required this.remoteRoot,
     this.maxConcurrency = 2,
     this.onProgress,
-    AlbumPreviewCache? previewCache,
-  })  : _previewCache = previewCache ?? AlbumPreviewCache(),
-        assert(maxConcurrency > 0);
+  }) : assert(maxConcurrency > 0);
 
   final AlbumBackupRepository repository;
   final UnraidClient client;
-  final String remoteRoot;
   final int maxConcurrency;
   final ValueChanged<AlbumTransferProgress>? onProgress;
-  final AlbumPreviewCache _previewCache;
 
   bool _paused = false;
   bool _cancelled = false;
@@ -175,6 +173,7 @@ class AlbumTransferEngine {
     var bytesTransferred = 0;
     String? currentName;
     String? lastError;
+    String? fallbackNotice;
 
     void publish() {
       onProgress?.call(
@@ -187,6 +186,7 @@ class AlbumTransferEngine {
           elapsed: stopwatch.elapsed,
           currentName: currentName,
           lastError: lastError,
+          fallbackNotice: fallbackNotice,
         ),
       );
     }
@@ -203,6 +203,8 @@ class AlbumTransferEngine {
         currentName = job.asset.name;
         publish();
         try {
+          final expectedWebDav =
+              client.webDavFileUri(job.record.remotePath) != null;
           final uploadResult = await client.uploadLocalMediaSafely(
             targetPath: job.record.remotePath,
             sourceUri: job.asset.uri,
@@ -225,12 +227,18 @@ class AlbumTransferEngine {
                 job.asset.dateModified.millisecondsSinceEpoch,
             remoteEtag: uploadResult.etag,
           );
-          await _publishThumbnail(job);
           final transport = switch (uploadResult.transport.toLowerCase()) {
             'webdav' => AlbumTransportKind.webDav,
             'smb' => AlbumTransportKind.smb,
             _ => AlbumTransportKind.sftp,
           };
+          if (expectedWebDav && transport != AlbumTransportKind.webDav) {
+            fallbackNotice = switch (transport) {
+              AlbumTransportKind.smb => 'WebDAV 连接失败，已自动降级为 SMB 上传',
+              AlbumTransportKind.sftp => 'WebDAV/SMB 连接失败，已自动降级为 SFTP 上传',
+              AlbumTransportKind.webDav => null,
+            };
+          }
           final metrics = AlbumTransferMetrics(
             transport: transport,
             totalBytes: uploadResult.remoteSize,
@@ -301,56 +309,7 @@ class AlbumTransferEngine {
       completed: completed,
       failed: failed,
       cancelled: _cancelled,
+      fallbackNotice: fallbackNotice,
     );
-  }
-
-  Future<void> _publishThumbnail(AlbumTransferJob job) async {
-    final versionKey = '${job.asset.sizeBytes}:'
-        '${job.asset.dateModified.millisecondsSinceEpoch}';
-    final sidecarPath = albumThumbnailSidecarPath(
-      remoteRoot: remoteRoot,
-      remotePath: job.record.remotePath,
-      versionKey: versionKey,
-    );
-    try {
-      await repository.updateThumbnailState(
-        assetId: job.record.assetId,
-        destinationId: job.record.destinationId,
-        state: AlbumDerivedMediaState.generating,
-        versionKey: versionKey,
-      );
-      final bytes =
-          await LocalMediaStore.loadThumbnail(job.asset.uri, size: 480);
-      if (bytes == null || bytes.isEmpty) {
-        throw const AlbumBackupException('无法生成本机媒体缩略图');
-      }
-      await client.uploadBytesSafely(targetPath: sidecarPath, bytes: bytes);
-      await _previewCache.store(
-        destinationId: job.record.destinationId,
-        remotePath: job.record.remotePath,
-        versionKey: versionKey,
-        bytes: bytes,
-      );
-      await repository.updateThumbnailState(
-        assetId: job.record.assetId,
-        destinationId: job.record.destinationId,
-        state: AlbumDerivedMediaState.available,
-        versionKey: versionKey,
-        thumbnailPath: sidecarPath,
-      );
-    } on Object catch (error) {
-      await repository.updateThumbnailState(
-        assetId: job.record.assetId,
-        destinationId: job.record.destinationId,
-        state: AlbumDerivedMediaState.failed,
-        versionKey: versionKey,
-        thumbnailPath: sidecarPath,
-        error: error.toString(),
-      );
-      await AppLogger.log(
-        'album_thumbnail_publish_failed path=${job.record.remotePath}',
-        error: error,
-      );
-    }
   }
 }

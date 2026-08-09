@@ -1141,9 +1141,11 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
           items: const [
             DropdownMenuItem(value: 1, child: Text('1（兼容）')),
-            DropdownMenuItem(value: 2, child: Text('2（推荐）')),
-            DropdownMenuItem(value: 3, child: Text('3')),
+            DropdownMenuItem(value: 2, child: Text('2')),
             DropdownMenuItem(value: 4, child: Text('4')),
+            DropdownMenuItem(value: 8, child: Text('8（推荐）')),
+            DropdownMenuItem(value: 12, child: Text('12（高速）')),
+            DropdownMenuItem(value: 16, child: Text('16（小文件高吞吐）')),
           ],
           onChanged: _saving
               ? null
@@ -2529,10 +2531,11 @@ class _RemoteVideoPreviewPageState extends State<_RemoteVideoPreviewPage> {
         }
         setState(() => _progress = value);
       });
-      await handle.ready;
       await Future<void>.delayed(const Duration(milliseconds: 120));
-      final controller = VideoPlayerController.file(handle.file);
-      await controller.initialize();
+      final controller = await RemoteVideoStream.openCached(
+        handle: handle,
+        entry: widget.entry,
+      );
       await controller.setLooping(true);
       if (widget.active) {
         await controller.play();

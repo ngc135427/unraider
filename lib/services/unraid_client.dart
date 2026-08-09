@@ -1395,6 +1395,7 @@ class UnraidWebGuiClient {
       if (smbPath != null) 'share': smbPath.share,
       if (smbPath != null) 'relativePath': smbPath.relativePath,
       if (webDavUri != null) 'webDavUrl': webDavUri.toString(),
+      if (webDavUri != null) 'webDavBaseUrl': _webDavUrl,
       if (webDavUri != null) 'webDavToken': _webDavToken,
     }).timeout(fileTransferTimeout);
     if (result == null) {

@@ -405,7 +405,7 @@ class _ManagementStatsState extends State<_ManagementStats> {
       crossAxisCount: 2,
       crossAxisSpacing: 10,
       mainAxisSpacing: 10,
-      childAspectRatio: 1.72,
+      childAspectRatio: 1.34,
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       children: [

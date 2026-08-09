@@ -182,6 +182,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   Timer? _backgroundStatusTimer;
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
+  int _remoteMediaCount = 0;
   static const _remotePageSize = 240;
   int _remotePageOffset = 0;
   bool _remoteHasMore = false;
@@ -345,6 +346,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
 
       await _ensureBackupRepository();
+      await _backupRepository?.requeueInterruptedForeground(
+        destinationId: albumDestinationId(preferences.targetDir),
+        activeLeasePrefix: _foregroundLeasePrefix,
+      );
 
       // Manual refresh (runAutoSync: false) should bypass short caches.
       final forceRefresh = !runAutoSync;
@@ -463,6 +468,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _remoteMedia = page;
+        _remoteMediaCount = remote.where((entry) => !entry.isDirectory).length;
         _remotePageOffset = page.length;
         _remoteHasMore = page.length == _remotePageSize;
       });
@@ -473,6 +479,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
       setState(() {
         _remoteMedia = const <UnraidFileEntry>[];
+        _remoteMediaCount = 0;
       });
       _remoteState.value = _AlbumPaneState(
         loading: false,
@@ -484,6 +491,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
       }
       setState(() {
         _remoteMedia = const <UnraidFileEntry>[];
+        _remoteMediaCount = 0;
       });
       _remoteState.value = _AlbumPaneState(
         loading: false,
@@ -601,6 +609,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   int _countPendingUploads() => _pendingUploads.length;
 
   int _syncGeneration = 0;
+  static final String _foregroundLeasePrefix =
+      'foreground-${DateTime.now().microsecondsSinceEpoch}-';
   bool _syncCancelRequested = false;
   AlbumTransferEngine? _activeTransferEngine;
   bool _syncPaused = false;
@@ -650,84 +660,170 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
     try {
       final destinationId = albumDestinationId(_preferences.targetDir);
+      await repository.requeueInterruptedForeground(
+        destinationId: destinationId,
+        activeLeasePrefix: _foregroundLeasePrefix,
+      );
       if (forceRetry) {
         await repository.requeueRetryable(destinationId: destinationId);
       }
-      final claimed = await repository.claimQueued(
-        leaseOwner:
-            'foreground-$generation-${DateTime.now().millisecondsSinceEpoch}',
-        destinationId: destinationId,
-        limit: 100,
-        leaseDuration: const Duration(minutes: 30),
-      );
       final assets = <String, LocalMediaAsset>{
         for (final asset in _localMedia) asset.id: asset,
       };
-      final unavailable = claimed.where(
-        (record) => assets[record.assetId]?.uri.isNotEmpty != true,
-      );
-      await Future.wait(
-        unavailable.map(
-          (record) => repository.transitionBackupState(
-            assetId: record.assetId,
-            destinationId: record.destinationId,
-            state: AlbumBackupState.missingLocal,
-            error: '本地媒体已不存在或当前不可访问',
-          ),
-        ),
-      );
-      final jobs = claimed
-          .where((record) => assets[record.assetId]?.uri.isNotEmpty == true)
-          .map(
-            (record) => AlbumTransferJob(
-              record: record,
-              asset: assets[record.assetId]!,
+      final initialPending = _countPendingUploads();
+      final processedAssetIds = <String>{};
+      var completed = 0;
+      var failed = 0;
+      var batch = 0;
+      var sawJobs = false;
+      var cancelled = false;
+      String? fallbackNotice;
+      String? shownFallbackNotice;
+
+      while (!_syncCancelRequested) {
+        final claimed = await repository.claimQueued(
+          leaseOwner:
+              '$_foregroundLeasePrefix$generation-${DateTime.now().millisecondsSinceEpoch}',
+          destinationId: destinationId,
+          limit: 100,
+          leaseDuration: const Duration(minutes: 30),
+        );
+        if (claimed.isEmpty) break;
+        batch += 1;
+
+        final fresh = <AlbumBackupRecord>[];
+        final repeated = <AlbumBackupRecord>[];
+        for (final record in claimed) {
+          (processedAssetIds.add(record.assetId) ? fresh : repeated)
+              .add(record);
+        }
+        await Future.wait(
+          repeated.map(
+            (record) => repository.transitionBackupState(
+              assetId: record.assetId,
+              destinationId: record.destinationId,
+              state: AlbumBackupState.failed,
+              error: '本轮已经尝试过，留待下次重试',
+              nextRetry: DateTime.now().add(const Duration(minutes: 30)),
             ),
-          )
-          .toList(growable: false);
-      final engine = AlbumTransferEngine(
-        repository: repository,
-        client: client,
-        remoteRoot: _preferences.targetDir,
-        maxConcurrency: _preferences.transferConcurrency,
-        onProgress: (progress) {
-          if (!mounted || generation != _syncGeneration) return;
-          final speed = progress.bytesPerSecond <= 0
-              ? ''
-              : ' · ${_formatByteRate(progress.bytesPerSecond)}';
-          _syncProgress.value = _AlbumSyncProgress(
-            syncing: true,
-            uploadedCount: progress.completed,
+          ),
+        );
+        if (fresh.isEmpty) continue;
+        final unavailable = fresh.where(
+          (record) => assets[record.assetId]?.uri.isNotEmpty != true,
+        );
+        await Future.wait(
+          unavailable.map(
+            (record) => repository.transitionBackupState(
+              assetId: record.assetId,
+              destinationId: record.destinationId,
+              state: AlbumBackupState.missingLocal,
+              error: '本地媒体已不存在或当前不可访问',
+            ),
+          ),
+        );
+        final jobs = fresh
+            .where((record) => assets[record.assetId]?.uri.isNotEmpty == true)
+            .map(
+              (record) => AlbumTransferJob(
+                record: record,
+                asset: assets[record.assetId]!,
+              ),
+            )
+            .toList(growable: false);
+        if (jobs.isEmpty) continue;
+        sawJobs = true;
+        final completedBeforeBatch = completed;
+        final failedBeforeBatch = failed;
+        final engine = AlbumTransferEngine(
+          repository: repository,
+          client: client,
+          maxConcurrency: _preferences.transferConcurrency,
+          onProgress: (progress) {
+            if (!mounted || generation != _syncGeneration) return;
+            fallbackNotice = progress.fallbackNotice ?? fallbackNotice;
+            if (progress.fallbackNotice != null &&
+                progress.fallbackNotice != shownFallbackNotice) {
+              shownFallbackNotice = progress.fallbackNotice;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(progress.fallbackNotice!)),
+              );
+            }
+            final cumulativeCompleted =
+                completedBeforeBatch + progress.completed;
+            final cumulativeFailed = failedBeforeBatch + progress.failed;
+            final speed = progress.bytesPerSecond <= 0
+                ? ''
+                : ' · ${_formatByteRate(progress.bytesPerSecond)}';
+            _syncProgress.value = _AlbumSyncProgress(
+              syncing: true,
+              uploadedCount: cumulativeCompleted,
+              pendingCount:
+                  (initialPending - cumulativeCompleted - cumulativeFailed)
+                      .clamp(0, initialPending),
+              message: progress.lastError != null
+                  ? '第 $batch 批部分失败：${progress.lastError}'
+                  : progress.fallbackNotice != null
+                      ? '${progress.fallbackNotice} · 第 $batch 批 · '
+                          '${progress.active} 个并发$speed'
+                      : '第 $batch 批 · ${progress.active} 个并发 · '
+                          '${progress.currentName ?? '准备中'}$speed',
+            );
+          },
+        );
+        _activeTransferEngine = engine;
+        final result = await engine.run(jobs);
+        _activeTransferEngine = null;
+        _syncPaused = false;
+        completed += result.completed;
+        failed += result.failed;
+        fallbackNotice = result.fallbackNotice ?? fallbackNotice;
+        cancelled = _syncCancelRequested || result.cancelled;
+        if (cancelled) break;
+        if (mounted && generation == _syncGeneration) {
+          _syncProgress.value = _syncProgress.value.copyWith(
+            uploadedCount: completed,
             pendingCount:
-                (progress.total - progress.completed - progress.failed)
-                    .clamp(0, progress.total),
-            message: progress.lastError != null
-                ? '部分失败：${progress.lastError}'
-                : '${progress.active} 个并发 · ${progress.currentName ?? '准备中'}$speed',
+                (initialPending - completed - failed).clamp(0, initialPending),
+            message: '第 $batch 批完成，正在领取下一批',
           );
-        },
-      );
-      _activeTransferEngine = engine;
-      final result = await engine.run(jobs);
-      _activeTransferEngine = null;
-      _syncPaused = false;
-      await _refreshIndexedPending();
+        }
+      }
+
+      if (mounted && generation == _syncGeneration) {
+        _syncProgress.value = _syncProgress.value.copyWith(
+          message: '上传完成，正在整理队列',
+        );
+      }
+      try {
+        await _refreshIndexedPending().timeout(const Duration(seconds: 5));
+      } on TimeoutException catch (error, stackTrace) {
+        await AppLogger.log(
+          'album_sync_pending_refresh_timeout',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
       if (!mounted || generation != _syncGeneration) return;
       final stillPending = _countPendingUploads();
-      final cancelled = _syncCancelRequested || result.cancelled;
       _syncCancelRequested = false;
       _syncProgress.value = _AlbumSyncProgress(
         syncing: false,
-        uploadedCount: result.completed,
+        uploadedCount: completed,
         pendingCount: stillPending,
         message: cancelled
-            ? '已取消：完成 ${result.completed} 个，失败 ${result.failed} 个'
-            : result.failed > 0
-                ? '完成 ${result.completed} 个，失败 ${result.failed} 个，可稍后重试'
-                : jobs.isEmpty
-                    ? '当前没有到期的备份任务'
-                    : '已安全提交 ${result.completed} 个照片/视频',
+            ? '已取消：完成 $completed 个，失败 $failed 个'
+            : failed > 0
+                ? '完成 $completed 个，失败 $failed 个，可稍后重试'
+                : fallbackNotice != null
+                    ? '$fallbackNotice；已安全提交 $completed 个照片/视频'
+                    : !sawJobs
+                        ? '当前没有到期的备份任务'
+                        : '已安全提交 $completed 个照片/视频',
       );
+      if (!cancelled && completed > 0) {
+        unawaited(_reloadRemote());
+      }
     } on Object catch (error) {
       if (!mounted || generation != _syncGeneration) {
         return;
@@ -1054,7 +1150,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                               return _AlbumStats(
                                 localPhotos: localPhotos,
                                 localVideos: localVideos,
-                                remoteCount: _remoteMedia.length,
+                                remoteCount: _remoteMediaCount,
                                 pendingCount: progress.pendingCount,
                                 syncing: progress.syncing,
                               );
@@ -1196,7 +1292,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                 return _SyncPanel(
                   preferences: _preferences,
                   localCount: local.length,
-                  remoteCount: _remoteMedia.length,
+                  remoteCount: _remoteMediaCount,
                   pendingCount: progress.pendingCount,
                   uploadedCount: progress.uploadedCount,
                   syncing: progress.syncing,

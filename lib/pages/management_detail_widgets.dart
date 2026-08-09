@@ -862,10 +862,11 @@ class _ShareVideoPreviewPageState extends State<_ShareVideoPreviewPage> {
       }
       setState(() => _progress = value);
     });
-    await handle.ready;
     await Future<void>.delayed(const Duration(milliseconds: 120));
-    final controller = VideoPlayerController.file(handle.file);
-    await controller.initialize();
+    final controller = await RemoteVideoStream.openCached(
+      handle: handle,
+      entry: widget.entry,
+    );
     await controller.setLooping(true);
     if (widget.active) {
       await controller.play();

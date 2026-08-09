@@ -110,4 +110,5 @@ dependencies {
     implementation("com.hierynomus:smbj:0.14.0")
     implementation("androidx.work:work-runtime:2.11.2")
     implementation("com.google.guava:guava:33.4.8-android")
+    implementation("com.squareup.okhttp3:okhttp:5.3.0")
 }
