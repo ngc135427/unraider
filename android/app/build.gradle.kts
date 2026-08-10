@@ -5,6 +5,9 @@ plugins {
 }
 
 val androidReleaseAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+val buildingAppBundle = gradle.startParameter.taskNames.any {
+    it.contains("bundle", ignoreCase = true)
+}
 
 android {
     namespace = "com.ngc.unraider"
@@ -44,7 +47,7 @@ android {
 
     splits {
         abi {
-            isEnable = true
+            isEnable = !buildingAppBundle
             reset()
             include(*androidReleaseAbis.toTypedArray())
             isUniversalApk = true
