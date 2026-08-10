@@ -10,6 +10,10 @@ services:
       UNRAIDER_HELPER_TOKEN: "replace-with-a-random-token-at-least-16-characters"
       UNRAIDER_HELPER_WORKERS: "2"
       UNRAIDER_CORS_ORIGIN: "*"
+      UNRAIDER_OCR_LANGUAGES: "chi_sim+eng"
+      # 可选：连接同一局域网中的 Ollama 视觉模型；留空时只做 OCR 与元数据检索。
+      UNRAIDER_VISION_URL: ""
+      UNRAIDER_VISION_MODEL: ""
       UNRAIDER_ROOTS_JSON: >-
         [{"id":"photos","path":"/media/photos","remotePrefix":"/mnt/user/photos"}]
     volumes:

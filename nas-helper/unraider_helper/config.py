@@ -37,6 +37,11 @@ class HelperConfig:
     cors_origin: str = "*"
     workers: int = 2
     ffmpeg: str = "ffmpeg"
+    tesseract: str = "tesseract"
+    ocr_languages: str = "chi_sim+eng"
+    vision_url: str = ""
+    vision_model: str = ""
+    vision_timeout_seconds: int = 180
 
     @classmethod
     def from_env(cls) -> "HelperConfig":
@@ -69,6 +74,10 @@ class HelperConfig:
         cors_origin = os.environ.get("UNRAIDER_CORS_ORIGIN", "*").strip() or "*"
         if "\r" in cors_origin or "\n" in cors_origin:
             raise ValueError("UNRAIDER_CORS_ORIGIN must be a single HTTP header value")
+        vision_url = os.environ.get("UNRAIDER_VISION_URL", "").strip().rstrip("/")
+        vision_model = os.environ.get("UNRAIDER_VISION_MODEL", "").strip()
+        if bool(vision_url) != bool(vision_model):
+            raise ValueError("UNRAIDER_VISION_URL and UNRAIDER_VISION_MODEL must be configured together")
         return cls(
             host=os.environ.get("UNRAIDER_HELPER_HOST", "0.0.0.0"),
             port=int(os.environ.get("UNRAIDER_HELPER_PORT", "9487")),
@@ -78,4 +87,12 @@ class HelperConfig:
             cors_origin=cors_origin,
             workers=max(1, min(4, int(os.environ.get("UNRAIDER_HELPER_WORKERS", "2")))),
             ffmpeg=os.environ.get("UNRAIDER_FFMPEG", "ffmpeg"),
+            tesseract=os.environ.get("UNRAIDER_TESSERACT", "tesseract"),
+            ocr_languages=os.environ.get("UNRAIDER_OCR_LANGUAGES", "chi_sim+eng").strip() or "chi_sim+eng",
+            vision_url=vision_url,
+            vision_model=vision_model,
+            vision_timeout_seconds=max(
+                10,
+                min(600, int(os.environ.get("UNRAIDER_VISION_TIMEOUT_SECONDS", "180"))),
+            ),
         )

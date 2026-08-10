@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import time
@@ -49,6 +50,35 @@ class HelperStoreTest(unittest.TestCase):
         self.assertEqual({first[0]["mediaKind"], second[0]["mediaKind"]}, {"image", "video"})
         self.assertTrue(all(".unraider" not in item["remotePath"] for item in first + second))
 
+    def test_existing_helper_database_is_upgraded_with_search_baseline(self) -> None:
+        legacy_path = self.base / "legacy.sqlite3"
+        database = sqlite3.connect(legacy_path)
+        database.executescript(
+            """
+            CREATE TABLE assets (
+                root_id TEXT NOT NULL, relative_path TEXT NOT NULL,
+                remote_path TEXT NOT NULL, display_name TEXT NOT NULL,
+                media_kind TEXT NOT NULL, mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL, modified_ms INTEGER NOT NULL,
+                version_key TEXT NOT NULL, thumbnail_path TEXT, content_hash TEXT,
+                seen_scan TEXT NOT NULL, updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(root_id, relative_path)
+            );
+            INSERT INTO assets VALUES (
+                'photos','legacy.jpg','/mnt/user/photos/legacy.jpg','legacy.jpg',
+                'image','image/jpeg',10,1000,'10:1000',NULL,NULL,'old-scan',1000
+            );
+            """
+        )
+        database.commit()
+        database.close()
+
+        upgraded = HelperStore(legacy_path)
+        hits, _ = upgraded.search_assets(query="legacy", limit=10)
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["remotePath"], "/mnt/user/photos/legacy.jpg")
+
     def test_rescan_removes_missing_assets_without_touching_originals(self) -> None:
         original = self.media / "one.jpg"
         original.write_bytes(b"one")
@@ -81,6 +111,65 @@ class HelperStoreTest(unittest.TestCase):
 
     def test_stable_key_matches_flutter_fnv_for_ascii(self) -> None:
         self.assertEqual(stable_key("hello"), "4f9f2cab")
+
+    def test_smart_search_indexes_filename_ocr_and_semantic_caption(self) -> None:
+        original = self.media / "trip" / "receipt.jpg"
+        original.parent.mkdir()
+        original.write_bytes(b"receipt")
+        scan_root(self.store, self.root)
+
+        filename_hits, _ = self.store.search_assets(query="receipt", limit=10)
+        self.assertEqual([item["displayName"] for item in filename_hits], ["receipt.jpg"])
+
+        asset = self.store.assets_for_job("photos")[0]
+        self.store.update_asset_intelligence(
+            "photos",
+            "trip/receipt.jpg",
+            asset["version_key"],
+            ocr=("咖啡店 发票 2026", "tesseract:chi_sim+eng:v1"),
+            semantic=("桌面上的一张咖啡发票", ["咖啡", "票据"], "ollama:vision:v1"),
+        )
+
+        ocr_hits, _ = self.store.search_assets(query="咖啡 发票", limit=10)
+        self.assertEqual(len(ocr_hits), 1)
+        self.assertEqual(ocr_hits[0]["intelligence"]["caption"], "桌面上的一张咖啡发票")
+        self.assertIn("票据", ocr_hits[0]["intelligence"]["labels"])
+
+        original.write_bytes(b"changed-receipt")
+        scan_root(self.store, self.root)
+        stale_hits, _ = self.store.search_assets(query="咖啡", limit=10)
+        self.assertEqual(stale_hits, [])
+
+    def test_intelligence_job_preserves_partial_results_and_skips_current_version(self) -> None:
+        original = self.media / "sign.jpg"
+        original.write_bytes(b"sign")
+        scan_root(self.store, self.root)
+        config = HelperConfig(
+            host="127.0.0.1",
+            port=0,
+            token="test-token-123456789",
+            state_dir=self.base / "state",
+            roots=(self.root,),
+            workers=1,
+        )
+        runner = JobRunner(config, self.store)
+        preview = self.media / ".unraider" / "thumbnails" / "preview.jpg"
+        preview.parent.mkdir(parents=True)
+        preview.write_bytes(b"preview")
+        with patch("unraider_helper.jobs.derived_paths", return_value=(preview, "/preview.jpg")), patch(
+            "unraider_helper.jobs.extract_ocr", return_value="停车场 A 区"
+        ) as extract:
+            first = runner._run(
+                {"id": "ocr-test", "type": "ocr", "payload": {"rootId": "photos"}}
+            )
+            second = runner._run(
+                {"id": "ocr-test-2", "type": "ocr", "payload": {"rootId": "photos"}}
+            )
+        self.assertEqual(first["intelligence"]["indexed"], 1)
+        self.assertEqual(second["intelligence"]["skipped"], 1)
+        extract.assert_called_once()
+        hits, _ = self.store.search_assets(query="停车场", limit=10)
+        self.assertEqual(len(hits), 1)
 
     def test_rebuild_regenerates_derived_files_even_when_index_has_old_path(self) -> None:
         original = self.media / "one.jpg"
@@ -165,6 +254,8 @@ class HelperApiTest(unittest.TestCase):
         status, capabilities = self.request("/api/v1/capabilities")
         self.assertEqual(status, 200)
         self.assertEqual(capabilities["apiVersion"], 1)
+        self.assertIn("smart-search-v1", capabilities["capabilities"])
+        self.assertFalse(capabilities["intelligence"]["semantic"])
 
         options = urllib.request.Request(self.base_url + "/api/v1/assets", method="OPTIONS")
         with urllib.request.urlopen(options, timeout=3) as response:
@@ -185,6 +276,16 @@ class HelperApiTest(unittest.TestCase):
         self.assertEqual(job["state"], "completed")
         _, page = self.request("/api/v1/assets?limit=10")
         self.assertEqual(len(page["items"]), 1)
+        _, search = self.request("/api/v1/search?q=photo&limit=10")
+        self.assertEqual(len(search["items"]), 1)
+
+        status, error = self.request(
+            "/api/v1/jobs",
+            method="POST",
+            body={"type": "semantic", "payload": {"rootId": "photos"}},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(error["error"]["code"], "semantic_not_configured")
 
 
 if __name__ == "__main__":

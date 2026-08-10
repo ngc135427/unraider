@@ -61,6 +61,21 @@ class HelperStore:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS assets_remote_path ON assets(remote_path);
                 CREATE INDEX IF NOT EXISTS assets_page ON assets(root_id, relative_path);
+                CREATE TABLE IF NOT EXISTS asset_intelligence (
+                    root_id TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    version_key TEXT NOT NULL,
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    ocr_version TEXT,
+                    caption TEXT NOT NULL DEFAULT '',
+                    labels_json TEXT NOT NULL DEFAULT '[]',
+                    semantic_version TEXT,
+                    last_error TEXT,
+                    updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY(root_id, relative_path),
+                    FOREIGN KEY(root_id, relative_path)
+                        REFERENCES assets(root_id, relative_path) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL UNIQUE,
@@ -83,12 +98,60 @@ class HelperStore:
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(state, created_at_ms);
                 """
             )
+            try:
+                database.executescript(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS asset_intelligence_fts USING fts5(
+                        root_id UNINDEXED,
+                        relative_path UNINDEXED,
+                        search_text,
+                        tokenize='unicode61 remove_diacritics 2'
+                    );
+                    CREATE TRIGGER IF NOT EXISTS asset_intelligence_ai AFTER INSERT ON asset_intelligence BEGIN
+                        INSERT INTO asset_intelligence_fts(root_id,relative_path,search_text)
+                        SELECT new.root_id,new.relative_path,
+                               a.display_name || ' ' || a.relative_path || ' ' ||
+                               new.ocr_text || ' ' || new.caption || ' ' || new.labels_json
+                        FROM assets a
+                        WHERE a.root_id=new.root_id AND a.relative_path=new.relative_path;
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS asset_intelligence_ad AFTER DELETE ON asset_intelligence BEGIN
+                        DELETE FROM asset_intelligence_fts
+                        WHERE root_id=old.root_id AND relative_path=old.relative_path;
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS asset_intelligence_au AFTER UPDATE ON asset_intelligence BEGIN
+                        DELETE FROM asset_intelligence_fts
+                        WHERE root_id=old.root_id AND relative_path=old.relative_path;
+                        INSERT INTO asset_intelligence_fts(root_id,relative_path,search_text)
+                        SELECT new.root_id,new.relative_path,
+                               a.display_name || ' ' || a.relative_path || ' ' ||
+                               new.ocr_text || ' ' || new.caption || ' ' || new.labels_json
+                        FROM assets a
+                        WHERE a.root_id=new.root_id AND a.relative_path=new.relative_path;
+                    END;
+                    """
+                )
+                self._fts_enabled = True
+            except sqlite3.OperationalError:
+                self._fts_enabled = False
+            database.execute(
+                """
+                INSERT OR IGNORE INTO asset_intelligence (
+                    root_id,relative_path,version_key,updated_at_ms
+                )
+                SELECT root_id,relative_path,version_key,updated_at_ms FROM assets
+                """
+            )
 
     def upsert_assets(self, assets: Iterable[dict[str, Any]], scan_id: str) -> int:
         count = 0
         now = _now_ms()
         with self._lock, self._connection() as database:
             for asset in assets:
+                stale = database.execute(
+                    "SELECT 1 FROM asset_intelligence WHERE root_id=? AND relative_path=? AND version_key<>?",
+                    (asset["rootId"], asset["relativePath"], asset["versionKey"]),
+                ).fetchone()
                 database.execute(
                     """
                     INSERT INTO assets (
@@ -124,6 +187,24 @@ class HelperStore:
                         asset["modifiedMs"],
                         asset["versionKey"],
                         scan_id,
+                        now,
+                    ),
+                )
+                if stale:
+                    database.execute(
+                        "DELETE FROM asset_intelligence WHERE root_id=? AND relative_path=?",
+                        (asset["rootId"], asset["relativePath"]),
+                    )
+                database.execute(
+                    """
+                    INSERT OR IGNORE INTO asset_intelligence (
+                        root_id,relative_path,version_key,updated_at_ms
+                    ) VALUES (?,?,?,?)
+                    """,
+                    (
+                        asset["rootId"],
+                        asset["relativePath"],
+                        asset["versionKey"],
                         now,
                     ),
                 )
@@ -184,18 +265,157 @@ class HelperStore:
         clauses: list[str] = []
         arguments: list[Any] = []
         if root_id:
-            clauses.append("root_id=?")
+            clauses.append("a.root_id=?")
             arguments.append(root_id)
         if media_kind:
-            clauses.append("media_kind=?")
+            clauses.append("a.media_kind=?")
             arguments.append(media_kind)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connection() as database:
             rows = database.execute(
-                f"SELECT * FROM assets{where} ORDER BY root_id,relative_path",
+                "SELECT a.*,i.ocr_text,i.ocr_version,i.caption,i.labels_json,"
+                "i.semantic_version,i.last_error AS intelligence_error "
+                f"FROM assets a LEFT JOIN asset_intelligence i USING(root_id,relative_path){where} "
+                "ORDER BY a.root_id,a.relative_path",
                 arguments,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def update_asset_intelligence(
+        self,
+        root_id: str,
+        relative_path: str,
+        version_key: str,
+        *,
+        ocr: tuple[str, str] | None = None,
+        semantic: tuple[str, list[str], str] | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self._lock, self._connection() as database:
+            existing = database.execute(
+                "SELECT * FROM asset_intelligence WHERE root_id=? AND relative_path=?",
+                (root_id, relative_path),
+            ).fetchone()
+            same_version = bool(existing and existing["version_key"] == version_key)
+            ocr_text = str(existing["ocr_text"]) if same_version else ""
+            ocr_version = existing["ocr_version"] if same_version else None
+            caption = str(existing["caption"]) if same_version else ""
+            labels_json = str(existing["labels_json"]) if same_version else "[]"
+            semantic_version = existing["semantic_version"] if same_version else None
+            if ocr is not None:
+                ocr_text, ocr_version = ocr
+            if semantic is not None:
+                caption, labels, semantic_version = semantic
+                labels_json = json.dumps(labels, ensure_ascii=False, separators=(",", ":"))
+            database.execute(
+                """
+                INSERT INTO asset_intelligence (
+                    root_id,relative_path,version_key,ocr_text,ocr_version,
+                    caption,labels_json,semantic_version,last_error,updated_at_ms
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(root_id,relative_path) DO UPDATE SET
+                    version_key=excluded.version_key,
+                    ocr_text=excluded.ocr_text,
+                    ocr_version=excluded.ocr_version,
+                    caption=excluded.caption,
+                    labels_json=excluded.labels_json,
+                    semantic_version=excluded.semantic_version,
+                    last_error=excluded.last_error,
+                    updated_at_ms=excluded.updated_at_ms
+                """,
+                (
+                    root_id,
+                    relative_path,
+                    version_key,
+                    ocr_text,
+                    ocr_version,
+                    caption,
+                    labels_json,
+                    semantic_version,
+                    error,
+                    _now_ms(),
+                ),
+            )
+
+    def search_assets(
+        self,
+        *,
+        query: str,
+        limit: int,
+        cursor: str | None = None,
+        prefix: str | None = None,
+        media_kind: str | None = None,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        bounded_limit = max(1, min(200, limit))
+        offset = 0
+        if cursor:
+            offset = int(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("ascii"))
+            if offset < 0:
+                raise ValueError("cursor offset must not be negative")
+        clauses: list[str] = []
+        arguments: list[Any] = []
+        if prefix:
+            normalized = prefix.rstrip("/")
+            escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("(a.remote_path=? OR a.remote_path LIKE ? ESCAPE '\\')")
+            arguments.extend((normalized, f"{escaped}/%"))
+        if media_kind:
+            clauses.append("a.media_kind=?")
+            arguments.append(media_kind)
+        if from_ms is not None:
+            clauses.append("a.modified_ms>=?")
+            arguments.append(from_ms)
+        if to_ms is not None:
+            clauses.append("a.modified_ms<=?")
+            arguments.append(to_ms)
+        normalized_query = " ".join(query.strip().split())[:500]
+        select = (
+            "SELECT a.*,i.ocr_text,i.caption,i.labels_json,i.ocr_version,"
+            "i.semantic_version,i.last_error AS intelligence_error"
+        )
+        if normalized_query and self._fts_enabled:
+            tokens = [token.replace('"', '""') for token in normalized_query.split()[:12] if token]
+            if not tokens:
+                return [], None
+            clauses.insert(0, "asset_intelligence_fts MATCH ?")
+            arguments.insert(0, " AND ".join(f'"{token}"' for token in tokens))
+            source = (
+                " FROM asset_intelligence_fts f "
+                "JOIN assets a ON a.root_id=f.root_id AND a.relative_path=f.relative_path "
+                "JOIN asset_intelligence i ON i.root_id=a.root_id AND i.relative_path=a.relative_path"
+            )
+            order = " ORDER BY bm25(asset_intelligence_fts),a.modified_ms DESC,a.remote_path"
+        else:
+            source = (
+                " FROM assets a LEFT JOIN asset_intelligence i "
+                "ON i.root_id=a.root_id AND i.relative_path=a.relative_path"
+            )
+            if normalized_query:
+                haystack = (
+                    "lower(a.display_name || ' ' || a.relative_path || ' ' || "
+                    "coalesce(i.ocr_text,'') || ' ' || coalesce(i.caption,'') || ' ' || "
+                    "coalesce(i.labels_json,''))"
+                )
+                for token in normalized_query.lower().split()[:12]:
+                    escaped_token = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    clauses.append(f"{haystack} LIKE ? ESCAPE '\\'")
+                    arguments.append(f"%{escaped_token}%")
+            order = " ORDER BY a.modified_ms DESC,a.remote_path"
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connection() as database:
+            rows = database.execute(
+                f"{select}{source}{where}{order} LIMIT ? OFFSET ?",
+                (*arguments, bounded_limit + 1, offset),
+            ).fetchall()
+        has_more = len(rows) > bounded_limit
+        rows = rows[:bounded_limit]
+        values = [self._asset_json(row, include_intelligence=True) for row in rows]
+        next_cursor = None
+        if has_more:
+            next_cursor = base64.urlsafe_b64encode(str(offset + bounded_limit).encode("ascii")).decode("ascii")
+        return values, next_cursor
 
     def update_asset_derived(self, root_id: str, relative_path: str, thumbnail_path: str) -> None:
         with self._lock, self._connection() as database:
@@ -317,8 +537,8 @@ class HelperStore:
         return self.get_job(job_id)
 
     @staticmethod
-    def _asset_json(row: sqlite3.Row) -> dict[str, Any]:
-        return {
+    def _asset_json(row: sqlite3.Row, *, include_intelligence: bool = False) -> dict[str, Any]:
+        value = {
             "rootId": row["root_id"],
             "relativePath": row["relative_path"],
             "remotePath": row["remote_path"],
@@ -331,6 +551,18 @@ class HelperStore:
             "thumbnailPath": row["thumbnail_path"],
             "contentHash": row["content_hash"],
         }
+        if include_intelligence:
+            keys = set(row.keys())
+            labels_raw = row["labels_json"] if "labels_json" in keys else None
+            value["intelligence"] = {
+                "caption": row["caption"] if "caption" in keys else "",
+                "labels": json.loads(labels_raw) if labels_raw else [],
+                "ocrSnippet": str(row["ocr_text"] or "")[:500] if "ocr_text" in keys else "",
+                "ocrVersion": row["ocr_version"] if "ocr_version" in keys else None,
+                "semanticVersion": row["semantic_version"] if "semantic_version" in keys else None,
+                "lastError": row["intelligence_error"] if "intelligence_error" in keys else None,
+            }
+        return value
 
     @staticmethod
     def _job_json(row: sqlite3.Row) -> dict[str, Any]:

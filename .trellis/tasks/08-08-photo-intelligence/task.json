@@ -3,7 +3,7 @@
   "name": "photo-intelligence",
   "title": "相册智能检索与地图",
   "description": "后续能力：人物、场景、OCR、语义搜索与地图浏览",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -12,7 +12,7 @@
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
   "completedAt": null,
-  "branch": null,
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -20,7 +20,12 @@
   "subtasks": [],
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
-  "relatedFiles": [],
-  "notes": "",
+  "relatedFiles": [
+    "nas-helper/unraider_helper/intelligence.py",
+    "nas-helper/unraider_helper/storage.py",
+    "lib/services/album_nas_helper.dart",
+    "lib/pages/album_widgets.dart"
+  ],
+  "notes": "已完成第一阶段智能检索：SQLite FTS5、文件名/路径基线、Tesseract 中英文 OCR、可选局域网视觉模型描述/标签、版本化增量作业、客户端筛选与结果预览。人物聚类、用户修正与地图浏览仍待后续实现；视频转码按当前产品决策暂缓。",
   "meta": {}
 }

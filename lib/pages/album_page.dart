@@ -572,6 +572,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   }
 
   Future<void> _runNasHelperRebuild() async {
+    await _runNasHelperJob('rebuild');
+  }
+
+  Future<void> _runNasHelperIntelligence() async {
+    await _runNasHelperJob('intelligence');
+  }
+
+  Future<void> _runNasHelperJob(String type) async {
     final helper = _nasHelperClient();
     if (helper == null) {
       await _probeNasHelper();
@@ -604,10 +612,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     }
     try {
       final job = await helper.submitJob(
-        type: 'rebuild',
+        type: type,
         rootId: matchingRoots.first.id,
-        idempotencyKey:
-            'mobile-rebuild-${DateTime.now().microsecondsSinceEpoch}',
+        idempotencyKey: 'mobile-$type-${DateTime.now().microsecondsSinceEpoch}',
       );
       if (!mounted) return;
       setState(() => _nasHelperJob = job);
@@ -618,6 +625,34 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
           SnackBar(content: Text('提交 NAS 助手作业失败：$error')),
         );
       }
+    } finally {
+      helper.close();
+    }
+  }
+
+  Future<List<AlbumNasHelperAsset>> _searchNasHelper({
+    required String query,
+    AlbumMediaKind? kind,
+    int? fromMs,
+    int? toMs,
+  }) async {
+    if (query.trim().isEmpty) return const <AlbumNasHelperAsset>[];
+    if (!_nasHelperStatus.isReady ||
+        !_nasHelperStatus.capabilities.contains('smart-search-v1')) {
+      throw AlbumNasHelperException(_nasHelperStatus.message);
+    }
+    final helper = _nasHelperClient();
+    if (helper == null) {
+      throw const AlbumNasHelperException('NAS 助手未配置');
+    }
+    try {
+      return await helper.searchAssets(
+        query: query,
+        prefix: _preferences.targetDir,
+        kind: kind,
+        fromMs: fromMs,
+        toMs: toMs,
+      );
     } finally {
       helper.close();
     }
@@ -1588,6 +1623,12 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         ),
       _PhoAlbumTab.manage => _AlbumManagementPanel(
           repository: _backupRepository,
+          client: _client,
+          remoteRoot: _preferences.targetDir,
+          nasHelperStatus: _nasHelperStatus,
+          nasHelperJob: _nasHelperJob,
+          onSmartSearch: _searchNasHelper,
+          onBuildSmartIndex: _runNasHelperIntelligence,
           onLibraryChanged: () => _loadAll(runAutoSync: false),
         ),
       _PhoAlbumTab.settings => ListView(

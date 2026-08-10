@@ -50,6 +50,7 @@ Unraider 是一个使用 Flutter 构建的 Unraid 移动端/桌面端管理客�
 - 云端相册支持分页加载和旧版日期目录备份识别。
 - 管理页支持按文件名、目录和媒体类型搜索，创建逻辑相册、按 SHA-256 复核精确重复项，以及在远端原件完成大小校验后释放本机空间。
 - 可选 NAS 助手可在 Unraid 本机扫描历史图库、生成图片缩略图/视频封面、计算完整性哈希；客户端支持能力协商、作业进度/取消/重试，并在助手未安装、离线或鉴权失败时自动回退到纯客户端扫描。
+- 相册管理页支持 NAS 智能检索：文件名/路径全文搜索、简体中文与英文 OCR、媒体类型/日期筛选，以及可选的局域网视觉模型画面描述和标签；所有智能数据均可重建，默认不会调用外部 AI。
 
 ### 音乐页面
 
@@ -72,7 +73,7 @@ Unraider 是一个使用 Flutter 构建的 Unraid 移动端/桌面端管理客�
 - Android MethodChannel：登录/相册/WebDAV 偏好、本地媒体读取、SMB 传输与后台任务
 - Android WorkManager、OkHttp、SMBJ：后台媒体发现、前台通知、WebDAV/SMB 上传与下载
 - Flutter Widget Test 与单元测试：页面行为、解析、传输、缓存、歌词和相册备份覆盖
-- NAS 助手：Python 3.12 标准库 HTTP 服务、SQLite/WAL、FFmpeg、Docker Compose
+- NAS 助手：Python 3.12 标准库 HTTP 服务、SQLite/WAL/FTS5、FFmpeg、Tesseract、可选 Ollama 视觉模型、Docker Compose
 
 ## 目录结构
 
@@ -390,6 +391,7 @@ dart format lib test
 - 相册 SQLite 索引、增量发现、任务状态、失败重试、中断恢复和旧备份识别。
 - 相册预览缓存、逻辑相册、搜索、精确重复项和空间释放候选筛选。
 - NAS 助手鉴权与能力协商、游标分页、增量索引、派生目录隔离、幂等作业、取消/重试和删除派生文件后的完整重建。
+- 智能检索文件名基线、OCR/语义派生数据、版本失效、筛选参数和客户端结果解码。
 
 ## API 与权限说明
 

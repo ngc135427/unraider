@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:unraider/services/album_backup_models.dart';
 import 'package:unraider/services/album_nas_helper.dart';
 
 void main() {
@@ -29,6 +30,9 @@ void main() {
               'helperVersion': '9.0.0',
             }),
             200,
+            headers: const <String, String>{
+              'content-type': 'application/json; charset=utf-8',
+            },
           );
         }),
       );
@@ -168,6 +172,56 @@ void main() {
       expect(job.id, 'job-1');
       expect(job.progress, 0.5);
       expect(job.isFinished, isFalse);
+    });
+
+    test('decodes smart search intelligence and forwards filters', () async {
+      final client = AlbumNasHelperClient(
+        baseUrl: 'http://nas:9487',
+        token: 'secret',
+        httpClient: MockClient((request) async {
+          expect(request.url.path, '/api/v1/search');
+          expect(request.url.queryParameters['q'], '咖啡 发票');
+          expect(request.url.queryParameters['kind'], 'image');
+          expect(request.url.queryParameters['fromMs'], '100');
+          return http.Response(
+            jsonEncode(<String, Object?>{
+              'items': <Map<String, Object?>>[
+                <String, Object?>{
+                  'remotePath': '/mnt/user/photos/receipt.jpg',
+                  'displayName': 'receipt.jpg',
+                  'mediaKind': 'image',
+                  'mimeType': 'image/jpeg',
+                  'sizeBytes': 10,
+                  'modifiedMs': 200,
+                  'versionKey': '10:200',
+                  'intelligence': <String, Object?>{
+                    'caption': '桌面上的咖啡发票',
+                    'labels': <String>['咖啡', '票据'],
+                    'ocrSnippet': '合计 38 元',
+                    'ocrVersion': 'tesseract:chi_sim+eng:v1',
+                  },
+                },
+              ],
+              'nextCursor': null,
+            }),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json; charset=utf-8',
+            },
+          );
+        }),
+      );
+
+      final results = await client.searchAssets(
+        query: '咖啡 发票',
+        prefix: '/mnt/user/photos',
+        kind: AlbumMediaKind.image,
+        fromMs: 100,
+      );
+
+      expect(results, hasLength(1));
+      expect(results.single.intelligence?.caption, '桌面上的咖啡发票');
+      expect(results.single.intelligence?.labels, contains('票据'));
     });
   });
 }

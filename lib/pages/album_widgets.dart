@@ -45,10 +45,27 @@ class _AlbumHeader extends StatelessWidget {
 class _AlbumManagementPanel extends StatefulWidget {
   const _AlbumManagementPanel({
     required this.repository,
+    required this.client,
+    required this.remoteRoot,
+    required this.nasHelperStatus,
+    required this.nasHelperJob,
+    required this.onSmartSearch,
+    required this.onBuildSmartIndex,
     required this.onLibraryChanged,
   });
 
   final AlbumBackupRepository? repository;
+  final UnraidClient? client;
+  final String remoteRoot;
+  final AlbumNasHelperStatus nasHelperStatus;
+  final AlbumNasHelperJob? nasHelperJob;
+  final Future<List<AlbumNasHelperAsset>> Function({
+    required String query,
+    AlbumMediaKind? kind,
+    int? fromMs,
+    int? toMs,
+  }) onSmartSearch;
+  final Future<void> Function() onBuildSmartIndex;
   final Future<void> Function() onLibraryChanged;
 
   @override
@@ -60,11 +77,13 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
   List<AlbumMediaAsset> _results = const <AlbumMediaAsset>[];
   List<AlbumLogicalAlbum> _albums = const <AlbumLogicalAlbum>[];
   List<AlbumDuplicateGroup> _duplicates = const <AlbumDuplicateGroup>[];
+  List<AlbumNasHelperAsset> _smartResults = const <AlbumNasHelperAsset>[];
   final Set<String> _selectedAssetIds = <String>{};
   AlbumMediaKind? _kind;
   DateTimeRange? _dateRange;
   bool _loading = false;
   String? _message;
+  String? _smartMessage;
 
   @override
   void initState() {
@@ -89,24 +108,49 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
     if (repository == null) return;
     setState(() => _loading = true);
     try {
+      final fromMs = _dateRange?.start.millisecondsSinceEpoch;
+      final toMs = _dateRange == null
+          ? null
+          : DateTime(
+                _dateRange!.end.year,
+                _dateRange!.end.month,
+                _dateRange!.end.day + 1,
+              ).millisecondsSinceEpoch -
+              1;
       final values = await Future.wait<Object>([
         repository.searchMedia(
           query: _searchController.text,
           kind: _kind,
-          fromMs: _dateRange?.start.millisecondsSinceEpoch,
-          toMs: _dateRange == null
-              ? null
-              : DateTime(_dateRange!.end.year, _dateRange!.end.month,
-                          _dateRange!.end.day + 1)
-                      .millisecondsSinceEpoch -
-                  1,
+          fromMs: fromMs,
+          toMs: toMs,
         ),
         repository.listLogicalAlbums(),
       ]);
+      var smartResults = const <AlbumNasHelperAsset>[];
+      String? smartMessage;
+      final query = _searchController.text.trim();
+      if (query.isNotEmpty &&
+          widget.nasHelperStatus.isReady &&
+          widget.nasHelperStatus.capabilities.contains('smart-search-v1')) {
+        try {
+          smartResults = await widget.onSmartSearch(
+            query: query,
+            kind: _kind,
+            fromMs: fromMs,
+            toMs: toMs,
+          );
+        } on Object catch (error) {
+          smartMessage = 'NAS 智能检索失败：$error';
+        }
+      } else if (query.isNotEmpty) {
+        smartMessage = widget.nasHelperStatus.message;
+      }
       if (!mounted) return;
       setState(() {
         _results = values[0] as List<AlbumMediaAsset>;
         _albums = values[1] as List<AlbumLogicalAlbum>;
+        _smartResults = smartResults;
+        _smartMessage = smartMessage;
       });
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -543,13 +587,40 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
     if (widget.repository == null) {
       return const Center(child: Text('相册索引不可用，无法打开管理功能'));
     }
+    final smartSearchAvailable = widget.nasHelperStatus.isReady &&
+        widget.nasHelperStatus.capabilities.contains('smart-search-v1');
+    final smartIndexAvailable = widget.nasHelperStatus.isReady &&
+        widget.nasHelperStatus.capabilities.contains('ocr-jobs-v1');
+    final helperJobRunning =
+        widget.nasHelperJob != null && !widget.nasHelperJob!.isFinished;
+    final smartGallery = _smartResults
+        .map(
+          (asset) => UnraidFileEntry(
+            name: asset.displayName,
+            path: asset.remotePath,
+            isDirectory: false,
+            sizeBytes: asset.sizeBytes,
+            size: _formatManagementBytes(asset.sizeBytes),
+            modified: asset.modifiedMs <= 0
+                ? ''
+                : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs)
+                    .toLocal()
+                    .toString(),
+            modifiedDate: asset.modifiedMs <= 0
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs),
+            thumbnailPath: asset.thumbnailPath,
+          ),
+        )
+        .toList(growable: false);
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 28),
       children: [
         TextField(
           controller: _searchController,
           decoration: InputDecoration(
-            labelText: '按文件名、目录、标签或描述搜索',
+            labelText: '搜索文件、标签、画面描述或图片文字',
+            hintText: '例如：咖啡发票、海边日落、停车场 A 区',
             prefixIcon: const Icon(Icons.search),
             suffixIcon: IconButton(
               onPressed: _reload,
@@ -621,6 +692,18 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
               icon: const Icon(Icons.cleaning_services_outlined),
               label: const Text('安全释放空间'),
             ),
+            FilledButton.tonalIcon(
+              onPressed: !smartIndexAvailable || _loading || helperJobRunning
+                  ? null
+                  : widget.onBuildSmartIndex,
+              icon: const Icon(Icons.auto_awesome_outlined),
+              label: Text(
+                widget.nasHelperStatus.capabilities
+                        .contains('semantic-caption-jobs-v1')
+                    ? '构建 OCR + 语义索引'
+                    : '构建 OCR 索引',
+              ),
+            ),
           ],
         ),
         if (_loading) ...[
@@ -630,6 +713,63 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
         if (_message != null) ...[
           const SizedBox(height: 10),
           Text(_message!, style: const TextStyle(color: AppTheme.textMedium)),
+        ],
+        const SizedBox(height: 14),
+        _InfoCard(
+          icon: smartSearchAvailable
+              ? Icons.manage_search_outlined
+              : Icons.search_off_outlined,
+          title: smartSearchAvailable ? 'NAS 智能检索已连接' : 'NAS 智能检索未启用',
+          subtitle: smartSearchAvailable
+              ? widget.nasHelperStatus.capabilities
+                      .contains('semantic-caption-jobs-v1')
+                  ? '支持文件信息、OCR 图片文字和本地视觉模型画面描述'
+                  : '支持文件信息和 OCR 图片文字；配置本地视觉模型后可搜索画面内容'
+              : widget.nasHelperStatus.message,
+        ),
+        if (_smartMessage != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _smartMessage!,
+            style: const TextStyle(color: AppTheme.textMedium),
+          ),
+        ],
+        if (_searchController.text.trim().isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Text(
+            'NAS 智能结果（${_smartResults.length}）',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          if (_smartResults.isEmpty && _smartMessage == null)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text(
+                '没有找到匹配的远端媒体；如尚未构建索引，可先运行智能索引作业。',
+                style: TextStyle(color: AppTheme.textMedium),
+              ),
+            ),
+          for (var index = 0; index < _smartResults.length; index++)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                _smartResults[index].mediaKind == AlbumMediaKind.video
+                    ? Icons.videocam_outlined
+                    : Icons.image_outlined,
+              ),
+              title: Text(_smartResults[index].displayName),
+              subtitle: Text(
+                _smartResultDescription(_smartResults[index]),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.open_in_full),
+              onTap: () => _openRemotePreview(
+                context,
+                client: widget.client,
+                gallery: smartGallery,
+                entry: smartGallery[index],
+              ),
+            ),
         ],
         if (_albums.isNotEmpty) ...[
           const SizedBox(height: 18),
@@ -677,7 +817,7 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
             ),
         ],
         const SizedBox(height: 18),
-        Text('搜索结果（${_results.length}）',
+        Text('本机索引结果（${_results.length}）',
             style: const TextStyle(fontWeight: FontWeight.w700)),
         for (final asset in _results)
           CheckboxListTile(
@@ -705,6 +845,20 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
           ),
       ],
     );
+  }
+
+  String _smartResultDescription(AlbumNasHelperAsset asset) {
+    final intelligence = asset.intelligence;
+    final parts = <String>[
+      asset.remotePath,
+      if (intelligence != null && intelligence.caption.isNotEmpty)
+        intelligence.caption,
+      if (intelligence != null && intelligence.labels.isNotEmpty)
+        intelligence.labels.join('、'),
+      if (intelligence != null && intelligence.ocrSnippet.isNotEmpty)
+        '识别文字：${intelligence.ocrSnippet}',
+    ];
+    return parts.join('\n');
   }
 }
 
@@ -1662,6 +1816,16 @@ class _NasHelperJobCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final running = job.state == 'queued' || job.state == 'running';
     final failed = job.state == 'failed';
+    final jobName = switch (job.type) {
+      'intelligence' => '智能索引',
+      'ocr' => 'OCR 索引',
+      'semantic' => '语义索引',
+      'rebuild' => '图库重建',
+      'previews' => '历史预览',
+      'integrity' => '完整性校验',
+      'scan' => '图库扫描',
+      _ => job.type,
+    };
     final label = switch (job.state) {
       'queued' => '等待执行',
       'running' => '正在执行',
@@ -1689,7 +1853,7 @@ class _NasHelperJobCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'NAS 作业 · $label',
+                  '$jobName · $label',
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),

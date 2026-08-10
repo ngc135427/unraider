@@ -63,6 +63,7 @@ class AlbumNasHelperAsset {
     required this.versionKey,
     this.thumbnailPath,
     this.contentHash,
+    this.intelligence,
   });
 
   factory AlbumNasHelperAsset.fromJson(Map<String, dynamic> value) =>
@@ -76,6 +77,11 @@ class AlbumNasHelperAsset {
         versionKey: value['versionKey']?.toString() ?? '',
         thumbnailPath: value['thumbnailPath']?.toString(),
         contentHash: value['contentHash']?.toString(),
+        intelligence: value['intelligence'] is Map<String, dynamic>
+            ? AlbumNasHelperIntelligence.fromJson(
+                value['intelligence'] as Map<String, dynamic>,
+              )
+            : null,
       );
 
   final String remotePath;
@@ -87,6 +93,7 @@ class AlbumNasHelperAsset {
   final String versionKey;
   final String? thumbnailPath;
   final String? contentHash;
+  final AlbumNasHelperIntelligence? intelligence;
 
   AlbumRemoteAsset toRemoteAsset(String destinationId) => AlbumRemoteAsset(
         destinationId: destinationId,
@@ -99,6 +106,40 @@ class AlbumNasHelperAsset {
         thumbnailPath: thumbnailPath,
         origin: 'helper-indexed',
       );
+}
+
+class AlbumNasHelperIntelligence {
+  const AlbumNasHelperIntelligence({
+    required this.caption,
+    required this.labels,
+    required this.ocrSnippet,
+    this.ocrVersion,
+    this.semanticVersion,
+    this.lastError,
+  });
+
+  factory AlbumNasHelperIntelligence.fromJson(Map<String, dynamic> value) =>
+      AlbumNasHelperIntelligence(
+        caption: value['caption']?.toString() ?? '',
+        labels: (value['labels'] as List<dynamic>? ?? const <dynamic>[])
+            .map((item) => item.toString())
+            .where((item) => item.isNotEmpty)
+            .toList(growable: false),
+        ocrSnippet: value['ocrSnippet']?.toString() ?? '',
+        ocrVersion: value['ocrVersion']?.toString(),
+        semanticVersion: value['semanticVersion']?.toString(),
+        lastError: value['lastError']?.toString(),
+      );
+
+  final String caption;
+  final List<String> labels;
+  final String ocrSnippet;
+  final String? ocrVersion;
+  final String? semanticVersion;
+  final String? lastError;
+
+  bool get hasContent =>
+      caption.isNotEmpty || labels.isNotEmpty || ocrSnippet.isNotEmpty;
 }
 
 class AlbumNasHelperJob {
@@ -253,6 +294,44 @@ class AlbumNasHelperClient {
       };
       final response = await _httpClient
           .get(_uri('/api/v1/assets', query), headers: _headers)
+          .timeout(requestTimeout);
+      _requireSuccess(response);
+      final value = _jsonObject(response.body);
+      final page = (value['items'] as List<dynamic>? ?? const <dynamic>[])
+          .whereType<Map<String, dynamic>>()
+          .map(AlbumNasHelperAsset.fromJson)
+          .where((asset) => asset.remotePath.isNotEmpty)
+          .toList(growable: false);
+      assets.addAll(page.take(maximum - assets.length));
+      cursor = value['nextCursor']?.toString();
+    } while (cursor != null && cursor.isNotEmpty && assets.length < maximum);
+    return assets;
+  }
+
+  Future<List<AlbumNasHelperAsset>> searchAssets({
+    required String query,
+    required String prefix,
+    AlbumMediaKind? kind,
+    int? fromMs,
+    int? toMs,
+    int maximum = 500,
+  }) async {
+    final assets = <AlbumNasHelperAsset>[];
+    String? cursor;
+    do {
+      final response = await _httpClient
+          .get(
+            _uri('/api/v1/search', <String, String>{
+              'q': query.trim(),
+              'prefix': prefix,
+              'limit': '100',
+              if (kind != null) 'kind': kind.name,
+              if (fromMs != null) 'fromMs': '$fromMs',
+              if (toMs != null) 'toMs': '$toMs',
+              if (cursor != null) 'cursor': cursor,
+            }),
+            headers: _headers,
+          )
           .timeout(requestTimeout);
       _requireSuccess(response);
       final value = _jsonObject(response.body);

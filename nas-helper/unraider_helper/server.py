@@ -34,7 +34,7 @@ class HelperApplication:
 
 
 class HelperRequestHandler(BaseHTTPRequestHandler):
-    server_version = "UnraiderAlbumHelper/0.1"
+    server_version = "UnraiderAlbumHelper/0.2"
 
     @property
     def application(self) -> HelperApplication:
@@ -56,17 +56,42 @@ class HelperRequestHandler(BaseHTTPRequestHandler):
                     "helperVersion": __version__,
                     "capabilities": [
                         "asset-index-v1",
+                        "smart-search-v1",
+                        "ocr-jobs-v1",
                         "thumbnail-jobs-v1",
                         "video-poster-jobs-v1",
                         "integrity-jobs-v1",
                         "job-control-v1",
-                    ],
+                    ]
+                    + (["semantic-caption-jobs-v1"] if self.application.config.vision_url else []),
+                    "intelligence": {
+                        "ocr": True,
+                        "ocrLanguages": self.application.config.ocr_languages,
+                        "semantic": bool(self.application.config.vision_url),
+                        "visionModel": self.application.config.vision_model or None,
+                    },
                     "roots": [
                         {"id": root.id, "remotePrefix": root.remote_prefix}
                         for root in self.application.config.roots
                     ],
                 },
             )
+            return
+        if parsed.path == "/api/v1/search":
+            try:
+                assets, next_cursor = self.application.store.search_assets(
+                    query=self._query(query, "q") or "",
+                    limit=self._int_query(query, "limit", 50),
+                    cursor=self._query(query, "cursor"),
+                    prefix=self._query(query, "prefix"),
+                    media_kind=self._query(query, "kind"),
+                    from_ms=self._optional_int_query(query, "fromMs"),
+                    to_ms=self._optional_int_query(query, "toMs"),
+                )
+            except (ValueError, UnicodeError) as error:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_search", str(error))
+                return
+            self._json(HTTPStatus.OK, {"items": assets, "nextCursor": next_cursor})
             return
         if parsed.path == "/api/v1/assets":
             try:
@@ -108,6 +133,13 @@ class HelperRequestHandler(BaseHTTPRequestHandler):
             job_type = str(body.get("type", ""))
             if job_type not in SUPPORTED_JOB_TYPES:
                 self._error(HTTPStatus.BAD_REQUEST, "unsupported_job_type", f"supported types: {sorted(SUPPORTED_JOB_TYPES)}")
+                return
+            if job_type == "semantic" and not self.application.config.vision_url:
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "semantic_not_configured",
+                    "configure UNRAIDER_VISION_URL and UNRAIDER_VISION_MODEL first",
+                )
                 return
             payload = body.get("payload") or {}
             if not isinstance(payload, dict):
@@ -203,6 +235,12 @@ class HelperRequestHandler(BaseHTTPRequestHandler):
             return fallback if value is None else int(value)
         except ValueError:
             return fallback
+
+    def _optional_int_query(self, query: dict[str, list[str]], name: str) -> int | None:
+        value = self._query(query, name)
+        if value is None:
+            return None
+        return int(value)
 
     @staticmethod
     def _job_route(path: str) -> tuple[str, str | None] | None:
