@@ -62,6 +62,7 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
   List<AlbumDuplicateGroup> _duplicates = const <AlbumDuplicateGroup>[];
   final Set<String> _selectedAssetIds = <String>{};
   AlbumMediaKind? _kind;
+  DateTimeRange? _dateRange;
   bool _loading = false;
   String? _message;
 
@@ -89,7 +90,17 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
     setState(() => _loading = true);
     try {
       final values = await Future.wait<Object>([
-        repository.searchMedia(query: _searchController.text, kind: _kind),
+        repository.searchMedia(
+          query: _searchController.text,
+          kind: _kind,
+          fromMs: _dateRange?.start.millisecondsSinceEpoch,
+          toMs: _dateRange == null
+              ? null
+              : DateTime(_dateRange!.end.year, _dateRange!.end.month,
+                          _dateRange!.end.day + 1)
+                      .millisecondsSinceEpoch -
+                  1,
+        ),
         repository.listLogicalAlbums(),
       ]);
       if (!mounted) return;
@@ -143,6 +154,268 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
       _selectedAssetIds.clear();
     });
     await _reload();
+  }
+
+  Future<void> _pickDateRange() async {
+    final now = DateTime.now();
+    final selected = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _dateRange,
+    );
+    if (selected == null || !mounted) return;
+    setState(() => _dateRange = selected);
+    await _reload();
+  }
+
+  Future<void> _openAlbum(AlbumLogicalAlbum album) async {
+    final repository = widget.repository;
+    if (repository == null) return;
+    final assets = await repository.listLogicalAlbumAssets(albumId: album.id);
+    if (!mounted) return;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(album.name),
+        content: SizedBox(
+          width: 520,
+          child: assets.isEmpty
+              ? const Text('这个逻辑相册还没有项目。')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: assets.length,
+                  itemBuilder: (context, index) {
+                    final asset = assets[index];
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        asset.kind == AlbumMediaKind.video
+                            ? Icons.videocam_outlined
+                            : Icons.image_outlined,
+                      ),
+                      title: Text(asset.displayName),
+                      subtitle: Text(asset.relativePath),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () => Navigator.of(context).pop('delete'),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('删除逻辑相册'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+    if (action != 'delete' || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认删除逻辑相册？'),
+        content: Text('只删除“${album.name}”的引用，不会删除任何照片或视频原件。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除相册'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await repository.deleteLogicalAlbum(album.id);
+    await _reload();
+  }
+
+  Future<void> _editMetadata(AlbumMediaAsset asset) async {
+    final repository = widget.repository;
+    if (repository == null) return;
+    final metadata = await repository.assetMetadata(asset.id);
+    if (!mounted) return;
+    var favorite = metadata.favorite;
+    var archived = metadata.archived;
+    var rating = metadata.rating;
+    final tags = TextEditingController(text: metadata.tags.join(', '));
+    final description = TextEditingController(text: metadata.description);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('编辑 ${asset.displayName}'),
+          content: SizedBox(
+            width: 480,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    value: favorite,
+                    title: const Text('收藏'),
+                    onChanged: (value) =>
+                        setDialogState(() => favorite = value),
+                  ),
+                  SwitchListTile(
+                    value: archived,
+                    title: const Text('归档'),
+                    onChanged: (value) =>
+                        setDialogState(() => archived = value),
+                  ),
+                  DropdownButtonFormField<int>(
+                    initialValue: rating,
+                    decoration: const InputDecoration(labelText: '评分'),
+                    items: List.generate(
+                      6,
+                      (value) => DropdownMenuItem(
+                        value: value,
+                        child: Text(value == 0 ? '未评分' : '$value 星'),
+                      ),
+                    ),
+                    onChanged: (value) =>
+                        setDialogState(() => rating = value ?? 0),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: tags,
+                    decoration: const InputDecoration(
+                      labelText: '标签',
+                      hintText: '多个标签用逗号分隔',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: description,
+                    maxLines: 3,
+                    decoration: const InputDecoration(labelText: '描述'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true) {
+      await repository.updateAssetMetadata(
+        assetId: asset.id,
+        favorite: favorite,
+        archived: archived,
+        tags: tags.text.split(RegExp(r'[,，]')),
+        description: description.text,
+        rating: rating,
+      );
+      await _reload();
+    }
+    tags.dispose();
+    description.dispose();
+  }
+
+  Future<void> _reviewDuplicateGroup(AlbumDuplicateGroup group) async {
+    final repository = widget.repository;
+    if (repository == null) return;
+    final preview = await AlbumManagementService(repository).freeSpacePreview();
+    final verifiedIds = preview.assets.map((asset) => asset.id).toSet();
+    final candidates = group.assets
+        .where((asset) => verifiedIds.contains(asset.id))
+        .toList(growable: false);
+    if (!mounted) return;
+    if (candidates.isEmpty) {
+      setState(() => _message = '这组重复项尚无远端已验证副本，不能安全删除');
+      return;
+    }
+    final selected = <String>{};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('复核精确重复项'),
+          content: SizedBox(
+            width: 520,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('只允许选择远端原件已验证的项目，并且至少保留一个本地副本。'),
+                const SizedBox(height: 8),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final asset in group.assets)
+                        CheckboxListTile(
+                          value: selected.contains(asset.id),
+                          title: Text(asset.displayName),
+                          subtitle: Text(
+                            verifiedIds.contains(asset.id)
+                                ? asset.relativePath
+                                : '${asset.relativePath} · 尚未验证，禁止删除',
+                          ),
+                          onChanged: !verifiedIds.contains(asset.id)
+                              ? null
+                              : (checked) {
+                                  setDialogState(() {
+                                    if (checked == true) {
+                                      selected.add(asset.id);
+                                    } else {
+                                      selected.remove(asset.id);
+                                    }
+                                  });
+                                },
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton.icon(
+              onPressed:
+                  selected.isEmpty || selected.length >= group.assets.length
+                      ? null
+                      : () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('交由系统确认删除'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    final requested = candidates
+        .where((asset) => selected.contains(asset.id))
+        .toList(growable: false);
+    final result = await AlbumManagementService(repository)
+        .releaseVerifiedAssets(requested);
+    if (!mounted) return;
+    setState(() {
+      _message = result.cancelled
+          ? '用户取消了系统删除确认'
+          : '重复项已删除 ${result.deleted}/${result.requested} 项';
+    });
+    if (result.deleted > 0) await widget.onLibraryChanged();
   }
 
   Future<void> _scanDuplicates() async {
@@ -276,7 +549,7 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
         TextField(
           controller: _searchController,
           decoration: InputDecoration(
-            labelText: '按文件名、目录或媒体类型搜索',
+            labelText: '按文件名、目录、标签或描述搜索',
             prefixIcon: const Icon(Icons.search),
             suffixIcon: IconButton(
               onPressed: _reload,
@@ -298,6 +571,35 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
             setState(() => _kind = value.single);
             unawaited(_reload());
           },
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _loading ? null : _pickDateRange,
+              icon: const Icon(Icons.date_range_outlined),
+              label: Text(
+                _dateRange == null
+                    ? '按日期筛选'
+                    : '${_dateRange!.start.year}-${_dateRange!.start.month}-${_dateRange!.start.day} 至 '
+                        '${_dateRange!.end.year}-${_dateRange!.end.month}-${_dateRange!.end.day}',
+              ),
+            ),
+            if (_dateRange != null) ...[
+              IconButton.outlined(
+                tooltip: '清除日期筛选',
+                onPressed: _loading
+                    ? null
+                    : () {
+                        setState(() => _dateRange = null);
+                        unawaited(_reload());
+                      },
+                icon: const Icon(Icons.close),
+              ),
+            ],
+          ],
         ),
         const SizedBox(height: 14),
         Wrap(
@@ -339,12 +641,22 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
               leading: const Icon(Icons.photo_album_outlined),
               title: Text(album.name),
               subtitle: Text('${album.itemCount} 项 · 不复制原始文件'),
-              trailing: _selectedAssetIds.isEmpty
-                  ? null
-                  : TextButton(
+              onTap: () => _openAlbum(album),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_selectedAssetIds.isNotEmpty)
+                    TextButton(
                       onPressed: () => _addSelectionToAlbum(album),
                       child: const Text('加入所选'),
                     ),
+                  IconButton(
+                    tooltip: '查看逻辑相册',
+                    onPressed: () => _openAlbum(album),
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+                ],
+              ),
             ),
         ],
         if (_duplicates.isNotEmpty) ...[
@@ -360,6 +672,8 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
                 '${group.assets.map((asset) => asset.displayName).join('、')}',
               ),
               isThreeLine: true,
+              onTap: () => _reviewDuplicateGroup(group),
+              trailing: const Icon(Icons.fact_check_outlined),
             ),
         ],
         const SizedBox(height: 18),
@@ -373,6 +687,11 @@ class _AlbumManagementPanelState extends State<_AlbumManagementPanel> {
             subtitle: Text(
               '${asset.relativePath} · ${asset.kind == AlbumMediaKind.video ? '视频' : '照片'} · '
               '${_formatManagementBytes(asset.sizeBytes)}',
+            ),
+            secondary: IconButton(
+              tooltip: '收藏、标签、评分和描述',
+              onPressed: () => _editMetadata(asset),
+              icon: const Icon(Icons.edit_note_outlined),
             ),
             onChanged: (checked) {
               setState(() {
@@ -862,10 +1181,12 @@ class _SyncPanel extends StatelessWidget {
     required this.syncing,
     required this.paused,
     required this.backgroundStatus,
+    required this.failedItems,
     required this.onSync,
     required this.onBackgroundSync,
     required this.onPauseResume,
     required this.onCancel,
+    required this.onRetryAsset,
     required this.onSettings,
     this.message,
   });
@@ -879,10 +1200,12 @@ class _SyncPanel extends StatelessWidget {
   final bool paused;
   final String? message;
   final AlbumBackgroundStatus backgroundStatus;
+  final List<_AlbumFailedItem> failedItems;
   final VoidCallback onSync;
   final VoidCallback onBackgroundSync;
   final VoidCallback onPauseResume;
   final VoidCallback onCancel;
+  final ValueChanged<String> onRetryAsset;
   final VoidCallback onSettings;
 
   @override
@@ -922,9 +1245,38 @@ class _SyncPanel extends StatelessWidget {
                 ).toLocal().toString().substring(0, 16),
               ),
             if (backgroundStatus.lastError.isNotEmpty)
-              ('后台诊断', backgroundStatus.lastError),
+              ('后台诊断', backgroundStatus.actionableDiagnostic),
           ],
         ),
+        if (failedItems.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _InfoCard(
+            icon: Icons.error_outline,
+            title: '失败项目（${failedItems.length}）',
+            subtitle: '可以单独重试，也可以使用“立即同步”重试全部',
+            child: Column(
+              children: [
+                for (final item in failedItems.take(5))
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(item.name, maxLines: 1),
+                    subtitle: Text(item.error, maxLines: 2),
+                    trailing: TextButton(
+                      onPressed:
+                          syncing ? null : () => onRetryAsset(item.assetId),
+                      child: const Text('重试'),
+                    ),
+                  ),
+                if (failedItems.length > 5)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('另有 ${failedItems.length - 5} 项，可使用全部重试'),
+                  ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 14),
         Row(
           children: [
@@ -1339,6 +1691,7 @@ class _RemoteTile extends StatefulWidget {
 
 class _RemoteTileState extends State<_RemoteTile> {
   Future<Uint8List?>? _bytesFuture;
+  AlbumPreviewCancellation? _previewCancellation;
 
   @override
   void initState() {
@@ -1352,6 +1705,7 @@ class _RemoteTileState extends State<_RemoteTile> {
     if (oldWidget.entry.path != widget.entry.path ||
         oldWidget.remoteRoot != widget.remoteRoot ||
         oldWidget.client != widget.client) {
+      _previewCancellation?.cancel();
       _bytesFuture = _loadThumbnail();
     }
   }
@@ -1364,6 +1718,8 @@ class _RemoteTileState extends State<_RemoteTile> {
     }
     final versionKey =
         '${entry.sizeBytes}:${entry.modifiedDate?.millisecondsSinceEpoch ?? 0}';
+    final cancellation = AlbumPreviewCancellation();
+    _previewCancellation = cancellation;
     return _albumPreviewCache.load(
       client: client,
       destinationId: albumDestinationId(widget.remoteRoot),
@@ -1371,7 +1727,14 @@ class _RemoteTileState extends State<_RemoteTile> {
       remotePath: entry.path,
       versionKey: versionKey,
       isVideo: entry.isVideo,
+      cancellation: cancellation,
     );
+  }
+
+  @override
+  void dispose() {
+    _previewCancellation?.cancel();
+    super.dispose();
   }
 
   @override
@@ -1425,10 +1788,15 @@ class _RemoteTileState extends State<_RemoteTile> {
           children: [
             child,
             if (entry.isVideo)
-              const Positioned(
+              Positioned(
                 right: 6,
                 bottom: 6,
-                child: _MediaBadge(icon: Icons.play_arrow),
+                child: _MediaBadge(
+                  icon: Icons.play_arrow,
+                  label: entry.durationMs <= 0
+                      ? null
+                      : _formatAlbumDuration(entry.durationMs),
+                ),
               ),
           ],
         ),
@@ -1478,22 +1846,47 @@ class _RemotePlaceholder extends StatelessWidget {
 }
 
 class _MediaBadge extends StatelessWidget {
-  const _MediaBadge({required this.icon});
+  const _MediaBadge({required this.icon, this.label});
 
   final IconData icon;
+  final String? label;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 24,
       height: 24,
+      padding: EdgeInsets.symmetric(horizontal: label == null ? 3 : 6),
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.58),
-        shape: BoxShape.circle,
+        borderRadius: BorderRadius.circular(12),
       ),
-      child: Icon(icon, color: Colors.white, size: 17),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 17),
+          if (label != null) ...[
+            const SizedBox(width: 2),
+            Text(
+              label!,
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
+          ],
+        ],
+      ),
     );
   }
+}
+
+String _formatAlbumDuration(int durationMs) {
+  final totalSeconds = durationMs ~/ 1000;
+  final hours = totalSeconds ~/ 3600;
+  final minutes = (totalSeconds % 3600) ~/ 60;
+  final seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return '$hours:${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+  return '$minutes:${seconds.toString().padLeft(2, '0')}';
 }
 
 class _SectionTitle extends StatelessWidget {

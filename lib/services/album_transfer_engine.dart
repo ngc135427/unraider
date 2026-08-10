@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'album_backup_models.dart';
+import 'album_preview_cache.dart';
 import 'album_backup_repository.dart';
 import 'app_logger.dart';
 import 'local_media_store.dart';
@@ -124,14 +125,19 @@ class AlbumTransferEngine {
   AlbumTransferEngine({
     required this.repository,
     required this.client,
+    required this.remoteRoot,
     this.maxConcurrency = 2,
     this.onProgress,
-  }) : assert(maxConcurrency > 0);
+    AlbumPreviewCache? previewCache,
+  })  : _previewCache = previewCache ?? AlbumPreviewCache(),
+        assert(maxConcurrency > 0);
 
   final AlbumBackupRepository repository;
   final UnraidClient client;
+  final String remoteRoot;
   final int maxConcurrency;
   final ValueChanged<AlbumTransferProgress>? onProgress;
+  final AlbumPreviewCache _previewCache;
 
   bool _paused = false;
   bool _cancelled = false;
@@ -171,6 +177,7 @@ class AlbumTransferEngine {
     var failed = 0;
     var active = 0;
     var bytesTransferred = 0;
+    final previewJobs = <AlbumTransferJob>[];
     String? currentName;
     String? lastError;
     String? fallbackNotice;
@@ -251,6 +258,7 @@ class AlbumTransferEngine {
           );
           bytesTransferred += uploadResult.remoteSize;
           completed += 1;
+          previewJobs.add(job);
           await AppLogger.log(
             'album_transfer_complete transport=${metrics.transport.name} '
             'path=${job.record.remotePath} bytes=${uploadResult.remoteSize} '
@@ -304,6 +312,21 @@ class AlbumTransferEngine {
             ),
       );
     }
+    if (!_cancelled && previewJobs.isNotEmpty) {
+      var previewCursor = 0;
+      Future<void> previewWorker() async {
+        while (previewCursor < previewJobs.length) {
+          final job = previewJobs[previewCursor++];
+          currentName = '生成预览：${job.asset.name}';
+          publish();
+          await _publishThumbnail(job);
+        }
+      }
+
+      await Future.wait(
+        List.generate(previewJobs.length < 2 ? 1 : 2, (_) => previewWorker()),
+      );
+    }
     stopwatch.stop();
     return AlbumTransferRunResult(
       completed: completed,
@@ -311,5 +334,55 @@ class AlbumTransferEngine {
       cancelled: _cancelled,
       fallbackNotice: fallbackNotice,
     );
+  }
+
+  Future<void> _publishThumbnail(AlbumTransferJob job) async {
+    final versionKey = '${job.asset.sizeBytes}:'
+        '${job.asset.dateModified.millisecondsSinceEpoch}';
+    final sidecarPath = albumThumbnailSidecarPath(
+      remoteRoot: remoteRoot,
+      remotePath: job.record.remotePath,
+      versionKey: versionKey,
+    );
+    try {
+      await repository.updateThumbnailState(
+        assetId: job.record.assetId,
+        destinationId: job.record.destinationId,
+        state: AlbumDerivedMediaState.generating,
+        versionKey: versionKey,
+      );
+      final bytes =
+          await LocalMediaStore.loadThumbnail(job.asset.uri, size: 480);
+      if (bytes == null || bytes.isEmpty) {
+        throw const AlbumBackupException('无法生成本机媒体缩略图');
+      }
+      await client.uploadBytesSafely(targetPath: sidecarPath, bytes: bytes);
+      await _previewCache.store(
+        destinationId: job.record.destinationId,
+        remotePath: job.record.remotePath,
+        versionKey: versionKey,
+        bytes: bytes,
+      );
+      await repository.updateThumbnailState(
+        assetId: job.record.assetId,
+        destinationId: job.record.destinationId,
+        state: AlbumDerivedMediaState.available,
+        versionKey: versionKey,
+        thumbnailPath: sidecarPath,
+      );
+    } on Object catch (error, stackTrace) {
+      await repository.updateThumbnailState(
+        assetId: job.record.assetId,
+        destinationId: job.record.destinationId,
+        state: AlbumDerivedMediaState.failed,
+        versionKey: versionKey,
+        error: error.toString(),
+      );
+      await AppLogger.log(
+        'album_thumbnail_publish_failed path=${job.record.remotePath}',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 }

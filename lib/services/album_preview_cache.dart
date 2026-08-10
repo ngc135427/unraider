@@ -19,6 +19,37 @@ String albumThumbnailSidecarPath({
   return '$root/.unraider/thumbnails/${key.substring(0, 2)}/$key.jpg';
 }
 
+class AlbumPreviewCancellation {
+  bool _cancelled = false;
+  final List<void Function()> _listeners = <void Function()>[];
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final listeners = List<void Function()>.of(_listeners);
+    _listeners.clear();
+    for (final listener in listeners) {
+      listener();
+    }
+  }
+
+  void _listen(void Function() listener) {
+    if (_cancelled) {
+      listener();
+    } else {
+      _listeners.add(listener);
+    }
+  }
+}
+
+class _AlbumPreviewOperation {
+  int listeners = 0;
+  bool cancelled = false;
+  late Future<Uint8List?> future;
+}
+
 class AlbumPreviewCache {
   AlbumPreviewCache({
     this.byteBudget = 256 * 1024 * 1024,
@@ -27,8 +58,8 @@ class AlbumPreviewCache {
 
   final int byteBudget;
   final Future<Directory> Function() _directoryProvider;
-  final Map<String, Future<Uint8List?>> _inflight =
-      <String, Future<Uint8List?>>{};
+  final Map<String, _AlbumPreviewOperation> _inflight =
+      <String, _AlbumPreviewOperation>{};
   int _activeGeneration = 0;
   final List<Completer<void>> _generationWaiters = <Completer<void>>[];
 
@@ -44,23 +75,48 @@ class AlbumPreviewCache {
     required String remotePath,
     required String versionKey,
     required bool isVideo,
+    AlbumPreviewCancellation? cancellation,
   }) {
     final key =
         albumStableKey('$destinationId\u0000$remotePath\u0000$versionKey');
-    final existing = _inflight[key];
-    if (existing != null) return existing;
-    final future = _load(
-      client: client,
-      key: key,
-      remoteRoot: remoteRoot,
-      remotePath: remotePath,
-      versionKey: versionKey,
-      isVideo: isVideo,
-    );
-    _inflight[key] = future;
-    return future.whenComplete(() {
-      if (identical(_inflight[key], future)) _inflight.remove(key);
-    });
+    var operation = _inflight[key];
+    if (operation == null || operation.cancelled) {
+      operation = _AlbumPreviewOperation();
+      final created = operation;
+      created.future = _load(
+        client: client,
+        key: key,
+        remoteRoot: remoteRoot,
+        remotePath: remotePath,
+        versionKey: versionKey,
+        isVideo: isVideo,
+        isCancelled: () => created.cancelled,
+      );
+      _inflight[key] = created;
+      void cleanUp() {
+        if (identical(_inflight[key], created)) _inflight.remove(key);
+      }
+
+      unawaited(created.future.then<void>(
+        (_) => cleanUp(),
+        onError: (Object _, StackTrace __) => cleanUp(),
+      ));
+      operation = created;
+    }
+    final selected = operation;
+    selected.listeners += 1;
+    var released = false;
+    void release() {
+      if (released) return;
+      released = true;
+      selected.listeners -= 1;
+      if (selected.listeners <= 0) selected.cancelled = true;
+    }
+
+    cancellation?._listen(release);
+    return selected.future.then((bytes) {
+      return cancellation?.isCancelled == true ? null : bytes;
+    }).whenComplete(release);
   }
 
   Future<Uint8List?> _load({
@@ -70,11 +126,14 @@ class AlbumPreviewCache {
     required String remotePath,
     required String versionKey,
     required bool isVideo,
+    required bool Function() isCancelled,
   }) async {
+    if (isCancelled()) return null;
     final directory = await _directoryProvider();
     await directory.create(recursive: true);
     final file = File(path.join(directory.path, '$key.jpg'));
     if (await file.exists()) {
+      if (isCancelled()) return null;
       await file.setLastModified(DateTime.now());
       return file.readAsBytes();
     }
@@ -85,7 +144,7 @@ class AlbumPreviewCache {
     );
     try {
       final bytes = await client.fetchFileBytes(sidecar);
-      if (bytes.isEmpty) return null;
+      if (bytes.isEmpty || isCancelled()) return null;
       await file.writeAsBytes(bytes, flush: true);
       unawaited(_prune(directory));
       return bytes;
@@ -100,6 +159,7 @@ class AlbumPreviewCache {
         remotePath: remotePath,
         isVideo: isVideo,
         directory: directory,
+        isCancelled: isCancelled,
       );
     }
   }
@@ -111,19 +171,22 @@ class AlbumPreviewCache {
     required String remotePath,
     required bool isVideo,
     required Directory directory,
+    required bool Function() isCancelled,
   }) async {
     while (_activeGeneration >= 2) {
+      if (isCancelled()) return null;
       final waiter = Completer<void>();
       _generationWaiters.add(waiter);
       await waiter.future;
     }
+    if (isCancelled()) return null;
     _activeGeneration += 1;
     try {
       final bytes = await client.generateAlbumThumbnail(
         remotePath: remotePath,
         isVideo: isVideo,
       );
-      if (bytes == null || bytes.isEmpty) return null;
+      if (bytes == null || bytes.isEmpty || isCancelled()) return null;
       await file.writeAsBytes(bytes, flush: true);
       unawaited(
         client

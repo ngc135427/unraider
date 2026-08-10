@@ -36,6 +36,40 @@ class AlbumBackgroundStatus {
   final int lastSuccessMs;
   final int lastRunMs;
   final String lastError;
+
+  String get actionableDiagnostic {
+    if (lastError.isEmpty) return '';
+    final value = lastError.toLowerCase();
+    if (value.contains('permission') ||
+        value.contains('权限') ||
+        value.contains('denied')) {
+      return '媒体权限不可用：请在系统设置中允许照片和视频访问后重试。原始错误：$lastError';
+    }
+    if (value.contains('401') ||
+        value.contains('403') ||
+        value.contains('认证') ||
+        value.contains('unauthorized')) {
+      return 'Unraid 认证失败：请检查登录密码或 WebDAV Token。原始错误：$lastError';
+    }
+    if (value.contains('space') ||
+        value.contains('enospc') ||
+        value.contains('空间') ||
+        value.contains('storage')) {
+      return '目标存储空间不足或受到系统存储限制：请释放空间后重试。原始错误：$lastError';
+    }
+    if (value.contains('battery') ||
+        value.contains('电池') ||
+        value.contains('background')) {
+      return '后台执行受电池策略限制：请允许后台运行并关闭针对本应用的省电限制。原始错误：$lastError';
+    }
+    if (value.contains('network') ||
+        value.contains('timeout') ||
+        value.contains('网络') ||
+        value.contains('连接')) {
+      return '网络当前不可用：请确认 Wi-Fi/仅充电策略和 Unraid 连通性后重试。原始错误：$lastError';
+    }
+    return lastError;
+  }
 }
 
 class AlbumBackgroundService {

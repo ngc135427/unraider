@@ -5,8 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:unraider/services/album_backup_models.dart';
 import 'package:unraider/services/album_backup_repository.dart';
+import 'package:unraider/services/album_management_service.dart';
 import 'package:unraider/services/album_preview_cache.dart';
+import 'package:unraider/services/local_media_store.dart';
 import 'package:unraider/services/remote_video_stream.dart';
+import 'package:unraider/services/unraid_client.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -89,6 +92,39 @@ void main() {
       expect(await File(files.single.path).readAsBytes(),
           <int>[7, 8, 9, 10, 11, 12]);
     });
+
+    test('a disposed tile can cancel before on-demand generation', () async {
+      final directory = await Directory.systemTemp.createTemp('album_cancel_');
+      addTearDown(() async {
+        if (await directory.exists()) await directory.delete(recursive: true);
+      });
+      final cache = AlbumPreviewCache(directoryProvider: () async => directory);
+      await cache.store(
+        destinationId: 'destination',
+        remotePath: '/cached.jpg',
+        versionKey: 'v1',
+        bytes: Uint8List.fromList(<int>[1, 2, 3]),
+      );
+      final client = UnraidClient(
+        baseUrl: 'http://127.0.0.1',
+        username: 'root',
+        password: 'test',
+      );
+      addTearDown(client.close);
+      final cancellation = AlbumPreviewCancellation()..cancel();
+
+      final bytes = await cache.load(
+        client: client,
+        destinationId: 'destination',
+        remoteRoot: '/mnt/user/photos',
+        remotePath: '/cached.jpg',
+        versionKey: 'v1',
+        isVideo: false,
+        cancellation: cancellation,
+      );
+
+      expect(bytes, isNull);
+    });
   });
 
   group('Album management index', () {
@@ -114,6 +150,20 @@ void main() {
       final search = await repository.searchMedia(query: 'Summer');
       expect(search.map((asset) => asset.id),
           containsAll(<String>['camera', 'copy']));
+      await repository.updateAssetMetadata(
+        assetId: camera.id,
+        favorite: true,
+        tags: const <String>['beach'],
+        description: 'sunset walk',
+        rating: 5,
+      );
+      expect(
+          (await repository.searchMedia(query: 'beach')).single.id, camera.id);
+      expect((await repository.assetMetadata(camera.id)).rating, 5);
+      expect(
+        await repository.searchMedia(fromMs: 2500, toMs: 4000),
+        isEmpty,
+      );
 
       final album = await repository.createLogicalAlbum(
         '收藏',
@@ -126,6 +176,8 @@ void main() {
       expect(await repository.listLogicalAlbumAssets(albumId: album.id),
           hasLength(2));
       expect((await repository.listLogicalAlbums()).single.itemCount, 2);
+      await repository.deleteLogicalAlbum(album.id);
+      expect(await repository.listLogicalAlbums(), isEmpty);
 
       for (final asset in <AlbumMediaAsset>[camera, copy]) {
         await repository.upsertAssetHash(
@@ -199,6 +251,93 @@ void main() {
       expect(retried.state, AlbumBackupState.queued);
       expect(retried.nextRetryMs, isNull);
     });
+
+    test('partial system deletion marks only the deleted local asset',
+        () async {
+      final repository = await _openRepository();
+      addTearDown(repository.close);
+      final source = _source();
+      final sources =
+          await repository.replaceSourceFolders(<AlbumSourceFolder>[source]);
+      final first = _asset(id: 'first', displayName: 'first.jpg');
+      final second = _asset(id: 'second', displayName: 'second.jpg');
+      await repository.reconcileAssets(
+        assets: <AlbumMediaAsset>[first, second],
+        sources: sources,
+      );
+      await repository.claimQueued(leaseOwner: 'test', limit: 2);
+      for (final asset in <AlbumMediaAsset>[first, second]) {
+        await repository.transitionBackupState(
+          assetId: asset.id,
+          destinationId: source.destinationId,
+          state: AlbumBackupState.verifying,
+          uploadedBytes: asset.sizeBytes,
+        );
+        await repository.transitionBackupState(
+          assetId: asset.id,
+          destinationId: source.destinationId,
+          state: AlbumBackupState.completed,
+          uploadedBytes: asset.sizeBytes,
+          remoteSize: asset.sizeBytes,
+        );
+      }
+      final service = AlbumManagementService(
+        repository,
+        deleteMedia: (uris) async => LocalMediaDeleteResult(
+          requested: uris.length,
+          deleted: 1,
+          deletedUris: <String>{first.uri},
+        ),
+      );
+
+      final result = await service.releaseVerifiedAssets(<AlbumMediaAsset>[
+        first,
+        second,
+      ]);
+
+      expect(result.deleted, 1);
+      expect((await repository.listVerifiedLocalAssets()).single.id, second.id);
+    });
+
+    test('remote video page includes duration from its indexed local source',
+        () async {
+      final repository = await _openRepository();
+      addTearDown(repository.close);
+      final source = _source();
+      final sources =
+          await repository.replaceSourceFolders(<AlbumSourceFolder>[source]);
+      final video = _asset(
+        id: 'video',
+        displayName: 'clip.mp4',
+        kind: AlbumMediaKind.video,
+        durationMs: 125000,
+      );
+      await repository.reconcileAssets(
+        assets: <AlbumMediaAsset>[video],
+        sources: sources,
+      );
+      final record = (await repository.listBackupRecords()).single;
+      await repository.upsertRemoteAssets(<AlbumRemoteAsset>[
+        AlbumRemoteAsset(
+          destinationId: source.destinationId,
+          path: record.remotePath,
+          displayName: video.displayName,
+          mediaKind: AlbumMediaKind.video,
+          sizeBytes: video.sizeBytes,
+          modifiedMs: video.dateModifiedMs,
+          versionKey: video.versionKey,
+          origin: 'uploaded',
+        ),
+      ]);
+
+      expect(
+          (await repository.listRemotePage(
+            destinationId: source.destinationId,
+          ))
+              .single
+              .durationMs,
+          125000);
+    });
   });
 }
 
@@ -230,6 +369,8 @@ AlbumMediaAsset _asset({
   required String id,
   required String displayName,
   int sizeBytes = 1024,
+  AlbumMediaKind kind = AlbumMediaKind.image,
+  int durationMs = 0,
 }) {
   return AlbumMediaAsset(
     id: id,
@@ -238,15 +379,15 @@ AlbumMediaAsset _asset({
     uri: 'content://media/$id',
     relativePath: 'DCIM/Camera/',
     displayName: displayName,
-    mimeType: 'image/jpeg',
-    kind: AlbumMediaKind.image,
+    mimeType: kind == AlbumMediaKind.video ? 'video/mp4' : 'image/jpeg',
+    kind: kind,
     sizeBytes: sizeBytes,
     dateAddedMs: 1000,
     dateModifiedMs: 2000,
     captureTimeMs: 2000,
     width: 1920,
     height: 1080,
-    durationMs: 0,
+    durationMs: durationMs,
     orientation: 0,
     bucketId: 'camera',
     bucketName: 'Camera',

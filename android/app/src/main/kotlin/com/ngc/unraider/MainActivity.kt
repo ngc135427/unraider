@@ -372,9 +372,21 @@ class MainActivity : AudioServiceActivity() {
                     } else {
                         Thread {
                             var deleted = 0
-                            uris.forEach { uri -> deleted += contentResolver.delete(uri, null, null) }
+                            val deletedUris = mutableListOf<String>()
+                            uris.forEach { uri ->
+                                if (contentResolver.delete(uri, null, null) > 0) {
+                                    deleted += 1
+                                    deletedUris.add(uri.toString())
+                                }
+                            }
                             runOnUiThread {
-                                result.success(mapOf("requested" to uris.size, "deleted" to deleted))
+                                result.success(
+                                    mapOf(
+                                        "requested" to uris.size,
+                                        "deleted" to deleted,
+                                        "deletedUris" to deletedUris,
+                                    )
+                                )
                             }
                         }.start()
                     }
@@ -1107,11 +1119,11 @@ class MainActivity : AudioServiceActivity() {
         return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
-    private fun mediaExists(uri: Uri): Boolean = try {
+    private fun mediaExists(uri: Uri): Boolean? = try {
         contentResolver.query(uri, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
             ?.use { it.moveToFirst() } == true
     } catch (_: Exception) {
-        false
+        null
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -1123,12 +1135,15 @@ class MainActivity : AudioServiceActivity() {
             if (result != null) {
                 if (resultCode == Activity.RESULT_OK) {
                     Thread {
-                        val remaining = uris.count(::mediaExists)
+                        val deletedUris = uris
+                            .filter { mediaExists(it) == false }
+                            .map(Uri::toString)
                         runOnUiThread {
                             result.success(
                                 mapOf(
                                     "requested" to uris.size,
-                                    "deleted" to uris.size - remaining,
+                                    "deleted" to deletedUris.size,
+                                    "deletedUris" to deletedUris,
                                     "cancelled" to false,
                                 )
                             )

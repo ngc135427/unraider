@@ -112,6 +112,18 @@ class AlbumBackupPage extends StatelessWidget {
 
 enum _PhoAlbumTab { local, remote, sync, manage, settings }
 
+class _AlbumFailedItem {
+  const _AlbumFailedItem({
+    required this.assetId,
+    required this.name,
+    required this.error,
+  });
+
+  final String assetId;
+  final String name;
+  final String error;
+}
+
 class _AlbumSyncProgress {
   const _AlbumSyncProgress({
     this.syncing = false,
@@ -549,6 +561,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             modifiedDate: asset.modifiedMs <= 0
                 ? null
                 : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs),
+            durationMs: asset.durationMs,
           ),
         )
         .toList(growable: false);
@@ -738,6 +751,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         final engine = AlbumTransferEngine(
           repository: repository,
           client: client,
+          remoteRoot: _preferences.targetDir,
           maxConcurrency: _preferences.transferConcurrency,
           onProgress: (progress) {
             if (!mounted || generation != _syncGeneration) return;
@@ -836,6 +850,20 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         message: '同步失败：$error',
       );
     }
+  }
+
+  Future<void> _retryAsset(String assetId) async {
+    final repository = _backupRepository;
+    if (repository == null || _syncProgress.value.syncing) return;
+    final destinationId = albumDestinationId(_preferences.targetDir);
+    final changed = await repository.requeueRetryable(
+      destinationId: destinationId,
+      assetId: assetId,
+    );
+    if (changed == 0) return;
+    await _refreshIndexedPending();
+    if (mounted) setState(() {});
+    await _syncPending();
   }
 
   String _formatByteRate(double bytesPerSecond) {
@@ -1289,6 +1317,19 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             ValueListenableBuilder<_AlbumSyncProgress>(
               valueListenable: _syncProgress,
               builder: (context, progress, _) {
+                final localById = <String, LocalMediaAsset>{
+                  for (final asset in local) asset.id: asset,
+                };
+                final failedItems = _indexedRecordsByAsset.values
+                    .where((record) => record.state == AlbumBackupState.failed)
+                    .map(
+                      (record) => _AlbumFailedItem(
+                        assetId: record.assetId,
+                        name: localById[record.assetId]?.name ?? record.assetId,
+                        error: record.lastError ?? '上传失败',
+                      ),
+                    )
+                    .toList(growable: false);
                 return _SyncPanel(
                   preferences: _preferences,
                   localCount: local.length,
@@ -1298,11 +1339,13 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                   syncing: progress.syncing,
                   message: progress.message,
                   backgroundStatus: _backgroundStatus,
+                  failedItems: failedItems,
                   paused: _syncPaused,
                   onSync: () => _syncPending(forceRetry: true),
                   onBackgroundSync: _runFocusedBackup,
                   onPauseResume: _toggleSyncPause,
                   onCancel: _cancelSync,
+                  onRetryAsset: _retryAsset,
                   onSettings: () => _selectTab(_PhoAlbumTab.settings),
                 );
               },

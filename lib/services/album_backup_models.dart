@@ -326,6 +326,7 @@ class AlbumRemoteAsset {
     required this.versionKey,
     required this.origin,
     this.captureTimeMs,
+    this.durationMs = 0,
     this.thumbnailPath,
     this.previewPath,
   });
@@ -337,6 +338,7 @@ class AlbumRemoteAsset {
   final int sizeBytes;
   final int modifiedMs;
   final int? captureTimeMs;
+  final int durationMs;
   final String versionKey;
   final String? thumbnailPath;
   final String? previewPath;
@@ -416,6 +418,49 @@ class AlbumLogicalAlbum {
   final int itemCount;
   final int createdAtMs;
   final int updatedAtMs;
+}
+
+class AlbumAssetMetadata {
+  const AlbumAssetMetadata({
+    required this.assetId,
+    required this.favorite,
+    required this.archived,
+    required this.tags,
+    required this.description,
+    required this.rating,
+  });
+
+  factory AlbumAssetMetadata.empty(String assetId) => AlbumAssetMetadata(
+        assetId: assetId,
+        favorite: false,
+        archived: false,
+        tags: const <String>[],
+        description: '',
+        rating: 0,
+      );
+
+  factory AlbumAssetMetadata.fromMap(Map<String, Object?> map) {
+    return AlbumAssetMetadata(
+      assetId: map['asset_id']! as String,
+      favorite: map['favorite'] == 1,
+      archived: map['archived'] == 1,
+      tags: map['tags']
+          .toString()
+          .split(',')
+          .map((tag) => tag.trim())
+          .where((tag) => tag.isNotEmpty)
+          .toList(growable: false),
+      description: map['description']?.toString() ?? '',
+      rating: (map['rating'] as int?) ?? 0,
+    );
+  }
+
+  final String assetId;
+  final bool favorite;
+  final bool archived;
+  final List<String> tags;
+  final String description;
+  final int rating;
 }
 
 class AlbumDuplicateGroup {

@@ -176,7 +176,8 @@ class UnraidDashboard {
       logItems: logItems ?? this.logItems,
       servicesSummary: servicesSummary ?? this.servicesSummary,
       dockerNetworkSummary: dockerNetworkSummary ?? this.dockerNetworkSummary,
-      dockerConflictSummary: dockerConflictSummary ?? this.dockerConflictSummary,
+      dockerConflictSummary:
+          dockerConflictSummary ?? this.dockerConflictSummary,
       dockerItems: dockerItems ?? this.dockerItems,
       vmItems: vmItems ?? this.vmItems,
       shareItems: shareItems ?? this.shareItems,
@@ -249,6 +250,7 @@ class UnraidFileEntry {
     required String size,
     required String modified,
     required DateTime? modifiedDate,
+    int durationMs = 0,
   }) {
     final nameLower = name.toLowerCase();
     return UnraidFileEntry._(
@@ -260,6 +262,7 @@ class UnraidFileEntry {
       size: size,
       modified: modified,
       modifiedDate: modifiedDate,
+      durationMs: durationMs,
       isImage:
           !isDirectory && _nameHasExtensionLower(nameLower, _imageExtensions),
       isVideo:
@@ -280,6 +283,7 @@ class UnraidFileEntry {
     required this.size,
     required this.modified,
     required this.modifiedDate,
+    required this.durationMs,
     required this.isImage,
     required this.isVideo,
     required this.isAudio,
@@ -287,6 +291,7 @@ class UnraidFileEntry {
   });
 
   final String name;
+
   /// Cached lowercase name for search haystacks and extension checks.
   final String nameLower;
   final String path;
@@ -295,12 +300,14 @@ class UnraidFileEntry {
   final String size;
   final String modified;
   final DateTime? modifiedDate;
+  final int durationMs;
 
   /// Media kind flags are computed once at construction so list filters,
   /// share browsers, and album tiles do not re-lower/scan extensions.
   final bool isImage;
   final bool isVideo;
   final bool isAudio;
+
   /// True for flac/wav/aiff/alac/ape — used by music library stats/tiles.
   final bool isLossless;
 
@@ -356,4 +363,3 @@ const _losslessAudioExtensions = <String>[
   '.alac',
   '.ape',
 ];
-

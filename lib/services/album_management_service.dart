@@ -19,9 +19,13 @@ class AlbumFreeSpacePreview {
 }
 
 class AlbumManagementService {
-  const AlbumManagementService(this.repository);
+  AlbumManagementService(
+    this.repository, {
+    Future<LocalMediaDeleteResult> Function(List<String>)? deleteMedia,
+  }) : _deleteMedia = deleteMedia ?? LocalMediaStore.deleteMedia;
 
   final AlbumBackupRepository repository;
+  final Future<LocalMediaDeleteResult> Function(List<String>) _deleteMedia;
 
   Future<List<AlbumDuplicateGroup>> scanExactDuplicates({
     void Function(AlbumHashProgress progress)? onProgress,
@@ -67,11 +71,17 @@ class AlbumManagementService {
         .map((asset) => verifiedById[asset.id])
         .whereType<AlbumMediaAsset>()
         .toList(growable: false);
-    final result = await LocalMediaStore.deleteMedia(
+    final result = await _deleteMedia(
       allowed.map((asset) => asset.uri).toList(growable: false),
     );
-    if (!result.cancelled && result.deleted == allowed.length) {
-      await repository.markAssetsMissing(allowed.map((asset) => asset.id));
+    if (!result.cancelled && result.deleted > 0) {
+      final deletedIds =
+          result.deletedUris.isEmpty && result.deleted == allowed.length
+              ? allowed.map((asset) => asset.id)
+              : allowed
+                  .where((asset) => result.deletedUris.contains(asset.uri))
+                  .map((asset) => asset.id);
+      await repository.markAssetsMissing(deletedIds);
     }
     return result;
   }

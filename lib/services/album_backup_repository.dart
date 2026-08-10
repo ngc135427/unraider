@@ -613,14 +613,21 @@ class AlbumBackupRepository {
     int limit = 100,
     int offset = 0,
   }) async {
-    final rows = await _database.query(
-      'remote_assets',
-      where: 'destination_id = ?',
-      whereArgs: <Object?>[destinationId],
-      orderBy: 'COALESCE(capture_time_ms, modified_ms) DESC, path',
-      limit: limit.clamp(1, 500),
-      offset: offset < 0 ? 0 : offset,
-    );
+    final rows = await _database.rawQuery('''
+      SELECT r.*, COALESCE(MAX(m.duration_ms), 0) AS duration_ms
+      FROM remote_assets r
+      LEFT JOIN backup_records b
+        ON b.destination_id = r.destination_id AND b.remote_path = r.path
+      LEFT JOIN media_assets m ON m.id = b.asset_id
+      WHERE r.destination_id = ?
+      GROUP BY r.destination_id, r.path
+      ORDER BY COALESCE(r.capture_time_ms, r.modified_ms) DESC, r.path
+      LIMIT ? OFFSET ?
+    ''', <Object?>[
+      destinationId,
+      limit.clamp(1, 500),
+      offset < 0 ? 0 : offset,
+    ]);
     return rows
         .map(
           (row) => AlbumRemoteAsset(
@@ -631,6 +638,7 @@ class AlbumBackupRepository {
             sizeBytes: row['size_bytes']! as int,
             modifiedMs: row['modified_ms']! as int,
             captureTimeMs: row['capture_time_ms'] as int?,
+            durationMs: row['duration_ms']! as int,
             versionKey: row['version_key']! as String,
             thumbnailPath: row['thumbnail_path'] as String?,
             previewPath: row['preview_path'] as String?,
@@ -894,6 +902,13 @@ class AlbumBackupRepository {
           where: 'destination_id = ? AND path = ?',
           whereArgs: <Object?>[destinationId, remotePath],
         );
+      } else if (state != AlbumDerivedMediaState.available) {
+        await transaction.update(
+          'remote_assets',
+          <String, Object?>{'thumbnail_path': null},
+          where: 'destination_id = ? AND path = ?',
+          whereArgs: <Object?>[destinationId, remotePath],
+        );
       }
     });
   }
@@ -906,36 +921,46 @@ class AlbumBackupRepository {
     int limit = 200,
     int offset = 0,
   }) async {
-    final clauses = <String>['missing_local = 0'];
+    final clauses = <String>['m.missing_local = 0'];
     final arguments = <Object?>[];
     final normalized = query.trim();
     if (normalized.isNotEmpty) {
-      clauses.add('(display_name LIKE ? ESCAPE \'\\\' OR '
-          'relative_path LIKE ? ESCAPE \'\\\' OR mime_type LIKE ?)');
+      clauses.add('(m.display_name LIKE ? ESCAPE \'\\\' OR '
+          'm.relative_path LIKE ? ESCAPE \'\\\' OR m.mime_type LIKE ? OR '
+          'md.tags LIKE ? ESCAPE \'\\\' OR md.description LIKE ? ESCAPE \'\\\')');
       final pattern =
           '%${normalized.replaceAll('\\', r'\\').replaceAll('%', r'\%').replaceAll('_', r'\_')}%';
-      arguments.addAll(<Object?>[pattern, pattern, '%$normalized%']);
+      arguments.addAll(<Object?>[
+        pattern,
+        pattern,
+        '%$normalized%',
+        pattern,
+        pattern,
+      ]);
     }
     if (kind != null) {
-      clauses.add('media_kind = ?');
+      clauses.add('m.media_kind = ?');
       arguments.add(kind.name);
     }
     if (fromMs != null) {
-      clauses.add('COALESCE(capture_time_ms, date_modified_ms) >= ?');
+      clauses.add('COALESCE(m.capture_time_ms, m.date_modified_ms) >= ?');
       arguments.add(fromMs);
     }
     if (toMs != null) {
-      clauses.add('COALESCE(capture_time_ms, date_modified_ms) <= ?');
+      clauses.add('COALESCE(m.capture_time_ms, m.date_modified_ms) <= ?');
       arguments.add(toMs);
     }
-    final rows = await _database.query(
-      'media_assets',
-      where: clauses.join(' AND '),
-      whereArgs: arguments,
-      orderBy: 'COALESCE(capture_time_ms, date_modified_ms) DESC, id DESC',
-      limit: limit.clamp(1, 500),
-      offset: offset < 0 ? 0 : offset,
-    );
+    final rows = await _database.rawQuery('''
+      SELECT m.* FROM media_assets m
+      LEFT JOIN asset_metadata md ON md.asset_id = m.id
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY COALESCE(m.capture_time_ms, m.date_modified_ms) DESC, m.id DESC
+      LIMIT ? OFFSET ?
+    ''', <Object?>[
+      ...arguments,
+      limit.clamp(1, 500),
+      offset < 0 ? 0 : offset,
+    ]);
     return rows.map(AlbumMediaAsset.fromMap).toList(growable: false);
   }
 
@@ -1166,6 +1191,18 @@ class AlbumBackupRepository {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<AlbumAssetMetadata> assetMetadata(String assetId) async {
+    final rows = await _database.query(
+      'asset_metadata',
+      where: 'asset_id = ?',
+      whereArgs: <Object?>[assetId],
+      limit: 1,
+    );
+    return rows.isEmpty
+        ? AlbumAssetMetadata.empty(assetId)
+        : AlbumAssetMetadata.fromMap(rows.single);
   }
 
   Future<int> markLegacyExistingAssets({

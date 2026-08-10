@@ -307,6 +307,10 @@ class LocalMediaStore {
       return LocalMediaDeleteResult(
         requested: (result?['requested'] as num?)?.toInt() ?? unique.length,
         deleted: (result?['deleted'] as num?)?.toInt() ?? 0,
+        deletedUris: (result?['deletedUris'] as List<dynamic>?)
+                ?.map((uri) => uri.toString())
+                .toSet() ??
+            const <String>{},
         cancelled: result?['cancelled'] == true,
       );
     } on PlatformException catch (error) {
@@ -371,11 +375,13 @@ class LocalMediaDeleteResult {
   const LocalMediaDeleteResult({
     required this.requested,
     required this.deleted,
+    this.deletedUris = const <String>{},
     this.cancelled = false,
   });
 
   final int requested;
   final int deleted;
+  final Set<String> deletedUris;
   final bool cancelled;
 }
 

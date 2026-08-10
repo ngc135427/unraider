@@ -13,6 +13,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
+import android.util.Size
 import androidx.core.app.NotificationCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -42,6 +44,7 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import okio.BufferedSink
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.EnumSet
@@ -182,6 +185,7 @@ class AlbumBackgroundWorker(
                         try {
                             val remoteSize = uploader.upload(job)
                             markCompleted(database, job, remoteSize)
+                            publishThumbnail(database, uploader, job)
                             bytes.addAndGet(remoteSize)
                             val done = completed.incrementAndGet()
                             val elapsed = (System.currentTimeMillis() - started).coerceAtLeast(1)
@@ -458,8 +462,10 @@ class AlbumBackgroundWorker(
         try {
             database.rawQuery(
                 "SELECT br.asset_id,br.destination_id,br.remote_path,ma.uri,ma.display_name," +
-                    "ma.size_bytes,ma.date_modified_ms FROM backup_records br " +
+                    "ma.size_bytes,ma.date_modified_ms,sf.remote_base_path,ma.media_kind " +
+                    "FROM backup_records br " +
                     "JOIN media_assets ma ON ma.id=br.asset_id " +
+                    "JOIN source_folders sf ON sf.id=br.source_folder_id " +
                     "WHERE ma.missing_local=0 AND (br.state='queued' OR " +
                     "(br.state='failed' AND (br.next_retry_ms IS NULL OR br.next_retry_ms<=?))) " +
                     "ORDER BY br.updated_at_ms LIMIT ?",
@@ -474,6 +480,8 @@ class AlbumBackgroundWorker(
                         name = cursor.getString(4),
                         size = cursor.getLong(5),
                         modifiedMs = cursor.getLong(6),
+                        remoteRoot = cursor.getString(7),
+                        isVideo = cursor.getString(8) == "video",
                     )
                     jobs.add(job)
                     database.execSQL(
@@ -499,6 +507,91 @@ class AlbumBackgroundWorker(
                 "remote_modified_ms=?, last_error=NULL, next_retry_ms=NULL, lease_owner=NULL, " +
                 "lease_expires_ms=NULL, updated_at_ms=? WHERE asset_id=? AND destination_id=?",
             arrayOf(size, size, job.modifiedMs, now, job.assetId, job.destinationId),
+        )
+    }
+
+    private fun publishThumbnail(
+        database: SQLiteDatabase,
+        uploader: BackgroundUploader,
+        job: BackgroundJob,
+    ) {
+        val versionKey = "${job.size}:${job.modifiedMs}"
+        val sidecarPath = albumThumbnailSidecarPath(job.remoteRoot, job.remotePath, versionKey)
+        markThumbnailState(database, job, versionKey, "generating", null, null)
+        try {
+            val thumbnail = loadLocalThumbnail(job)
+                ?: throw IllegalStateException("系统未能生成本机缩略图")
+            uploader.uploadBytes(sidecarPath, thumbnail)
+            markThumbnailState(database, job, versionKey, "available", sidecarPath, null)
+        } catch (error: Exception) {
+            val message = error.message ?: error.javaClass.simpleName
+            markThumbnailState(database, job, versionKey, "failed", null, message)
+            Log.w("AlbumBackgroundWorker", "Thumbnail publish failed for ${job.assetId}", error)
+        }
+    }
+
+    private fun loadLocalThumbnail(job: BackgroundJob): ByteArray? {
+        val uri = Uri.parse(job.uri)
+        val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            applicationContext.contentResolver.loadThumbnail(uri, Size(480, 480), null)
+        } else {
+            val mediaId = ContentUris.parseId(uri)
+            if (job.isVideo) {
+                MediaStore.Video.Thumbnails.getThumbnail(
+                    applicationContext.contentResolver,
+                    mediaId,
+                    MediaStore.Video.Thumbnails.MINI_KIND,
+                    null,
+                )
+            } else {
+                MediaStore.Images.Thumbnails.getThumbnail(
+                    applicationContext.contentResolver,
+                    mediaId,
+                    MediaStore.Images.Thumbnails.MINI_KIND,
+                    null,
+                )
+            }
+        } ?: return null
+        return ByteArrayOutputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output)
+            bitmap.recycle()
+            output.toByteArray()
+        }
+    }
+
+    @Synchronized
+    private fun markThumbnailState(
+        database: SQLiteDatabase,
+        job: BackgroundJob,
+        versionKey: String,
+        state: String,
+        derivedPath: String?,
+        error: String?,
+    ) {
+        val now = System.currentTimeMillis()
+        database.execSQL(
+            "UPDATE backup_records SET thumbnail_state=?, updated_at_ms=? " +
+                "WHERE asset_id=? AND destination_id=?",
+            arrayOf(state, now, job.assetId, job.destinationId),
+        )
+        database.execSQL(
+            "INSERT OR REPLACE INTO derived_media " +
+                "(destination_id,remote_path,kind,version_key,state,derived_path,last_error,updated_at_ms) " +
+                "VALUES (?,?,?,?,?,?,?,?)",
+            arrayOf(
+                job.destinationId,
+                job.remotePath,
+                "thumbnail",
+                versionKey,
+                state,
+                derivedPath,
+                error,
+                now,
+            ),
+        )
+        database.execSQL(
+            "UPDATE remote_assets SET thumbnail_path=? WHERE destination_id=? AND path=?",
+            arrayOf(derivedPath, job.destinationId, job.remotePath),
         )
     }
 
@@ -537,6 +630,8 @@ private data class BackgroundJob(
     val name: String,
     val size: Long,
     val modifiedMs: Long,
+    val remoteRoot: String,
+    val isVideo: Boolean,
 )
 
 private data class BackgroundTransferConfig(
@@ -615,6 +710,31 @@ private class BackgroundUploader(
         }
     }
 
+    fun uploadBytes(remotePath: String, bytes: ByteArray): Long {
+        require(bytes.isNotEmpty()) { "缩略图内容为空" }
+        val webDavTarget = webDavUrl(remotePath)
+        var webDavFailure: Exception? = null
+        if (webDavTarget != null) {
+            try {
+                return uploadWebDavBytes(bytes, webDavTarget)
+            } catch (error: Exception) {
+                webDavFailure = error
+                fallbackNotice = "WebDAV 连接失败，已自动降级为 SMB 上传"
+            }
+        }
+        return try {
+            uploadSmbBytes(remotePath, bytes)
+        } catch (error: Exception) {
+            if (webDavFailure != null) {
+                throw IllegalStateException(
+                    "WebDAV 缩略图上传失败，降级到 SMB 后仍失败：${error.message ?: error.javaClass.simpleName}",
+                    error,
+                )
+            }
+            throw error
+        }
+    }
+
     private fun uploadSmb(job: BackgroundJob): Long {
         val parts = job.remotePath.replace('\\', '/').split('/').filter { it.isNotBlank() }
         require(parts.size >= 4 && parts[0] == "mnt" && parts[1] == "user") {
@@ -646,6 +766,49 @@ private class BackgroundUploader(
             }
             val size = share.getFileInformation(tempPath).standardInformation.endOfFile
             if (size != job.size) throw IllegalStateException("SMB 后台上传大小校验失败")
+            share.openFile(
+                tempPath,
+                EnumSet.of(AccessMask.DELETE),
+                EnumSet.noneOf(FileAttributes::class.java),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OPEN,
+                EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+            ).use { it.rename(finalPath) }
+            return size
+        } catch (error: Exception) {
+            try { if (share.fileExists(tempPath)) share.rm(tempPath) } catch (_: Exception) {}
+            throw error
+        }
+    }
+
+    private fun uploadSmbBytes(remotePath: String, bytes: ByteArray): Long {
+        val parts = remotePath.replace('\\', '/').split('/').filter { it.isNotBlank() }
+        require(parts.size >= 4 && parts[0] == "mnt" && parts[1] == "user") {
+            "后台 SMB 仅支持 /mnt/user/<共享> 路径"
+        }
+        val shareName = parts[2]
+        val finalPath = parts.drop(3).joinToString("\\")
+        val tempPath = "$finalPath.part-${UUID.randomUUID()}"
+        val share = share(shareName)
+        ensureDirectories(share, finalPath.substringBeforeLast('\\', ""))
+        if (share.fileExists(finalPath)) {
+            val size = share.getFileInformation(finalPath).standardInformation.endOfFile
+            if (size == bytes.size.toLong()) return size
+            throw IllegalStateException("缩略图目标已存在且大小不同")
+        }
+        try {
+            share.openFile(
+                tempPath,
+                EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ),
+                EnumSet.noneOf(FileAttributes::class.java),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+            ).use { remote ->
+                remote.outputStream.use { it.write(bytes) }
+            }
+            val size = share.getFileInformation(tempPath).standardInformation.endOfFile
+            if (size != bytes.size.toLong()) throw IllegalStateException("SMB 缩略图上传大小校验失败")
             share.openFile(
                 tempPath,
                 EnumSet.of(AccessMask.DELETE),
@@ -712,6 +875,51 @@ private class BackgroundUploader(
                 throw IllegalStateException("WebDAV 后台安全提交失败")
             }
             return job.size
+        } catch (error: Exception) {
+            try { executeWebDavRequest(tempUrl, "DELETE").close() } catch (_: Exception) {}
+            throw error
+        }
+    }
+
+    private fun uploadWebDavBytes(bytes: ByteArray, finalUrl: URL): Long {
+        val expectedSize = bytes.size.toLong()
+        val tempUrl = URL("${finalUrl}.part-${UUID.randomUUID()}")
+        val existing = head(finalUrl)
+        if (existing.first in 200..299) {
+            if (existing.second == expectedSize) return expectedSize
+            throw IllegalStateException("缩略图目标已存在且大小不同")
+        }
+        ensureWebDavDirectories(finalUrl)
+        try {
+            val requestBody = object : RequestBody() {
+                override fun contentType() = "image/jpeg".toMediaType()
+
+                override fun contentLength() = expectedSize
+
+                override fun writeTo(sink: BufferedSink) {
+                    sink.write(bytes)
+                }
+            }
+            val code = executeWebDavRequest(
+                url = tempUrl,
+                method = "PUT",
+                body = requestBody,
+            ).use { it.code }
+            if (code !in 200..299 || head(tempUrl).second != expectedSize) {
+                throw IllegalStateException("WebDAV 缩略图上传校验失败")
+            }
+            val moveCode = executeWebDavRequest(
+                url = tempUrl,
+                method = "MOVE",
+                headers = mapOf(
+                    "Destination" to finalUrl.toString(),
+                    "Overwrite" to "F",
+                ),
+            ).use { it.code }
+            if (moveCode !in 200..299 || head(finalUrl).second != expectedSize) {
+                throw IllegalStateException("WebDAV 缩略图安全提交失败")
+            }
+            return expectedSize
         } catch (error: Exception) {
             try { executeWebDavRequest(tempUrl, "DELETE").close() } catch (_: Exception) {}
             throw error
@@ -848,6 +1056,15 @@ private fun stableKey(value: String): String {
         hash = (hash * 0x01000193L) and 0xffffffffL
     }
     return hash.toString(16).padStart(8, '0')
+}
+
+private fun albumThumbnailSidecarPath(
+    remoteRoot: String,
+    remotePath: String,
+    versionKey: String,
+): String {
+    val key = stableKey("$remotePath\u0000$versionKey")
+    return "${remoteRoot.replace('\\', '/').trimEnd('/')}/.unraider/thumbnails/${key.take(2)}/$key.jpg"
 }
 
 private fun safeSegment(value: String, fallback: String): String {
