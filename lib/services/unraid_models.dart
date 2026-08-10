@@ -251,6 +251,7 @@ class UnraidFileEntry {
     required String modified,
     required DateTime? modifiedDate,
     int durationMs = 0,
+    String? thumbnailPath,
   }) {
     final nameLower = name.toLowerCase();
     return UnraidFileEntry._(
@@ -263,6 +264,7 @@ class UnraidFileEntry {
       modified: modified,
       modifiedDate: modifiedDate,
       durationMs: durationMs,
+      thumbnailPath: thumbnailPath,
       isImage:
           !isDirectory && _nameHasExtensionLower(nameLower, _imageExtensions),
       isVideo:
@@ -284,6 +286,7 @@ class UnraidFileEntry {
     required this.modified,
     required this.modifiedDate,
     required this.durationMs,
+    required this.thumbnailPath,
     required this.isImage,
     required this.isVideo,
     required this.isAudio,
@@ -301,6 +304,7 @@ class UnraidFileEntry {
   final String modified;
   final DateTime? modifiedDate;
   final int durationMs;
+  final String? thumbnailPath;
 
   /// Media kind flags are computed once at construction so list filters,
   /// share browsers, and album tiles do not re-lower/scan extensions.

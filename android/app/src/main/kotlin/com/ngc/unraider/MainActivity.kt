@@ -144,7 +144,10 @@ class MainActivity : AudioServiceActivity() {
                             "deviceName" to preferences.getString("deviceName", Build.MODEL)!!,
                             "wifiOnly" to preferences.getBoolean("wifiOnly", true),
                             "chargingOnly" to preferences.getBoolean("chargingOnly", false),
-                            "transferConcurrency" to preferences.getInt("transferConcurrency", 2),
+                            "transferConcurrency" to preferences.getInt("transferConcurrency", 8),
+                            "nasHelperEnabled" to preferences.getBoolean("nasHelperEnabled", false),
+                            "nasHelperUrl" to preferences.getString("nasHelperUrl", ""),
+                            "nasHelperToken" to preferences.getString("nasHelperToken", ""),
                         )
                     )
                 }
@@ -163,7 +166,10 @@ class MainActivity : AudioServiceActivity() {
                         .putString("deviceName", call.argument<String>("deviceName") ?: Build.MODEL)
                         .putBoolean("wifiOnly", call.argument<Boolean>("wifiOnly") ?: true)
                         .putBoolean("chargingOnly", call.argument<Boolean>("chargingOnly") ?: false)
-                        .putInt("transferConcurrency", call.argument<Int>("transferConcurrency") ?: 2)
+                        .putInt("transferConcurrency", call.argument<Int>("transferConcurrency") ?: 8)
+                        .putBoolean("nasHelperEnabled", call.argument<Boolean>("nasHelperEnabled") ?: false)
+                        .putString("nasHelperUrl", call.argument<String>("nasHelperUrl") ?: "")
+                        .putString("nasHelperToken", call.argument<String>("nasHelperToken") ?: "")
                         .apply()
                     result.success(null)
                 }

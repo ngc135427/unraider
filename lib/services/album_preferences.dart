@@ -15,6 +15,9 @@ class AlbumBackupPreferences {
     this.wifiOnly = true,
     this.chargingOnly = false,
     this.transferConcurrency = 8,
+    this.nasHelperEnabled = false,
+    this.nasHelperUrl = '',
+    this.nasHelperToken = '',
   });
 
   final bool autoBackup;
@@ -28,6 +31,9 @@ class AlbumBackupPreferences {
   final bool wifiOnly;
   final bool chargingOnly;
   final int transferConcurrency;
+  final bool nasHelperEnabled;
+  final String nasHelperUrl;
+  final String nasHelperToken;
 
   List<String> get selectedSourceIds {
     if (sourceIds.isNotEmpty) {
@@ -70,6 +76,9 @@ class AlbumPreferences {
         transferConcurrency:
             ((result['transferConcurrency'] as num?)?.toInt() ?? 8)
                 .clamp(1, 16),
+        nasHelperEnabled: result['nasHelperEnabled'] == true,
+        nasHelperUrl: _asString(result['nasHelperUrl']),
+        nasHelperToken: _asString(result['nasHelperToken']),
       );
     } on MissingPluginException {
       return const AlbumBackupPreferences();
@@ -92,6 +101,9 @@ class AlbumPreferences {
         'wifiOnly': preferences.wifiOnly,
         'chargingOnly': preferences.chargingOnly,
         'transferConcurrency': preferences.transferConcurrency,
+        'nasHelperEnabled': preferences.nasHelperEnabled,
+        'nasHelperUrl': preferences.nasHelperUrl,
+        'nasHelperToken': preferences.nasHelperToken,
       });
     } on MissingPluginException {
       return;

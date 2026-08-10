@@ -49,6 +49,7 @@ Unraider 是一个使用 Flutter 构建的 Unraid 移动端/桌面端管理客�
 - Android WorkManager 支持周期后台备份和前台集中备份，可限制仅 Wi-Fi 或仅充电时运行，并在通知中展示进度。
 - 云端相册支持分页加载和旧版日期目录备份识别。
 - 管理页支持按文件名、目录和媒体类型搜索，创建逻辑相册、按 SHA-256 复核精确重复项，以及在远端原件完成大小校验后释放本机空间。
+- 可选 NAS 助手可在 Unraid 本机扫描历史图库、生成图片缩略图/视频封面、计算完整性哈希；客户端支持能力协商、作业进度/取消/重试，并在助手未安装、离线或鉴权失败时自动回退到纯客户端扫描。
 
 ### 音乐页面
 
@@ -71,6 +72,7 @@ Unraider 是一个使用 Flutter 构建的 Unraid 移动端/桌面端管理客�
 - Android MethodChannel：登录/相册/WebDAV 偏好、本地媒体读取、SMB 传输与后台任务
 - Android WorkManager、OkHttp、SMBJ：后台媒体发现、前台通知、WebDAV/SMB 上传与下载
 - Flutter Widget Test 与单元测试：页面行为、解析、传输、缓存、歌词和相册备份覆盖
+- NAS 助手：Python 3.12 标准库 HTTP 服务、SQLite/WAL、FFmpeg、Docker Compose
 
 ## 目录结构
 
@@ -105,6 +107,7 @@ lib/
     album_background_service.dart   Android 后台备份通道
     album_management_service.dart   搜索、逻辑相册、重复项和空间释放
     album_preview_cache.dart        相册缩略图与预览缓存
+    album_nas_helper.dart           NAS 助手发现、能力协商、分页索引与作业客户端
     local_media_store.dart          Android 本地媒体 MethodChannel 封装
   widgets/                          通用 UI 组件
   theme/                            主题、颜色和全局样式
@@ -114,6 +117,8 @@ android/
                                     Android MethodChannel、MediaStore、SMB/WebDAV 实现
   app/src/main/kotlin/.../AlbumBackgroundWorker.kt
                                     WorkManager 相册发现和后台上传
+
+nas-helper/                         可选 Unraid 相册助手、Docker 部署与服务端测试
 
 html/                               原始原型页面和资料
 knowledge/                          Unraid 查询资料
@@ -152,6 +157,12 @@ Android 本机媒体
   -> AlbumTransferEngine 或 Android WorkManager
   -> WebDAV -> SMB -> SFTP
   -> 远端大小校验与持久化状态更新
+
+历史图库加速（可选）
+  -> 同 Unraid 主机 9487 端口自动发现或使用手动地址
+  -> Bearer Token + /api/v1/capabilities 能力协商
+  -> NAS 本地 SQLite 索引、FFmpeg 缩略图/视频封面和 SHA-256 作业
+  -> 助手不可用时回退到 Unraid 客户端目录扫描
 ```
 
 管理操作数据流：
@@ -175,6 +186,7 @@ Android 本机媒体
 - Unraid `root` 用户密码
 - 使用共享目录浏览或 SFTP 回退时，Unraid 需要启用 SSH 服务
 - 使用 WebDAV 预览和传输时，需要可访问的 FileBrowser Quantum 数据源及 API Token
+- 使用可选 NAS 助手时，需要可运行 Docker 的 Unraid、可写入媒体根 `.unraider/` 的权限以及 FFmpeg（镜像已内置）
 
 ## 本地开发
 
@@ -377,6 +389,7 @@ dart format lib test
 - Android MediaStore 数据边界、备份路径映射和旧偏好迁移。
 - 相册 SQLite 索引、增量发现、任务状态、失败重试、中断恢复和旧备份识别。
 - 相册预览缓存、逻辑相册、搜索、精确重复项和空间释放候选筛选。
+- NAS 助手鉴权与能力协商、游标分页、增量索引、派生目录隔离、幂等作业、取消/重试和删除派生文件后的完整重建。
 
 ## API 与权限说明
 
@@ -388,6 +401,7 @@ dart format lib test
 - Android 后台相册备份使用 WorkManager 和前台数据同步通知，可按网络、充电、电量和存储状态约束运行。
 - 音乐后台播放使用媒体播放前台服务和通知；视频播放期间使用唤醒锁保持屏幕点亮。
 - FileBrowser Quantum WebDAV 配置独立保存根地址、Unraid 路径前缀和 API Token。
+- NAS 助手提供独立 HTTP JSON API（默认端口 `9487`），除健康检查外均使用 Bearer Token；默认 SQLite 数据库仅保存可重建索引与作业状态，媒体原件始终保留在原目录。部署说明见 `nas-helper/README.md`。
 
 ## 路线图
 

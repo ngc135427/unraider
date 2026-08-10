@@ -75,6 +75,7 @@ class AlbumPreviewCache {
     required String remotePath,
     required String versionKey,
     required bool isVideo,
+    String? preferredSidecarPath,
     AlbumPreviewCancellation? cancellation,
   }) {
     final key =
@@ -90,6 +91,7 @@ class AlbumPreviewCache {
         remotePath: remotePath,
         versionKey: versionKey,
         isVideo: isVideo,
+        preferredSidecarPath: preferredSidecarPath,
         isCancelled: () => created.cancelled,
       );
       _inflight[key] = created;
@@ -126,6 +128,7 @@ class AlbumPreviewCache {
     required String remotePath,
     required String versionKey,
     required bool isVideo,
+    required String? preferredSidecarPath,
     required bool Function() isCancelled,
   }) async {
     if (isCancelled()) return null;
@@ -137,11 +140,13 @@ class AlbumPreviewCache {
       await file.setLastModified(DateTime.now());
       return file.readAsBytes();
     }
-    final sidecar = albumThumbnailSidecarPath(
-      remoteRoot: remoteRoot,
-      remotePath: remotePath,
-      versionKey: versionKey,
-    );
+    final sidecar = preferredSidecarPath?.trim().isNotEmpty == true
+        ? preferredSidecarPath!.trim()
+        : albumThumbnailSidecarPath(
+            remoteRoot: remoteRoot,
+            remotePath: remotePath,
+            versionKey: versionKey,
+          );
     try {
       final bytes = await client.fetchFileBytes(sidecar);
       if (bytes.isEmpty || isCancelled()) return null;

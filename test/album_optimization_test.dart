@@ -128,6 +128,49 @@ void main() {
   });
 
   group('Album management index', () {
+    test('remote refresh preserves only same-version derived preview paths',
+        () async {
+      final repository = await _openRepository();
+      addTearDown(repository.close);
+      const destination = 'destination';
+      const remotePath = '/mnt/user/photos/photo.jpg';
+      AlbumRemoteAsset asset(String version, {String? thumbnailPath}) =>
+          AlbumRemoteAsset(
+            destinationId: destination,
+            path: remotePath,
+            displayName: 'photo.jpg',
+            mediaKind: AlbumMediaKind.image,
+            sizeBytes: 10,
+            modifiedMs: version == '10:1000' ? 1000 : 2000,
+            versionKey: version,
+            thumbnailPath: thumbnailPath,
+            origin: 'test',
+          );
+
+      await repository.upsertRemoteAssets(<AlbumRemoteAsset>[
+        asset('10:1000', thumbnailPath: '/derived/old.jpg'),
+      ]);
+      await repository.upsertRemoteAssets(<AlbumRemoteAsset>[
+        asset('10:1000'),
+      ]);
+      expect(
+        (await repository.listRemotePage(destinationId: destination))
+            .single
+            .thumbnailPath,
+        '/derived/old.jpg',
+      );
+
+      await repository.upsertRemoteAssets(<AlbumRemoteAsset>[
+        asset('10:2000'),
+      ]);
+      expect(
+        (await repository.listRemotePage(destinationId: destination))
+            .single
+            .thumbnailPath,
+        isNull,
+      );
+    });
+
     test('supports search, logical albums and exact duplicate review',
         () async {
       final repository = await _openRepository();

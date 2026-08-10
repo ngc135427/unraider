@@ -842,10 +842,42 @@ class AlbumBackupRepository {
     await _database.transaction((transaction) async {
       final batch = transaction.batch();
       for (final asset in assets) {
-        batch.insert(
-          'remote_assets',
-          asset.toMap(),
-          conflictAlgorithm: ConflictAlgorithm.replace,
+        batch.rawInsert(
+          '''
+          INSERT INTO remote_assets (
+            destination_id,path,display_name,media_kind,size_bytes,modified_ms,
+            capture_time_ms,version_key,thumbnail_path,preview_path,origin
+          ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(destination_id,path) DO UPDATE SET
+            display_name=excluded.display_name,
+            media_kind=excluded.media_kind,
+            size_bytes=excluded.size_bytes,
+            modified_ms=excluded.modified_ms,
+            capture_time_ms=excluded.capture_time_ms,
+            thumbnail_path=CASE
+              WHEN excluded.thumbnail_path IS NOT NULL THEN excluded.thumbnail_path
+              WHEN remote_assets.version_key=excluded.version_key THEN remote_assets.thumbnail_path
+              ELSE NULL END,
+            preview_path=CASE
+              WHEN excluded.preview_path IS NOT NULL THEN excluded.preview_path
+              WHEN remote_assets.version_key=excluded.version_key THEN remote_assets.preview_path
+              ELSE NULL END,
+            version_key=excluded.version_key,
+            origin=excluded.origin
+          ''',
+          <Object?>[
+            asset.destinationId,
+            asset.path,
+            asset.displayName,
+            asset.mediaKind.name,
+            asset.sizeBytes,
+            asset.modifiedMs,
+            asset.captureTimeMs,
+            asset.versionKey,
+            asset.thumbnailPath,
+            asset.previewPath,
+            asset.origin,
+          ],
         );
       }
       await batch.commit(noResult: true);

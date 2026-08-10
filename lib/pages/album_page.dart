@@ -12,6 +12,7 @@ import '../services/album_backup_path.dart';
 import '../services/album_backup_repository.dart';
 import '../services/album_background_service.dart';
 import '../services/album_management_service.dart';
+import '../services/album_nas_helper.dart';
 import '../services/album_transfer_engine.dart';
 import '../services/album_preferences.dart';
 import '../services/album_preview_cache.dart';
@@ -192,6 +193,10 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
   AlbumBackupPreferences _preferences = const AlbumBackupPreferences();
   AlbumBackgroundStatus _backgroundStatus = AlbumBackgroundStatus.fromMap(null);
   Timer? _backgroundStatusTimer;
+  AlbumNasHelperStatus _nasHelperStatus = const AlbumNasHelperStatus.disabled();
+  AlbumNasHelperJob? _nasHelperJob;
+  Timer? _nasHelperJobTimer;
+  bool _nasHelperPolling = false;
   List<LocalMediaAsset> _localMedia = const <LocalMediaAsset>[];
   List<UnraidFileEntry> _remoteMedia = const <UnraidFileEntry>[];
   int _remoteMediaCount = 0;
@@ -317,6 +322,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     _remoteState.dispose();
     _syncProgress.dispose();
     _backgroundStatusTimer?.cancel();
+    _nasHelperJobTimer?.cancel();
     super.dispose();
   }
 
@@ -348,6 +354,13 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
         return;
       }
       setState(() => _preferences = preferences);
+      if (!preferences.nasHelperEnabled) {
+        setState(() {
+          _nasHelperStatus = const AlbumNasHelperStatus.disabled();
+          _nasHelperJob = null;
+        });
+        _nasHelperJobTimer?.cancel();
+      }
       await AlbumBackgroundService.configure(
         client: args.unraidClient,
         preferences: preferences,
@@ -458,6 +471,218 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     }
   }
 
+  AlbumNasHelperClient? _nasHelperClient() {
+    if (!_preferences.nasHelperEnabled) return null;
+    final configuredUrl = _preferences.nasHelperUrl.trim();
+    final unraidUri = Uri.tryParse(_client?.baseUrl ?? '');
+    final discoveredUrl = unraidUri == null || unraidUri.host.isEmpty
+        ? ''
+        : Uri(scheme: 'http', host: unraidUri.host, port: 9487).toString();
+    final helperUrl = configuredUrl.isEmpty ? discoveredUrl : configuredUrl;
+    if (helperUrl.isEmpty) return null;
+    return AlbumNasHelperClient(
+      baseUrl: helperUrl,
+      token: _preferences.nasHelperToken,
+    );
+  }
+
+  Future<AlbumNasHelperStatus> _probeNasHelper({bool notify = true}) async {
+    final helper = _nasHelperClient();
+    final status = helper == null
+        ? (_preferences.nasHelperEnabled
+            ? const AlbumNasHelperStatus(
+                availability: AlbumNasHelperAvailability.notInstalled,
+                message: '请先配置 NAS 助手地址',
+              )
+            : const AlbumNasHelperStatus.disabled())
+        : await helper.probe();
+    helper?.close();
+    if (mounted) {
+      setState(() => _nasHelperStatus = status);
+      if (notify) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(status.message)),
+        );
+      }
+    }
+    return status;
+  }
+
+  Future<List<UnraidFileEntry>?> _loadNasHelperMedia({
+    required String targetDir,
+    required int generation,
+  }) async {
+    final helper = _nasHelperClient();
+    if (helper == null) return null;
+    final status = await _probeNasHelper(notify: false);
+    if (!status.isReady || generation != _loadGeneration) {
+      helper.close();
+      return null;
+    }
+    try {
+      final assets = await helper.listAllAssets(prefix: targetDir);
+      if (assets.isEmpty) return null;
+      final repository = _backupRepository;
+      if (repository != null) {
+        final destinationId = albumDestinationId(targetDir);
+        await repository.upsertRemoteAssets(
+          assets
+              .map((asset) => asset.toRemoteAsset(destinationId))
+              .toList(growable: false),
+        );
+      }
+      return assets
+          .map(
+            (asset) => UnraidFileEntry(
+              name: asset.displayName,
+              path: asset.remotePath,
+              isDirectory: false,
+              sizeBytes: asset.sizeBytes,
+              size: _formatBytes(asset.sizeBytes),
+              modified: asset.modifiedMs <= 0
+                  ? ''
+                  : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs)
+                      .toLocal()
+                      .toString(),
+              modifiedDate: asset.modifiedMs <= 0
+                  ? null
+                  : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs),
+              thumbnailPath: asset.thumbnailPath,
+            ),
+          )
+          .toList(growable: false);
+    } on Object catch (error, stackTrace) {
+      await AppLogger.log(
+        'album_nas_helper_index_failed target=$targetDir',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (mounted) {
+        setState(() {
+          _nasHelperStatus = const AlbumNasHelperStatus(
+            availability: AlbumNasHelperAvailability.offline,
+            message: 'NAS 助手索引读取失败，已降级为纯客户端扫描',
+          );
+        });
+      }
+      return null;
+    } finally {
+      helper.close();
+    }
+  }
+
+  Future<void> _runNasHelperRebuild() async {
+    final helper = _nasHelperClient();
+    if (helper == null) {
+      await _probeNasHelper();
+      return;
+    }
+    final status = await _probeNasHelper(notify: false);
+    if (!status.isReady) {
+      helper.close();
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(status.message)));
+      }
+      return;
+    }
+    final target = _normalizeLocalPath(_preferences.targetDir);
+    final matchingRoots = status.roots
+        .where((root) =>
+            target == root.remotePrefix ||
+            target.startsWith('${root.remotePrefix}/'))
+        .toList(growable: false)
+      ..sort((a, b) => b.remotePrefix.length.compareTo(a.remotePrefix.length));
+    if (matchingRoots.isEmpty) {
+      helper.close();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('NAS 助手没有覆盖当前相册目标目录的媒体根')),
+        );
+      }
+      return;
+    }
+    try {
+      final job = await helper.submitJob(
+        type: 'rebuild',
+        rootId: matchingRoots.first.id,
+        idempotencyKey:
+            'mobile-rebuild-${DateTime.now().microsecondsSinceEpoch}',
+      );
+      if (!mounted) return;
+      setState(() => _nasHelperJob = job);
+      _startNasHelperJobPolling();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('提交 NAS 助手作业失败：$error')),
+        );
+      }
+    } finally {
+      helper.close();
+    }
+  }
+
+  void _startNasHelperJobPolling() {
+    _nasHelperJobTimer?.cancel();
+    _nasHelperJobTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_pollNasHelperJob()),
+    );
+    unawaited(_pollNasHelperJob());
+  }
+
+  Future<void> _pollNasHelperJob() async {
+    if (_nasHelperPolling) return;
+    final current = _nasHelperJob;
+    final helper = _nasHelperClient();
+    if (current == null || helper == null) return;
+    _nasHelperPolling = true;
+    try {
+      final job = await helper.job(current.id);
+      if (!mounted) return;
+      setState(() => _nasHelperJob = job);
+      if (job.isFinished) {
+        _nasHelperJobTimer?.cancel();
+        if (job.state == 'completed') {
+          await _reloadRemote();
+        }
+      }
+    } on Object catch (error) {
+      await AppLogger.log('album_nas_helper_job_poll_failed id=${current.id}',
+          error: error);
+    } finally {
+      helper.close();
+      _nasHelperPolling = false;
+    }
+  }
+
+  Future<void> _cancelNasHelperJob() async {
+    final helper = _nasHelperClient();
+    final job = _nasHelperJob;
+    if (helper == null || job == null) return;
+    try {
+      final updated = await helper.cancelJob(job.id);
+      if (mounted) setState(() => _nasHelperJob = updated);
+    } finally {
+      helper.close();
+    }
+  }
+
+  Future<void> _retryNasHelperJob() async {
+    final helper = _nasHelperClient();
+    final job = _nasHelperJob;
+    if (helper == null || job == null) return;
+    try {
+      final updated = await helper.retryJob(job.id);
+      if (!mounted) return;
+      setState(() => _nasHelperJob = updated);
+      _startNasHelperJobPolling();
+    } finally {
+      helper.close();
+    }
+  }
+
   Future<void> _loadRemoteMedia({
     required UnraidClient client,
     required String targetDir,
@@ -465,15 +690,20 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     bool forceRefresh = false,
   }) async {
     try {
-      final remote = await client.fetchMediaFiles(
-        targetDir,
-        maxDepth: 6,
-        includeImages: true,
-        includeVideos: true,
-        includeAudio: false,
-        forceRefresh: forceRefresh,
+      final helperRemote = await _loadNasHelperMedia(
+        targetDir: targetDir,
+        generation: generation,
       );
-      await _indexRemoteMedia(remote);
+      final remote = helperRemote ??
+          await client.fetchMediaFiles(
+            targetDir,
+            maxDepth: 6,
+            includeImages: true,
+            includeVideos: true,
+            includeAudio: false,
+            forceRefresh: forceRefresh,
+          );
+      if (helperRemote == null) await _indexRemoteMedia(remote);
       final page = _backupRepository == null
           ? remote.take(_remotePageSize).toList(growable: false)
           : await _readRemotePage(offset: 0);
@@ -562,6 +792,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                 ? null
                 : DateTime.fromMillisecondsSinceEpoch(asset.modifiedMs),
             durationMs: asset.durationMs,
+            thumbnailPath: asset.thumbnailPath,
           ),
         )
         .toList(growable: false);
@@ -980,6 +1211,9 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                           wifiOnly: _preferences.wifiOnly,
                           chargingOnly: _preferences.chargingOnly,
                           transferConcurrency: _preferences.transferConcurrency,
+                          nasHelperEnabled: _preferences.nasHelperEnabled,
+                          nasHelperUrl: _preferences.nasHelperUrl,
+                          nasHelperToken: _preferences.nasHelperToken,
                         ),
                       );
                     },
@@ -1364,6 +1598,14 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
               buckets: _buckets,
               onSave: _savePreferences,
               onChooseSource: _chooseSource,
+              nasHelperStatus: _nasHelperStatus,
+              nasHelperJob: _nasHelperJob,
+              onProbeNasHelper: () async {
+                await _probeNasHelper();
+              },
+              onRunNasHelperRebuild: _runNasHelperRebuild,
+              onCancelNasHelperJob: _cancelNasHelperJob,
+              onRetryNasHelperJob: _retryNasHelperJob,
             ),
           ],
         ),

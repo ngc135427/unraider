@@ -8,6 +8,8 @@
 .pub/
 build/
 dist/
+__pycache__/
+*.py[cod]
 ios/Flutter/Flutter.framework
 ios/Flutter/Flutter.podspec
 android/.gradle/

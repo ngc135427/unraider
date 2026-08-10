@@ -3,7 +3,7 @@
   "name": "photo-nas-helper",
   "title": "可选 Unraid 相册助手",
   "description": "可选助手：历史图库索引、缩略图、视频封面与完整性作业",
-  "status": "planning",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,8 +11,8 @@
   "creator": "ngc427",
   "assignee": "ngc427",
   "createdAt": "2026-08-08",
-  "completedAt": null,
-  "branch": null,
+  "completedAt": "2026-08-10",
+  "branch": "main",
   "base_branch": "main",
   "worktree_path": null,
   "commit": null,
@@ -20,7 +20,12 @@
   "subtasks": [],
   "children": [],
   "parent": "08-08-rebuild-photo-backup-preview",
-  "relatedFiles": [],
-  "notes": "",
+  "relatedFiles": [
+    "nas-helper/",
+    "lib/services/album_nas_helper.dart",
+    "lib/pages/album_page.dart",
+    "lib/pages/album_widgets.dart"
+  ],
+  "notes": "已实现可选 HTTP JSON 助手、Bearer Token 与能力协商、SQLite 增量索引、FFmpeg 图片缩略图/视频封面、SHA-256 完整性作业、幂等/取消/重试、Docker 部署，以及客户端自动发现和纯客户端回退。",
   "meta": {}
 }

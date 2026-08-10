@@ -1329,12 +1329,24 @@ class _SettingsPanel extends StatefulWidget {
     required this.buckets,
     required this.onSave,
     required this.onChooseSource,
+    required this.nasHelperStatus,
+    required this.nasHelperJob,
+    required this.onProbeNasHelper,
+    required this.onRunNasHelperRebuild,
+    required this.onCancelNasHelperJob,
+    required this.onRetryNasHelperJob,
   });
 
   final AlbumBackupPreferences preferences;
   final List<LocalMediaBucket> buckets;
   final Future<void> Function(AlbumBackupPreferences preferences) onSave;
   final VoidCallback onChooseSource;
+  final AlbumNasHelperStatus nasHelperStatus;
+  final AlbumNasHelperJob? nasHelperJob;
+  final Future<void> Function() onProbeNasHelper;
+  final Future<void> Function() onRunNasHelperRebuild;
+  final Future<void> Function() onCancelNasHelperJob;
+  final Future<void> Function() onRetryNasHelperJob;
 
   @override
   State<_SettingsPanel> createState() => _SettingsPanelState();
@@ -1342,6 +1354,8 @@ class _SettingsPanel extends StatefulWidget {
 
 class _SettingsPanelState extends State<_SettingsPanel> {
   late final TextEditingController _targetController;
+  late final TextEditingController _nasHelperUrlController;
+  late final TextEditingController _nasHelperTokenController;
   bool _saving = false;
 
   @override
@@ -1349,6 +1363,12 @@ class _SettingsPanelState extends State<_SettingsPanel> {
     super.initState();
     _targetController = TextEditingController(
       text: widget.preferences.targetDir,
+    );
+    _nasHelperUrlController = TextEditingController(
+      text: widget.preferences.nasHelperUrl,
+    );
+    _nasHelperTokenController = TextEditingController(
+      text: widget.preferences.nasHelperToken,
     );
   }
 
@@ -1358,20 +1378,30 @@ class _SettingsPanelState extends State<_SettingsPanel> {
     if (oldWidget.preferences.targetDir != widget.preferences.targetDir) {
       _targetController.text = widget.preferences.targetDir;
     }
+    if (oldWidget.preferences.nasHelperUrl != widget.preferences.nasHelperUrl) {
+      _nasHelperUrlController.text = widget.preferences.nasHelperUrl;
+    }
+    if (oldWidget.preferences.nasHelperToken !=
+        widget.preferences.nasHelperToken) {
+      _nasHelperTokenController.text = widget.preferences.nasHelperToken;
+    }
   }
 
   @override
   void dispose() {
     _targetController.dispose();
+    _nasHelperUrlController.dispose();
+    _nasHelperTokenController.dispose();
     super.dispose();
   }
 
-  Future<void> _save({
+  Future<bool> _save({
     bool? autoBackup,
     AlbumInitialBackupMode? initialBackupMode,
     bool? wifiOnly,
     bool? chargingOnly,
     int? transferConcurrency,
+    bool? nasHelperEnabled,
   }) async {
     final target = _normalizeLocalPath(_targetController.text);
     if (target.isEmpty ||
@@ -1379,33 +1409,47 @@ class _SettingsPanelState extends State<_SettingsPanel> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('目标目录必须位于 /mnt 或 /boot 下')),
       );
-      return;
+      return false;
     }
     setState(() => _saving = true);
-    await widget.onSave(
-      AlbumBackupPreferences(
-        autoBackup: autoBackup ?? widget.preferences.autoBackup,
-        targetDir: target,
-        sourceId: widget.preferences.sourceId,
-        sourceIds: widget.preferences.sourceIds,
-        sourceName: widget.preferences.sourceName,
-        initialBackupMode:
-            initialBackupMode ?? widget.preferences.initialBackupMode,
-        deviceId: widget.preferences.deviceId,
-        deviceName: widget.preferences.deviceName,
-        wifiOnly: wifiOnly ?? widget.preferences.wifiOnly,
-        chargingOnly: chargingOnly ?? widget.preferences.chargingOnly,
-        transferConcurrency:
-            transferConcurrency ?? widget.preferences.transferConcurrency,
-      ),
-    );
-    if (!mounted) {
-      return;
+    try {
+      await widget.onSave(
+        AlbumBackupPreferences(
+          autoBackup: autoBackup ?? widget.preferences.autoBackup,
+          targetDir: target,
+          sourceId: widget.preferences.sourceId,
+          sourceIds: widget.preferences.sourceIds,
+          sourceName: widget.preferences.sourceName,
+          initialBackupMode:
+              initialBackupMode ?? widget.preferences.initialBackupMode,
+          deviceId: widget.preferences.deviceId,
+          deviceName: widget.preferences.deviceName,
+          wifiOnly: wifiOnly ?? widget.preferences.wifiOnly,
+          chargingOnly: chargingOnly ?? widget.preferences.chargingOnly,
+          transferConcurrency:
+              transferConcurrency ?? widget.preferences.transferConcurrency,
+          nasHelperEnabled:
+              nasHelperEnabled ?? widget.preferences.nasHelperEnabled,
+          nasHelperUrl: _nasHelperUrlController.text.trim(),
+          nasHelperToken: _nasHelperTokenController.text.trim(),
+        ),
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('相册配置已保存')),
+        );
+      }
+      return true;
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('相册配置保存失败：$error')),
+        );
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
-    setState(() => _saving = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('相册配置已保存')),
-    );
   }
 
   @override
@@ -1506,6 +1550,84 @@ class _SettingsPanelState extends State<_SettingsPanel> {
                 },
         ),
         const SizedBox(height: 14),
+        const Divider(),
+        const SizedBox(height: 8),
+        const Text(
+          '可选 NAS 助手',
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          '在 Unraid 本地索引历史图库并生成缩略图、视频封面和完整性数据；不可用时自动回退到纯客户端模式。',
+          style: TextStyle(color: AppTheme.textMedium),
+        ),
+        SwitchListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+          title: const Text('启用 NAS 助手'),
+          subtitle: Text(widget.nasHelperStatus.message),
+          value: widget.preferences.nasHelperEnabled,
+          onChanged: _saving ? null : (value) => _save(nasHelperEnabled: value),
+        ),
+        TextField(
+          controller: _nasHelperUrlController,
+          enabled: widget.preferences.nasHelperEnabled && !_saving,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            labelText: '助手地址',
+            hintText: 'http://unraid:9487',
+            prefixIcon: Icon(Icons.dns_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _nasHelperTokenController,
+          enabled: widget.preferences.nasHelperEnabled && !_saving,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          decoration: const InputDecoration(
+            labelText: '助手访问令牌',
+            prefixIcon: Icon(Icons.key_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: !widget.preferences.nasHelperEnabled || _saving
+                  ? null
+                  : () async {
+                      if (await _save()) {
+                        await widget.onProbeNasHelper();
+                      }
+                    },
+              icon: const Icon(Icons.wifi_tethering_outlined),
+              label: const Text('检测助手'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: !widget.preferences.nasHelperEnabled ||
+                      _saving ||
+                      !widget.nasHelperStatus.isReady ||
+                      (widget.nasHelperJob != null &&
+                          !widget.nasHelperJob!.isFinished)
+                  ? null
+                  : widget.onRunNasHelperRebuild,
+              icon: const Icon(Icons.auto_fix_high_outlined),
+              label: const Text('索引并生成历史预览'),
+            ),
+          ],
+        ),
+        if (widget.nasHelperJob != null) ...[
+          const SizedBox(height: 12),
+          _NasHelperJobCard(
+            job: widget.nasHelperJob!,
+            onCancel: widget.onCancelNasHelperJob,
+            onRetry: widget.onRetryNasHelperJob,
+          ),
+        ],
+        const SizedBox(height: 14),
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(
@@ -1521,6 +1643,76 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _NasHelperJobCard extends StatelessWidget {
+  const _NasHelperJobCard({
+    required this.job,
+    required this.onCancel,
+    required this.onRetry,
+  });
+
+  final AlbumNasHelperJob job;
+  final Future<void> Function() onCancel;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final running = job.state == 'queued' || job.state == 'running';
+    final failed = job.state == 'failed';
+    final label = switch (job.state) {
+      'queued' => '等待执行',
+      'running' => '正在执行',
+      'completed' => '执行完成',
+      'failed' => '执行失败',
+      'cancelled' => '已取消',
+      _ => job.state,
+    };
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                failed ? Icons.error_outline : Icons.memory_outlined,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'NAS 作业 · $label',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (running)
+                TextButton(onPressed: onCancel, child: const Text('取消'))
+              else
+                TextButton(onPressed: onRetry, child: const Text('重新运行')),
+            ],
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(
+            value:
+                job.total > 0 ? job.progress.clamp(0, 1) : (running ? null : 1),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            job.lastError ??
+                job.message ??
+                (job.total > 0 ? '${job.processed}/${job.total}' : '正在准备作业'),
+            style: const TextStyle(color: AppTheme.textMedium),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1703,6 +1895,9 @@ class _RemoteTileState extends State<_RemoteTile> {
   void didUpdateWidget(covariant _RemoteTile oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.entry.path != widget.entry.path ||
+        oldWidget.entry.sizeBytes != widget.entry.sizeBytes ||
+        oldWidget.entry.modifiedDate != widget.entry.modifiedDate ||
+        oldWidget.entry.thumbnailPath != widget.entry.thumbnailPath ||
         oldWidget.remoteRoot != widget.remoteRoot ||
         oldWidget.client != widget.client) {
       _previewCancellation?.cancel();
@@ -1727,6 +1922,7 @@ class _RemoteTileState extends State<_RemoteTile> {
       remotePath: entry.path,
       versionKey: versionKey,
       isVideo: entry.isVideo,
+      preferredSidecarPath: entry.thumbnailPath,
       cancellation: cancellation,
     );
   }

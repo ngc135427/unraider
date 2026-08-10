@@ -1,0 +1,17 @@
+services:
+  unraider-album-helper:
+    build: .
+    container_name: unraider-album-helper
+    restart: unless-stopped
+    user: "${PUID:-99}:${PGID:-100}"
+    ports:
+      - "9487:9487"
+    environment:
+      UNRAIDER_HELPER_TOKEN: "replace-with-a-random-token-at-least-16-characters"
+      UNRAIDER_HELPER_WORKERS: "2"
+      UNRAIDER_CORS_ORIGIN: "*"
+      UNRAIDER_ROOTS_JSON: >-
+        [{"id":"photos","path":"/media/photos","remotePrefix":"/mnt/user/photos"}]
+    volumes:
+      - /mnt/user/appdata/unraider-album-helper:/data
+      - /mnt/user/photos:/media/photos
