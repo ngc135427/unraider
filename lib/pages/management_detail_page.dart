@@ -25,7 +25,11 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   FileEntrySort _shareSort = FileEntrySort.nameAscending;
   Object? _shareError;
   final TextEditingController _shareSearchController = TextEditingController();
+  final ScrollController _shareScrollController = ScrollController();
   Timer? _shareSearchDebounce;
+  String? _shareCurrentMediaPath;
+  String? _shareCenteredMediaPath;
+  String? _sharePendingMediaPath;
 
   /// Search query is isolated so typing does not rebuild the share header chrome.
   final ValueNotifier<String> _shareQuery = ValueNotifier<String>('');
@@ -50,6 +54,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
   void dispose() {
     _shareSearchDebounce?.cancel();
     _shareSearchController.dispose();
+    _shareScrollController.dispose();
     _isSubmitting.dispose();
     _shareLoading.dispose();
     _shareQuery.dispose();
@@ -623,8 +628,10 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
             await _shareFuture;
           },
           child: ListView.builder(
+            controller: _shareScrollController,
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
+            itemExtent: 73,
             itemCount: entries.length + (canGoUp ? 1 : 0),
             findChildIndexCallback: (Key key) {
               if (key is! ValueKey<String>) {
@@ -664,6 +671,7 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
                                           : Icons.insert_drive_file,
                   title: entry.name,
                   subtitle: entry.isDirectory ? '文件夹' : _fileSubtitle(entry),
+                  selected: _shareCurrentMediaPath == entry.path,
                   onLongPress: () => _showShareEntryActions(
                     args,
                     currentPath: currentPath,
@@ -1152,6 +1160,8 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
     final entries =
         videoEntries.isEmpty ? <UnraidFileEntry>[entry] : videoEntries;
     final initialIndex = entries.indexWhere((item) => item.path == entry.path);
+    var currentPath = entry.path;
+    setState(() => _shareCurrentMediaPath = currentPath);
     await showDialog<void>(
       context: context,
       builder: (context) => Dialog.fullscreen(
@@ -1159,9 +1169,45 @@ class _ManagementDetailPageState extends State<ManagementDetailPage> {
           client: client,
           entries: entries,
           initialIndex: initialIndex,
+          onCurrentChanged: (item) => currentPath = item.path,
         ),
       ),
     );
+    if (!mounted) {
+      return;
+    }
+    setState(() => _shareCurrentMediaPath = currentPath);
+    _scheduleShareEntryVisible(currentPath);
+  }
+
+  void _scheduleShareEntryVisible(String path) {
+    final entries = _shareFilteredEntries;
+    final index = entries.indexWhere((entry) => entry.path == path);
+    if (index < 0 ||
+        path == _shareCenteredMediaPath ||
+        path == _sharePendingMediaPath) {
+      return;
+    }
+    _sharePendingMediaPath = path;
+    final canGoUp = _canGoUp(_detailArgs);
+    final listIndex = index + (canGoUp ? 1 : 0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _sharePendingMediaPath != path) {
+        return;
+      }
+      _sharePendingMediaPath = null;
+      if (!_shareScrollController.hasClients) {
+        return;
+      }
+      final position = _shareScrollController.position;
+      const itemExtent = 73.0;
+      final target = (listIndex * itemExtent) -
+          ((position.viewportDimension - itemExtent) / 2);
+      _shareScrollController.jumpTo(
+        target.clamp(0.0, position.maxScrollExtent),
+      );
+      _shareCenteredMediaPath = path;
+    });
   }
 
   Future<void> _previewPdf(

@@ -359,7 +359,7 @@ class _MusicPageState extends State<MusicPage> {
         builder: (context) => MusicTracksPage(
           tracks: _tracks,
           rootPath: _rootPath,
-          currentTrack: _currentTrack,
+          currentTrack: MusicPlayerService.instance.current ?? _currentTrack,
           onSelect: (track) {
             setState(() => _currentTrack = track);
             unawaited(_playAndOpen(client, track));
@@ -551,8 +551,13 @@ class MusicTracksPage extends StatefulWidget {
 }
 
 class _MusicTracksPageState extends State<MusicTracksPage> {
+  static const double _trackExtent = 80;
+
   final ValueNotifier<String> _query = ValueNotifier<String>('');
+  final ScrollController _scrollController = ScrollController();
   Timer? _searchDebounce;
+  String? _centeredTrackPath;
+  String? _pendingTrackPath;
   String _filterQueryRef = '';
   List<UnraidFileEntry>? _filterTracksRef;
   String? _filterRootRef;
@@ -602,8 +607,41 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _scrollController.dispose();
     _query.dispose();
     super.dispose();
+  }
+
+  void _scheduleCurrentTrackVisible(
+    List<UnraidFileEntry> tracks,
+    String? currentPath,
+  ) {
+    if (currentPath == null ||
+        currentPath == _centeredTrackPath ||
+        currentPath == _pendingTrackPath) {
+      return;
+    }
+    final index = tracks.indexWhere((track) => track.path == currentPath);
+    if (index < 0) {
+      return;
+    }
+    _pendingTrackPath = currentPath;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pendingTrackPath != currentPath) {
+        return;
+      }
+      _pendingTrackPath = null;
+      if (!_scrollController.hasClients) {
+        return;
+      }
+      final position = _scrollController.position;
+      final target = (index * _trackExtent) -
+          ((position.viewportDimension - _trackExtent) / 2);
+      _scrollController.jumpTo(
+        target.clamp(0.0, position.maxScrollExtent),
+      );
+      _centeredTrackPath = currentPath;
+    });
   }
 
   void _onSearchChanged(String value) {
@@ -669,19 +707,30 @@ class _MusicTracksPageState extends State<MusicTracksPage> {
                       ),
                     );
                   }
-                  return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
-                    itemCount: tracks.length,
-                    itemBuilder: (context, index) {
-                      final track = tracks[index];
-                      return RepaintBoundary(
-                        key: ValueKey<String>(track.path),
-                        child: _TrackTile(
-                          track: track,
-                          album: _albumName(track.path, widget.rootPath),
-                          selected: widget.currentTrack?.path == track.path,
-                          onTap: () => widget.onSelect(track),
-                        ),
+                  final service = MusicPlayerService.instance;
+                  return AnimatedBuilder(
+                    animation: service,
+                    builder: (context, _) {
+                      final currentPath =
+                          service.current?.path ?? widget.currentTrack?.path;
+                      _scheduleCurrentTrackVisible(tracks, currentPath);
+                      return ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(30, 0, 30, 30),
+                        itemExtent: _trackExtent,
+                        itemCount: tracks.length,
+                        itemBuilder: (context, index) {
+                          final track = tracks[index];
+                          return RepaintBoundary(
+                            key: ValueKey<String>(track.path),
+                            child: _TrackTile(
+                              track: track,
+                              album: _albumName(track.path, widget.rootPath),
+                              selected: currentPath == track.path,
+                              onTap: () => widget.onSelect(track),
+                            ),
+                          );
+                        },
                       );
                     },
                   );
@@ -891,90 +940,157 @@ class _MusicPlayerPageState extends State<MusicPlayerPage> {
       backgroundColor: const Color(0xFF152033),
       showDragHandle: true,
       isScrollControlled: true,
-      builder: (context) {
-        return AnimatedBuilder(
-          animation: service,
-          builder: (context, _) {
-            final ordered = service.orderedQueue;
-            final currentPath = service.current?.path;
-            return SafeArea(
-              child: SizedBox(
-                height: MediaQuery.sizeOf(context).height * 0.55,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
-                      child: Text(
-                        '播放队列 · ${ordered.length}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+      builder: (context) => _MusicQueueSheet(service: service),
+    );
+  }
+}
+
+class _MusicQueueSheet extends StatefulWidget {
+  const _MusicQueueSheet({required this.service});
+
+  final MusicPlayerService service;
+
+  @override
+  State<_MusicQueueSheet> createState() => _MusicQueueSheetState();
+}
+
+class _MusicQueueSheetState extends State<_MusicQueueSheet> {
+  static const double _itemExtent = 64;
+
+  final ScrollController _scrollController = ScrollController();
+  String? _centeredPath;
+  String? _pendingPath;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scheduleCurrentVisible(
+    List<UnraidFileEntry> ordered,
+    String? currentPath,
+  ) {
+    if (currentPath == null ||
+        currentPath == _centeredPath ||
+        currentPath == _pendingPath) {
+      return;
+    }
+    final index = ordered.indexWhere((item) => item.path == currentPath);
+    if (index < 0) {
+      return;
+    }
+    _pendingPath = currentPath;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pendingPath != currentPath) {
+        return;
+      }
+      _pendingPath = null;
+      if (!_scrollController.hasClients) {
+        return;
+      }
+      final position = _scrollController.position;
+      final target = (index * _itemExtent) -
+          ((position.viewportDimension - _itemExtent) / 2);
+      final offset = target.clamp(0.0, position.maxScrollExtent);
+      if (_centeredPath == null) {
+        _scrollController.jumpTo(offset);
+      } else {
+        unawaited(
+          _scrollController.animateTo(
+            offset,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+      _centeredPath = currentPath;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final service = widget.service;
+    return AnimatedBuilder(
+      animation: service,
+      builder: (context, _) {
+        final ordered = service.orderedQueue;
+        final currentPath = service.current?.path;
+        _scheduleCurrentVisible(ordered, currentPath);
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.55,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                  child: Text(
+                    '播放队列 · ${ordered.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
                     ),
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: ordered.length,
-                        itemBuilder: (context, i) {
-                          final item = ordered[i];
-                          final selected = item.path == currentPath;
-                          return ListTile(
-                            dense: true,
-                            selected: selected,
-                            selectedTileColor:
-                                Colors.white.withValues(alpha: 0.08),
-                            leading: Icon(
-                              selected
-                                  ? Icons.equalizer
-                                  : Icons.music_note_outlined,
-                              color: selected
-                                  ? const Color(0xFF52C41A)
-                                  : Colors.white70,
-                            ),
-                            title: Text(
-                              _displayTitle(item.name),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: selected
-                                    ? FontWeight.w600
-                                    : FontWeight.w400,
-                              ),
-                            ),
-                            subtitle: Text(
-                              _albumName(item.path, service.rootPath),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white54),
-                            ),
-                            trailing: Text(
-                              item.size,
-                              style: const TextStyle(
-                                color: Colors.white38,
-                                fontSize: 12,
-                              ),
-                            ),
-                            onTap: () {
-                              final queueIndex = service.queue
-                                  .indexWhere((t) => t.path == item.path);
-                              if (queueIndex >= 0) {
-                                unawaited(
-                                  service.playTrackAt(queueIndex),
-                                );
-                              }
-                            },
-                          );
-                        },
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-            );
-          },
+                Expanded(
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    itemExtent: _itemExtent,
+                    itemCount: ordered.length,
+                    itemBuilder: (context, i) {
+                      final item = ordered[i];
+                      final selected = item.path == currentPath;
+                      return ListTile(
+                        dense: true,
+                        selected: selected,
+                        selectedTileColor: Colors.white.withValues(alpha: 0.08),
+                        leading: Icon(
+                          selected
+                              ? Icons.equalizer
+                              : Icons.music_note_outlined,
+                          color: selected
+                              ? const Color(0xFF52C41A)
+                              : Colors.white70,
+                        ),
+                        title: Text(
+                          _displayTitle(item.name),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight:
+                                selected ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                        ),
+                        subtitle: Text(
+                          _albumName(item.path, service.rootPath),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white54),
+                        ),
+                        trailing: Text(
+                          item.size,
+                          style: const TextStyle(
+                            color: Colors.white38,
+                            fontSize: 12,
+                          ),
+                        ),
+                        onTap: () {
+                          final queueIndex = service.queue
+                              .indexWhere((track) => track.path == item.path);
+                          if (queueIndex >= 0) {
+                            unawaited(service.playTrackAt(queueIndex));
+                          }
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
         );
       },
     );

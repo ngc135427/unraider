@@ -1080,6 +1080,7 @@ class _LocalTimeline extends StatefulWidget {
     required this.gallery,
     required this.videosOnly,
     required this.padding,
+    required this.scrollController,
   });
 
   final bool loading;
@@ -1089,6 +1090,7 @@ class _LocalTimeline extends StatefulWidget {
   final List<LocalMediaAsset> gallery;
   final bool videosOnly;
   final EdgeInsets padding;
+  final ScrollController scrollController;
 
   @override
   State<_LocalTimeline> createState() => _LocalTimelineState();
@@ -1097,6 +1099,7 @@ class _LocalTimeline extends StatefulWidget {
 class _LocalTimelineState extends State<_LocalTimeline> {
   List<LocalMediaAsset>? _mediaRef;
   List<_LocalSection> _sections = const <_LocalSection>[];
+  String? _currentAssetId;
 
   List<_LocalSection> get _groupedSections {
     if (identical(_mediaRef, widget.media)) {
@@ -1140,11 +1143,10 @@ class _LocalTimelineState extends State<_LocalTimeline> {
         delegate: SliverChildBuilderDelegate(
           (context, index) {
             final section = sections[index];
-            final visible = section.items.length <= _maxAlbumSectionTiles
-                ? section.items
-                : section.items
-                    .take(_maxAlbumSectionTiles)
-                    .toList(growable: false);
+            final visible = _localSectionWindow(
+              section.items,
+              _currentAssetId,
+            );
             return Padding(
               padding: EdgeInsets.only(
                 bottom: index == sections.length - 1 ? 0 : 22,
@@ -1157,7 +1159,12 @@ class _LocalTimelineState extends State<_LocalTimeline> {
                     count: section.items.length,
                   ),
                   const SizedBox(height: 10),
-                  _LocalGrid(items: visible, gallery: widget.gallery),
+                  _LocalGrid(
+                    items: visible,
+                    gallery: widget.gallery,
+                    currentAssetId: _currentAssetId,
+                    onCurrentChanged: _focusAsset,
+                  ),
                   if (section.items.length > _maxAlbumSectionTiles) ...[
                     const SizedBox(height: 8),
                     Text(
@@ -1178,6 +1185,39 @@ class _LocalTimelineState extends State<_LocalTimeline> {
       ),
     );
   }
+
+  void _focusAsset(LocalMediaAsset asset) {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _currentAssetId = asset.id);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.scrollController.hasClients) {
+        return;
+      }
+      final sections = _groupedSections;
+      final sectionIndex = sections.indexWhere(
+        (section) => section.items.any((item) => item.id == asset.id),
+      );
+      if (sectionIndex < 0) {
+        return;
+      }
+      final visible = _localSectionWindow(
+        sections[sectionIndex].items,
+        asset.id,
+      );
+      _scrollAlbumTimelineTo(
+        controller: widget.scrollController,
+        context: context,
+        padding: widget.padding,
+        sectionLengths: [
+          for (final section in sections) section.items.length,
+        ],
+        sectionIndex: sectionIndex,
+        visibleIndex: visible.indexWhere((item) => item.id == asset.id),
+      );
+    });
+  }
 }
 
 class _RemoteTimeline extends StatefulWidget {
@@ -1190,6 +1230,7 @@ class _RemoteTimeline extends StatefulWidget {
     required this.hasMore,
     required this.onLoadMore,
     required this.padding,
+    required this.scrollController,
     this.error,
     this.onRetry,
   });
@@ -1206,6 +1247,7 @@ class _RemoteTimeline extends StatefulWidget {
   final List<UnraidFileEntry> gallery;
   final VoidCallback? onRetry;
   final EdgeInsets padding;
+  final ScrollController scrollController;
 
   @override
   State<_RemoteTimeline> createState() => _RemoteTimelineState();
@@ -1214,6 +1256,7 @@ class _RemoteTimeline extends StatefulWidget {
 class _RemoteTimelineState extends State<_RemoteTimeline> {
   List<UnraidFileEntry>? _entriesRef;
   List<_RemoteSection> _sections = const <_RemoteSection>[];
+  String? _currentPath;
 
   List<_RemoteSection> get _groupedSections {
     if (identical(_entriesRef, widget.entries)) {
@@ -1280,11 +1323,7 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
               );
             }
             final section = sections[index];
-            final visible = section.items.length <= _maxAlbumSectionTiles
-                ? section.items
-                : section.items
-                    .take(_maxAlbumSectionTiles)
-                    .toList(growable: false);
+            final visible = _remoteSectionWindow(section.items, _currentPath);
             return Padding(
               padding: EdgeInsets.only(
                 bottom: index == sections.length - 1 ? 0 : 22,
@@ -1302,6 +1341,8 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
                     remoteRoot: widget.remoteRoot,
                     items: visible,
                     gallery: widget.gallery,
+                    currentPath: _currentPath,
+                    onCurrentChanged: _focusEntry,
                   ),
                   if (section.items.length > _maxAlbumSectionTiles) ...[
                     const SizedBox(height: 8),
@@ -1322,6 +1363,37 @@ class _RemoteTimelineState extends State<_RemoteTimeline> {
         ),
       ),
     );
+  }
+
+  void _focusEntry(UnraidFileEntry entry) {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _currentPath = entry.path);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.scrollController.hasClients) {
+        return;
+      }
+      final sections = _groupedSections;
+      final sectionIndex = sections.indexWhere(
+        (section) => section.items.any((item) => item.path == entry.path),
+      );
+      if (sectionIndex < 0) {
+        return;
+      }
+      final visible = _remoteSectionWindow(
+        sections[sectionIndex].items,
+        entry.path,
+      );
+      _scrollAlbumTimelineTo(
+        controller: widget.scrollController,
+        context: context,
+        padding: widget.padding,
+        sectionLengths: [for (final section in sections) section.items.length],
+        sectionIndex: sectionIndex,
+        visibleIndex: visible.indexWhere((item) => item.path == entry.path),
+      );
+    });
   }
 }
 
@@ -1885,10 +1957,14 @@ class _LocalGrid extends StatelessWidget {
   const _LocalGrid({
     required this.items,
     required this.gallery,
+    required this.currentAssetId,
+    required this.onCurrentChanged,
   });
 
   final List<LocalMediaAsset> items;
   final List<LocalMediaAsset> gallery;
+  final String? currentAssetId;
+  final ValueChanged<LocalMediaAsset> onCurrentChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1904,13 +1980,20 @@ class _LocalGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final asset = items[index];
         return RepaintBoundary(
+          key: ValueKey<String>(asset.id),
           child: _LocalTile(
             asset: asset,
-            onTap: () => _openLocalPreview(
-              context,
-              gallery: gallery,
-              asset: asset,
-            ),
+            selected: currentAssetId == asset.id,
+            onTap: () async {
+              final current = await _openLocalPreview(
+                context,
+                gallery: gallery,
+                asset: asset,
+              );
+              if (current != null) {
+                onCurrentChanged(current);
+              }
+            },
           ),
         );
       },
@@ -1924,12 +2007,16 @@ class _RemoteGrid extends StatelessWidget {
     required this.remoteRoot,
     required this.items,
     required this.gallery,
+    required this.currentPath,
+    required this.onCurrentChanged,
   });
 
   final UnraidClient? client;
   final String remoteRoot;
   final List<UnraidFileEntry> items;
   final List<UnraidFileEntry> gallery;
+  final String? currentPath;
+  final ValueChanged<UnraidFileEntry> onCurrentChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1945,16 +2032,23 @@ class _RemoteGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final entry = items[index];
         return RepaintBoundary(
+          key: ValueKey<String>(entry.path),
           child: _RemoteTile(
             client: client,
             remoteRoot: remoteRoot,
             entry: entry,
-            onTap: () => _openRemotePreview(
-              context,
-              client: client,
-              gallery: gallery,
-              entry: entry,
-            ),
+            selected: currentPath == entry.path,
+            onTap: () async {
+              final current = await _openRemotePreview(
+                context,
+                client: client,
+                gallery: gallery,
+                entry: entry,
+              );
+              if (current != null) {
+                onCurrentChanged(current);
+              }
+            },
           ),
         );
       },
@@ -1966,10 +2060,12 @@ class _LocalTile extends StatefulWidget {
   const _LocalTile({
     required this.asset,
     required this.onTap,
+    this.selected = false,
   });
 
   final LocalMediaAsset asset;
   final VoidCallback onTap;
+  final bool selected;
 
   @override
   State<_LocalTile> createState() => _LocalTileState();
@@ -1987,40 +2083,48 @@ class _LocalTileState extends State<_LocalTile> {
       child: InkWell(
         onTap: widget.onTap,
         borderRadius: BorderRadius.circular(8),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              FutureBuilder<Uint8List?>(
-                future: _thumbnailFuture,
-                builder: (context, snapshot) {
-                  final bytes = snapshot.data;
-                  if (bytes == null || bytes.isEmpty) {
-                    return const ColoredBox(
-                      color: AppTheme.inputBackground,
-                      child: Icon(
-                        Icons.image_outlined,
-                        color: AppTheme.textLight,
-                      ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: widget.selected
+                ? Border.all(color: AppTheme.primary, width: 3)
+                : null,
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(widget.selected ? 5 : 8),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                FutureBuilder<Uint8List?>(
+                  future: _thumbnailFuture,
+                  builder: (context, snapshot) {
+                    final bytes = snapshot.data;
+                    if (bytes == null || bytes.isEmpty) {
+                      return const ColoredBox(
+                        color: AppTheme.inputBackground,
+                        child: Icon(
+                          Icons.image_outlined,
+                          color: AppTheme.textLight,
+                        ),
+                      );
+                    }
+                    return Image.memory(
+                      bytes,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                      cacheWidth: _maxAlbumTileDecodeExtent,
+                      cacheHeight: _maxAlbumTileDecodeExtent,
                     );
-                  }
-                  return Image.memory(
-                    bytes,
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                    cacheWidth: _maxAlbumTileDecodeExtent,
-                    cacheHeight: _maxAlbumTileDecodeExtent,
-                  );
-                },
-              ),
-              if (asset.isVideo)
-                const Positioned(
-                  right: 6,
-                  bottom: 6,
-                  child: _MediaBadge(icon: Icons.play_arrow),
+                  },
                 ),
-            ],
+                if (asset.isVideo)
+                  const Positioned(
+                    right: 6,
+                    bottom: 6,
+                    child: _MediaBadge(icon: Icons.play_arrow),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2034,12 +2138,14 @@ class _RemoteTile extends StatefulWidget {
     required this.remoteRoot,
     required this.entry,
     required this.onTap,
+    this.selected = false,
   });
 
   final UnraidClient? client;
   final String remoteRoot;
   final UnraidFileEntry entry;
   final VoidCallback onTap;
+  final bool selected;
 
   @override
   State<_RemoteTile> createState() => _RemoteTileState();
@@ -2140,6 +2246,13 @@ class _RemoteTileState extends State<_RemoteTile> {
 
     return Material(
       color: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: widget.selected
+            ? const BorderSide(color: AppTheme.primary, width: 3)
+            : BorderSide.none,
+      ),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: widget.onTap,
         borderRadius: BorderRadius.circular(8),
@@ -2484,7 +2597,79 @@ class _RemoteSection {
   final List<UnraidFileEntry> items;
 }
 
-Future<void> _openLocalPreview(
+List<LocalMediaAsset> _localSectionWindow(
+  List<LocalMediaAsset> items,
+  String? currentId,
+) {
+  if (items.length <= _maxAlbumSectionTiles) {
+    return items;
+  }
+  final index = items.indexWhere((item) => item.id == currentId);
+  final maxStart = items.length - _maxAlbumSectionTiles;
+  final start =
+      index < 0 ? 0 : (index - (_maxAlbumSectionTiles ~/ 2)).clamp(0, maxStart);
+  return items.sublist(start, start + _maxAlbumSectionTiles);
+}
+
+List<UnraidFileEntry> _remoteSectionWindow(
+  List<UnraidFileEntry> items,
+  String? currentPath,
+) {
+  if (items.length <= _maxAlbumSectionTiles) {
+    return items;
+  }
+  final index = items.indexWhere((item) => item.path == currentPath);
+  final maxStart = items.length - _maxAlbumSectionTiles;
+  final start =
+      index < 0 ? 0 : (index - (_maxAlbumSectionTiles ~/ 2)).clamp(0, maxStart);
+  return items.sublist(start, start + _maxAlbumSectionTiles);
+}
+
+void _scrollAlbumTimelineTo({
+  required ScrollController controller,
+  required BuildContext context,
+  required EdgeInsets padding,
+  required List<int> sectionLengths,
+  required int sectionIndex,
+  required int visibleIndex,
+}) {
+  if (!controller.hasClients || sectionIndex < 0 || visibleIndex < 0) {
+    return;
+  }
+  final contentWidth =
+      (MediaQuery.sizeOf(context).width.clamp(0.0, 900.0) - padding.horizontal)
+          .clamp(0.0, double.infinity);
+  final tileExtent = (contentWidth - 12) / 3;
+  double sectionHeight(int itemCount, {required bool isLast}) {
+    final visibleCount = itemCount.clamp(0, _maxAlbumSectionTiles);
+    final rows = (visibleCount / 3).ceil();
+    final gridHeight = rows == 0 ? 0.0 : rows * tileExtent + (rows - 1) * 6;
+    final overflowHintHeight = itemCount > _maxAlbumSectionTiles ? 22.0 : 0.0;
+    return 24 + 10 + gridHeight + overflowHintHeight + (isLast ? 0 : 22);
+  }
+
+  var sectionTop = padding.top;
+  for (var i = 0; i < sectionIndex; i++) {
+    sectionTop += sectionHeight(
+      sectionLengths[i],
+      isLast: i == sectionLengths.length - 1,
+    );
+  }
+  final row = visibleIndex ~/ 3;
+  final itemCenter =
+      sectionTop + 24 + 10 + row * (tileExtent + 6) + (tileExtent / 2);
+  final position = controller.position;
+  final target = itemCenter - (position.viewportDimension / 2);
+  unawaited(
+    controller.animateTo(
+      target.clamp(0.0, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    ),
+  );
+}
+
+Future<LocalMediaAsset?> _openLocalPreview(
   BuildContext context, {
   required List<LocalMediaAsset> gallery,
   required LocalMediaAsset asset,
@@ -2494,18 +2679,21 @@ Future<void> _openLocalPreview(
   if (index < 0) {
     index = 0;
   }
+  var current = items[index];
   await showDialog<void>(
     context: context,
     builder: (context) => Dialog.fullscreen(
       child: _LocalMediaPreview(
         items: items,
         initialIndex: index,
+        onCurrentChanged: (item) => current = item,
       ),
     ),
   );
+  return current;
 }
 
-Future<void> _openRemotePreview(
+Future<UnraidFileEntry?> _openRemotePreview(
   BuildContext context, {
   required UnraidClient? client,
   required List<UnraidFileEntry> gallery,
@@ -2515,13 +2703,14 @@ Future<void> _openRemotePreview(
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('缺少服务器连接')),
     );
-    return;
+    return null;
   }
   final items = gallery.isEmpty ? <UnraidFileEntry>[entry] : gallery;
   var index = items.indexWhere((item) => item.path == entry.path);
   if (index < 0) {
     index = 0;
   }
+  var current = items[index];
   await showDialog<void>(
     context: context,
     builder: (context) => Dialog.fullscreen(
@@ -2529,19 +2718,23 @@ Future<void> _openRemotePreview(
         client: client,
         items: items,
         initialIndex: index,
+        onCurrentChanged: (item) => current = item,
       ),
     ),
   );
+  return current;
 }
 
 class _LocalMediaPreview extends StatefulWidget {
   const _LocalMediaPreview({
     required this.items,
     required this.initialIndex,
+    this.onCurrentChanged,
   });
 
   final List<LocalMediaAsset> items;
   final int initialIndex;
+  final ValueChanged<LocalMediaAsset>? onCurrentChanged;
 
   @override
   State<_LocalMediaPreview> createState() => _LocalMediaPreviewState();
@@ -2556,6 +2749,7 @@ class _LocalMediaPreviewState extends State<_LocalMediaPreview> {
     super.initState();
     _index = widget.initialIndex.clamp(0, widget.items.length - 1);
     _controller = PageController(initialPage: _index);
+    widget.onCurrentChanged?.call(widget.items[_index]);
   }
 
   @override
@@ -2600,7 +2794,10 @@ class _LocalMediaPreviewState extends State<_LocalMediaPreview> {
                 controller: _controller,
                 itemCount: widget.items.length,
                 allowImplicitScrolling: false,
-                onPageChanged: (value) => setState(() => _index = value),
+                onPageChanged: (value) {
+                  setState(() => _index = value);
+                  widget.onCurrentChanged?.call(widget.items[value]);
+                },
                 itemBuilder: (context, index) {
                   final distance = (index - _index).abs();
                   final item = widget.items[index];
@@ -2630,11 +2827,13 @@ class _RemoteMediaPreview extends StatefulWidget {
     required this.client,
     required this.items,
     required this.initialIndex,
+    this.onCurrentChanged,
   });
 
   final UnraidClient client;
   final List<UnraidFileEntry> items;
   final int initialIndex;
+  final ValueChanged<UnraidFileEntry>? onCurrentChanged;
 
   @override
   State<_RemoteMediaPreview> createState() => _RemoteMediaPreviewState();
@@ -2649,6 +2848,7 @@ class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
     super.initState();
     _index = widget.initialIndex.clamp(0, widget.items.length - 1);
     _controller = PageController(initialPage: _index);
+    widget.onCurrentChanged?.call(widget.items[_index]);
   }
 
   @override
@@ -2693,7 +2893,10 @@ class _RemoteMediaPreviewState extends State<_RemoteMediaPreview> {
                 controller: _controller,
                 itemCount: widget.items.length,
                 allowImplicitScrolling: false,
-                onPageChanged: (value) => setState(() => _index = value),
+                onPageChanged: (value) {
+                  setState(() => _index = value);
+                  widget.onCurrentChanged?.call(widget.items[value]);
+                },
                 itemBuilder: (context, index) {
                   final distance = (index - _index).abs();
                   final item = widget.items[index];
@@ -3422,6 +3625,8 @@ class _VideoPlayerScaffold extends StatelessWidget {
                       child: VideoPlaybackControls(
                         controller: controller,
                         value: value,
+                        onFullscreen: () =>
+                            unawaited(openVideoFullscreen(context, controller)),
                       ),
                     );
                   },

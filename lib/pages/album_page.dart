@@ -212,6 +212,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
 
   /// Bumped when a lazy album tab is first visited.
   final ValueNotifier<int> _visitedTabsVersion = ValueNotifier<int>(0);
+  final ScrollController _localTimelineController = ScrollController();
+  final ScrollController _remoteTimelineController = ScrollController();
   bool _loadingAll = false;
   int _loadGeneration = 0;
 
@@ -318,6 +320,8 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
     }
     _tab.dispose();
     _visitedTabsVersion.dispose();
+    _localTimelineController.dispose();
+    _remoteTimelineController.dispose();
     _localState.dispose();
     _remoteState.dispose();
     _syncProgress.dispose();
@@ -1527,6 +1531,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             return RefreshIndicator(
               onRefresh: () => _loadAll(runAutoSync: false),
               child: CustomScrollView(
+                controller: _localTimelineController,
                 physics: const AlwaysScrollableScrollPhysics(),
                 slivers: [
                   if (localState.error != null)
@@ -1549,6 +1554,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                       gallery: local,
                       videosOnly: widget.videosOnly,
                       padding: padding,
+                      scrollController: _localTimelineController,
                     ),
                 ],
               ),
@@ -1561,6 +1567,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
             return RefreshIndicator(
               onRefresh: _reloadRemote,
               child: CustomScrollView(
+                controller: _remoteTimelineController,
                 physics: const AlwaysScrollableScrollPhysics(),
                 slivers: [
                   _RemoteTimeline(
@@ -1574,6 +1581,7 @@ class _PhoAlbumShellState extends State<_PhoAlbumShell> {
                     gallery: _remoteMedia,
                     onRetry: _reloadRemote,
                     padding: padding,
+                    scrollController: _remoteTimelineController,
                   ),
                 ],
               ),

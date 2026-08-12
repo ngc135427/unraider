@@ -7,6 +7,7 @@ void main() {
   testWidgets('video controls fit a narrow preview and show playback actions', (
     tester,
   ) async {
+    var fullscreenTapped = false;
     final controller = VideoPlayerController.networkUrl(
       Uri.parse('https://example.com/video.mp4'),
     );
@@ -30,6 +31,7 @@ void main() {
               child: VideoPlaybackControls(
                 controller: controller,
                 value: value,
+                onFullscreen: () => fullscreenTapped = true,
               ),
             ),
           ),
@@ -42,6 +44,9 @@ void main() {
     expect(find.byIcon(Icons.forward_10), findsOneWidget);
     expect(find.text('01:02 / 10:00'), findsOneWidget);
     expect(find.text('1.25x'), findsOneWidget);
+    expect(find.byIcon(Icons.fullscreen), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.fullscreen));
+    expect(fullscreenTapped, isTrue);
     expect(tester.takeException(), isNull);
   });
 }

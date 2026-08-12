@@ -105,6 +105,7 @@ class _FileEntryTile extends StatelessWidget {
     required this.subtitle,
     required this.onTap,
     this.onLongPress,
+    this.selected = false,
   });
 
   final IconData icon;
@@ -112,6 +113,7 @@ class _FileEntryTile extends StatelessWidget {
   final String subtitle;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -125,9 +127,15 @@ class _FileEntryTile extends StatelessWidget {
           margin: const EdgeInsets.only(bottom: 10),
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: AppTheme.background,
+            color: selected
+                ? AppTheme.primary.withValues(alpha: 0.08)
+                : AppTheme.background,
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: AppTheme.softLine),
+            border: Border.all(
+              color: selected
+                  ? AppTheme.primary.withValues(alpha: 0.35)
+                  : AppTheme.softLine,
+            ),
           ),
           child: Row(
             children: [
@@ -646,11 +654,13 @@ class _ShareVideoPreview extends StatefulWidget {
     required this.client,
     required this.entries,
     required this.initialIndex,
+    this.onCurrentChanged,
   });
 
   final UnraidClient client;
   final List<UnraidFileEntry> entries;
   final int initialIndex;
+  final ValueChanged<UnraidFileEntry>? onCurrentChanged;
 
   @override
   State<_ShareVideoPreview> createState() => _ShareVideoPreviewState();
@@ -666,6 +676,7 @@ class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
     _index = widget.initialIndex < 0 ? 0 : widget.initialIndex;
     _index = _index.clamp(0, widget.entries.length - 1);
     _controller = PageController(initialPage: _index);
+    widget.onCurrentChanged?.call(widget.entries[_index]);
   }
 
   @override
@@ -739,7 +750,10 @@ class _ShareVideoPreviewState extends State<_ShareVideoPreview> {
                 controller: _controller,
                 itemCount: widget.entries.length,
                 allowImplicitScrolling: false,
-                onPageChanged: (value) => setState(() => _index = value),
+                onPageChanged: (value) {
+                  setState(() => _index = value);
+                  widget.onCurrentChanged?.call(widget.entries[value]);
+                },
                 itemBuilder: (context, index) {
                   final item = widget.entries[index];
                   return _ShareVideoPreviewPage(
@@ -1014,6 +1028,8 @@ class _ShareVideoPlayer extends StatelessWidget {
                       return VideoPlaybackControls(
                         controller: controller,
                         value: value,
+                        onFullscreen: () =>
+                            unawaited(openVideoFullscreen(context, controller)),
                       );
                     },
                   ),
